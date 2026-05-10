@@ -2,6 +2,7 @@ import { Effect } from "effect";
 import type {
   EffectSourceContext,
   IdValue,
+  KafkaConsumerRecord,
   KafkaSourceConfig,
   KafkaSourceMessage,
   RowObject,
@@ -21,21 +22,26 @@ export function runKafkaSource<TRow extends RowObject, TId extends keyof TRow & 
   readonly consumer: KafkaTopicConsumer;
   readonly runtime: KafkaSourceRuntime<TRow, TId>;
 }): Effect.Effect<void, ViewServerError> {
-  const commitPolicy = args.source.commitPolicy ?? "after-ingest";
-  return args.consumer.run({
-    topic: args.source.topic,
-    groupId: args.source.groupId,
-    commitPolicy,
-    onBatch: (batch) =>
-      ingestKafkaBatch({
-        viewTopic: args.viewTopic,
-        idField: args.idField,
-        source: args.source,
-        runtime: args.runtime,
-        batch,
-        commitPolicy,
-      }),
-  });
+  return Effect.fn("view-server.kafka.source.run")(function* () {
+    yield* Effect.annotateCurrentSpan({
+      "view_server.topic": args.viewTopic,
+    });
+    const commitPolicy = args.source.commitPolicy ?? "after-ingest";
+    yield* args.consumer.run({
+      topic: args.source.topic,
+      groupId: args.source.groupId,
+      commitPolicy,
+      onBatch: (batch) =>
+        ingestKafkaBatch({
+          viewTopic: args.viewTopic,
+          idField: args.idField,
+          source: args.source,
+          runtime: args.runtime,
+          batch,
+          commitPolicy,
+        }),
+    });
+  })();
 }
 
 export function ingestKafkaBatch<TRow extends RowObject, TId extends keyof TRow & string>(args: {
@@ -46,18 +52,48 @@ export function ingestKafkaBatch<TRow extends RowObject, TId extends keyof TRow 
   readonly batch: KafkaRecordBatch;
   readonly commitPolicy: "after-ingest" | "none";
 }): Effect.Effect<void, ViewServerError> {
-  return Effect.forEach(
-    args.batch.records,
-    (record) =>
-      args.source
-        .decode(record)
-        .pipe(
-          Effect.flatMap((message) =>
-            applyKafkaSourceMessage(args.viewTopic, args.idField, args.runtime, message),
+  return Effect.fn("view-server.kafka.batch.ingest")(function* () {
+    const lastRecord = args.batch.records[args.batch.records.length - 1];
+    const lag = args.batch.lag ?? kafkaRecordLag(lastRecord);
+    yield* Effect.annotateCurrentSpan({
+      "view_server.topic": args.viewTopic,
+      "view_server.batch_size": args.batch.records.length,
+      ...(lag === undefined ? {} : { "view_server.kafka.lag": lag }),
+      ...(lastRecord === undefined
+        ? {}
+        : {
+            "view_server.kafka.partition": lastRecord.partition,
+            "view_server.kafka.offset": lastRecord.offset,
+          }),
+    });
+    yield* Effect.forEach(
+      args.batch.records,
+      (record) =>
+        args.source
+          .decode(record)
+          .pipe(
+            Effect.flatMap((message) =>
+              applyKafkaSourceMessage(args.viewTopic, args.idField, args.runtime, message),
+            ),
           ),
-        ),
-    { discard: true },
-  ).pipe(Effect.andThen(args.commitPolicy === "after-ingest" ? args.batch.commit : Effect.void));
+      { discard: true },
+    );
+    if (args.commitPolicy === "after-ingest") {
+      yield* args.batch.commit;
+    }
+  })();
+}
+
+export function kafkaRecordLag(record: KafkaConsumerRecord | undefined): number | undefined {
+  if (record === undefined) {
+    return undefined;
+  }
+  const endOffset = parseKafkaOffset(record.highWatermark ?? record.endOffset);
+  const offset = parseKafkaOffset(record.offset);
+  if (endOffset === undefined || offset === undefined) {
+    return undefined;
+  }
+  return spanSafeNumber(endOffset - offset - 1n);
 }
 
 export function applyKafkaSourceMessage<TRow extends RowObject, TId extends keyof TRow & string>(
@@ -81,6 +117,30 @@ export function applyKafkaSourceMessage<TRow extends RowObject, TId extends keyo
     );
   }
   return runtime.publish(message);
+}
+
+function parseKafkaOffset(offset: string | number | undefined): bigint | undefined {
+  if (offset === undefined) {
+    return undefined;
+  }
+  if (typeof offset === "number") {
+    return Number.isSafeInteger(offset) ? BigInt(offset) : undefined;
+  }
+  try {
+    return BigInt(offset);
+  } catch {
+    return undefined;
+  }
+}
+
+function spanSafeNumber(value: bigint): number {
+  if (value <= 0n) {
+    return 0;
+  }
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  return Number(value);
 }
 
 function isPublishEnvelope<TRow extends RowObject, TId extends keyof TRow & string>(

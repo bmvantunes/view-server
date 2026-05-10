@@ -4,7 +4,16 @@ import react from "@vitejs/plugin-react";
 export default {
   plugins: [react()],
   optimizeDeps: {
-    include: ["effect/unstable/http"],
+    force: true,
+    include: [
+      "@effect/platform-browser",
+      "effect/unstable/http",
+      "effect/unstable/rpc",
+      "effect/unstable/rpc/RpcClient",
+      "effect/unstable/rpc/RpcSerialization",
+      "effect/unstable/rpc/RpcServer",
+    ],
+    exclude: ["@view-server/core", "@view-server/react"],
   },
   resolve: {
     alias: {

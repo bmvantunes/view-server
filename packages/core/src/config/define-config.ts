@@ -171,7 +171,7 @@ export type TopicConfigByName<
 export type TopicRowFromConfig<
   TConfig extends ViewServerConfig,
   TTopic extends TopicName<TConfig>,
-> = TopicConfigByName<TConfig, TTopic>["schema"] extends Schema.Schema<infer TRow> ? TRow : never;
+> = TopicConfigByName<TConfig, TTopic> extends TopicConfig<infer TRow, infer _TId> ? TRow : never;
 export type ReadableTopicRowFromConfig<
   TConfig extends ViewServerConfig,
   TTopic extends ReadableTopicName<TConfig>,
@@ -208,7 +208,7 @@ export function defineConfig<const TConfig extends ViewServerConfig>(config: TCo
   return config;
 }
 
-const ViewServerHealthRowSchema = Schema.Struct({
+export const ViewServerHealthRowSchema = Schema.Struct({
   id: Schema.String,
   kind: Schema.Literals(["server", "topic"]),
   topic: Schema.optional(Schema.String),

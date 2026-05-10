@@ -1,13 +1,16 @@
 import { describe, expect, it } from "@effect/vitest";
-import { BigDecimal, Effect, Queue, Schema, Stream } from "effect";
+import { BigDecimal, Deferred, Effect, Queue, Schema, Stream } from "effect";
 import { defineConfig } from "../src/config/index.ts";
+import type { ViewServerError } from "../src/errors.ts";
 import type { RuntimeQuery, RuntimeRow } from "../src/protocol/index.ts";
 import {
   createChdbSnapshotBackend,
   createChdbSnapshotBackendFactory,
 } from "../src/snapshot/chdb-backend.ts";
+import type { SnapshotBackend } from "../src/snapshot/index.ts";
 import { makeViewServerRuntime } from "../src/server/index.ts";
 import { makeTopicWorkerCore } from "../src/worker/index.ts";
+import type { MutationLogEntry, WorkerVersion } from "../src/worker/mutation-log.ts";
 
 const Order = Schema.Struct({
   id: Schema.String,
@@ -101,6 +104,22 @@ const decimalQuery = {
     value: BigDecimal.fromStringUnsafe("10.000000000000000001"),
   },
   orderBy: [{ field: "price", direction: "asc" }],
+  limit: 5,
+} satisfies RuntimeQuery;
+
+const decimalGroupedQuery = {
+  groupBy: ["symbol"],
+  aggregates: {
+    totalPrice: {
+      aggFunc: "sum",
+      field: "price",
+    },
+    maxPrice: {
+      aggFunc: "max",
+      field: "price",
+    },
+  },
+  orderBy: [{ field: "symbol", direction: "asc" }],
   limit: 5,
 } satisfies RuntimeQuery;
 
@@ -309,6 +328,182 @@ describe("chDB snapshot backend", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("only advances backendVersion through contiguous mutation versions", () =>
+    Effect.gen(function* () {
+      const backend = createChdbSnapshotBackend();
+      yield* Effect.addFinalizer(() => backend.close());
+      yield* backend.init({
+        topic: "orders",
+        idField: "id",
+        version: 0n,
+        rows: [],
+      });
+
+      yield* backend.applyBatch({
+        highestVersion: 2n,
+        mutations: [
+          {
+            version: 2n,
+            kind: "update",
+            id: "o-1",
+            before: { id: "o-1", symbol: "AAPL", price: 100 },
+            after: { id: "o-1", symbol: "AAPL", price: 125 },
+            changedFields: new Set(["price"]),
+          },
+        ],
+      });
+      yield* flushChdb();
+
+      const gapResult = yield* backend.snapshot({
+        query: allOrdersQuery,
+        targetVersion: 2n,
+      });
+      expect(gapResult.backendVersion).toBe(0n);
+      expect(gapResult.rows).toEqual([]);
+
+      yield* backend.applyBatch({
+        highestVersion: 1n,
+        mutations: [
+          {
+            version: 1n,
+            kind: "insert",
+            id: "o-1",
+            after: { id: "o-1", symbol: "AAPL", price: 100 },
+            changedFields: new Set(["id", "symbol", "price"]),
+          },
+        ],
+      });
+      yield* flushChdb();
+
+      const repairedResult = yield* backend.snapshot({
+        query: allOrdersQuery,
+        targetVersion: 2n,
+      });
+      expect(repairedResult.backendVersion).toBe(2n);
+      expect(repairedResult.rows).toEqual([{ id: "o-1", symbol: "AAPL", price: 125 }]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("buffers later contiguous gaps without claiming the highest seen version", () =>
+    Effect.gen(function* () {
+      const backend = createChdbSnapshotBackend();
+      yield* Effect.addFinalizer(() => backend.close());
+      yield* backend.init({
+        topic: "orders",
+        idField: "id",
+        version: 0n,
+        rows: [],
+      });
+
+      yield* backend.applyBatch({
+        highestVersion: 3n,
+        mutations: [
+          {
+            version: 1n,
+            kind: "insert",
+            id: "o-1",
+            after: { id: "o-1", symbol: "AAPL", price: 100 },
+            changedFields: new Set(["id", "symbol", "price"]),
+          },
+          {
+            version: 3n,
+            kind: "insert",
+            id: "o-3",
+            after: { id: "o-3", symbol: "NVDA", price: 300 },
+            changedFields: new Set(["id", "symbol", "price"]),
+          },
+        ],
+      });
+      yield* flushChdb();
+
+      const gapResult = yield* backend.snapshot({
+        query: allOrdersQuery,
+        targetVersion: 3n,
+      });
+      expect(gapResult.backendVersion).toBe(1n);
+      expect(gapResult.rows).toEqual([{ id: "o-1", symbol: "AAPL", price: 100 }]);
+
+      yield* backend.applyBatch({
+        highestVersion: 2n,
+        mutations: [
+          {
+            version: 2n,
+            kind: "insert",
+            id: "o-2",
+            after: { id: "o-2", symbol: "MSFT", price: 200 },
+            changedFields: new Set(["id", "symbol", "price"]),
+          },
+        ],
+      });
+      yield* flushChdb();
+
+      const repairedResult = yield* backend.snapshot({
+        query: allOrdersQuery,
+        targetVersion: 3n,
+      });
+      expect(repairedResult.backendVersion).toBe(3n);
+      expect(repairedResult.rows).toEqual([
+        { id: "o-1", symbol: "AAPL", price: 100 },
+        { id: "o-2", symbol: "MSFT", price: 200 },
+        { id: "o-3", symbol: "NVDA", price: 300 },
+      ]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("ignores duplicate mutation versions after they are already contiguous", () =>
+    Effect.gen(function* () {
+      const backend = createChdbSnapshotBackend();
+      yield* Effect.addFinalizer(() => backend.close());
+      yield* backend.init({
+        topic: "orders",
+        idField: "id",
+        version: 0n,
+        rows: [],
+      });
+
+      yield* backend.applyBatch({
+        highestVersion: 2n,
+        mutations: [
+          {
+            version: 1n,
+            kind: "insert",
+            id: "o-1",
+            after: { id: "o-1", symbol: "AAPL", price: 100 },
+            changedFields: new Set(["id", "symbol", "price"]),
+          },
+          {
+            version: 2n,
+            kind: "update",
+            id: "o-1",
+            before: { id: "o-1", symbol: "AAPL", price: 100 },
+            after: { id: "o-1", symbol: "AAPL", price: 125 },
+            changedFields: new Set(["price"]),
+          },
+        ],
+      });
+      yield* flushChdb();
+
+      yield* backend.applyBatch({
+        highestVersion: 2n,
+        mutations: [
+          {
+            version: 2n,
+            kind: "update",
+            id: "o-1",
+            before: { id: "o-1", symbol: "AAPL", price: 100 },
+            after: { id: "o-1", symbol: "AAPL", price: 125 },
+            changedFields: new Set(["price"]),
+          },
+        ],
+      });
+      yield* flushChdb();
+
+      const result = yield* backend.snapshot({ query: allOrdersQuery, targetVersion: 2n });
+      expect(result.backendVersion).toBe(2n);
+      expect(result.rows).toEqual([{ id: "o-1", symbol: "AAPL", price: 125 }]);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("preserves BigDecimal values in chDB snapshots", () =>
     Effect.gen(function* () {
       const backend = createChdbSnapshotBackend();
@@ -330,6 +525,39 @@ describe("chDB snapshot backend", () => {
       expect(result.rows).toHaveLength(1);
       expect(result.rows[0]?.id).toBe("exact");
       expect(BigDecimal.equals(expectBigDecimal(result.rows[0]?.price), exact)).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("preserves BigDecimal aggregate values in chDB grouped snapshots", () =>
+    Effect.gen(function* () {
+      const backend = createChdbSnapshotBackend();
+      yield* Effect.addFinalizer(() => backend.close());
+      yield* backend.init({
+        topic: "orders",
+        idField: "id",
+        version: 2n,
+        rows: versionedRows([
+          { id: "a", symbol: "AAPL", price: BigDecimal.fromStringUnsafe("1.1") },
+          { id: "b", symbol: "AAPL", price: BigDecimal.fromStringUnsafe("2.2") },
+        ]),
+      });
+
+      const result = yield* backend.snapshot({ query: decimalGroupedQuery, targetVersion: 2n });
+
+      expect(result.totalRows).toBe(1);
+      expect(result.rows[0]?.symbol).toBe("AAPL");
+      expect(
+        BigDecimal.equals(
+          expectBigDecimal(result.rows[0]?.totalPrice),
+          BigDecimal.fromStringUnsafe("3.3"),
+        ),
+      ).toBe(true);
+      expect(
+        BigDecimal.equals(
+          expectBigDecimal(result.rows[0]?.maxPrice),
+          BigDecimal.fromStringUnsafe("2.2"),
+        ),
+      ).toBe(true);
     }).pipe(Effect.scoped),
   );
 
@@ -361,6 +589,59 @@ describe("chDB snapshot backend", () => {
       expect(snapshot.meta.totalRows).toBe(1);
       expect(snapshot.rows).toEqual([]);
     }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "falls back to memory when chDB has seen a future mutation without a contiguous fence",
+    () =>
+      Effect.gen(function* () {
+        const held = yield* Deferred.make<void>();
+        const forwarded = yield* Deferred.make<void>();
+        const controlled = holdVersionChdbBackend(1n, held, forwarded);
+        const worker = yield* makeTopicWorkerCore(
+          "orders",
+          {
+            id: "id",
+            schema: Order,
+          },
+          { snapshotBackend: controlled.backend },
+        );
+
+        yield* worker.publish({ id: "o-1", symbol: "AAPL", price: 100 });
+        yield* worker.publish({ id: "o-2", symbol: "MSFT", price: 200 });
+        yield* Deferred.await(held).pipe(Effect.timeout("1 second"));
+        yield* Deferred.await(forwarded).pipe(Effect.timeout("1 second"));
+        yield* flushChdb();
+
+        const [fallbackSnapshot] = yield* worker
+          .subscribe("chdb-gap-worker-sub", allOrdersQuery)
+          .pipe(Stream.take(1), Stream.runCollect);
+        if (fallbackSnapshot?.type !== "snapshot") {
+          throw new Error("Expected snapshot");
+        }
+        expect(fallbackSnapshot.meta.version).toBe("2");
+        expect(fallbackSnapshot.meta.backendVersion).toBeUndefined();
+        expect(fallbackSnapshot.rows).toEqual([
+          { id: "o-1", symbol: "AAPL", price: 100 },
+          { id: "o-2", symbol: "MSFT", price: 200 },
+        ]);
+
+        yield* controlled.release;
+        yield* flushChdb();
+
+        const [chdbSnapshot] = yield* worker
+          .subscribe("chdb-repaired-worker-sub", allOrdersQuery)
+          .pipe(Stream.take(1), Stream.runCollect);
+        if (chdbSnapshot?.type !== "snapshot") {
+          throw new Error("Expected snapshot");
+        }
+        expect(chdbSnapshot.meta.version).toBe("2");
+        expect(chdbSnapshot.meta.backendVersion).toBe("2");
+        expect(chdbSnapshot.rows).toEqual([
+          { id: "o-1", symbol: "AAPL", price: 100 },
+          { id: "o-2", symbol: "MSFT", price: 200 },
+        ]);
+      }).pipe(Effect.scoped),
   );
 
   it.effect("honors snapshot.backend chdb through the runtime backend factory", () =>
@@ -430,4 +711,46 @@ function expectBigDecimal(value: unknown): BigDecimal.BigDecimal {
     return value;
   }
   throw new Error(`Expected BigDecimal, got ${String(value)}`);
+}
+
+function holdVersionChdbBackend(
+  versionToHold: WorkerVersion,
+  held: Deferred.Deferred<void>,
+  forwarded: Deferred.Deferred<void>,
+): {
+  readonly backend: SnapshotBackend;
+  readonly release: Effect.Effect<void, ViewServerError>;
+} {
+  const backend = createChdbSnapshotBackend();
+  let heldBatch:
+    | {
+        readonly mutations: readonly MutationLogEntry[];
+        readonly highestVersion: WorkerVersion;
+      }
+    | undefined;
+  return {
+    backend: {
+      init: (args) => backend.init(args),
+      snapshot: (args) => backend.snapshot(args),
+      close: () => backend.close(),
+      applyBatch: (args): Effect.Effect<void, ViewServerError> => {
+        if (args.mutations.some((mutation) => mutation.version === versionToHold)) {
+          heldBatch = args;
+          return Deferred.succeed(held, undefined).pipe(Effect.asVoid);
+        }
+        return Effect.gen(function* () {
+          yield* backend.applyBatch(args);
+          yield* Deferred.succeed(forwarded, undefined);
+        });
+      },
+    },
+    release: Effect.gen(function* () {
+      if (heldBatch === undefined) {
+        return;
+      }
+      const batch = heldBatch;
+      heldBatch = undefined;
+      yield* backend.applyBatch(batch);
+    }),
+  };
 }

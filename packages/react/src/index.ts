@@ -4,13 +4,13 @@ import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import {
   createViewServerClient,
-  rowKeyForQuery,
+  queryResultToRuntimeRows,
+  rowKeyForTypedQuery,
+  runtimeRowsToQueryResult,
   SubscriptionStore,
   type InferReadableQueryResult,
   type QueryForReadableTopic,
   type ReadableTopicName,
-  type RuntimeQuery,
-  type RuntimeRow,
   transportError,
   type ViewServerClient,
   type ViewServerConfig,
@@ -52,19 +52,19 @@ export const layerBrowserWebsocketRpcClient = (url: string) =>
 
 export function makeBrowserWebsocketClient<TConfig extends ViewServerConfig>(
   url: string,
-  config?: TConfig,
+  config: TConfig,
 ): Effect.Effect<ViewServerClient<TConfig>, never, Scope.Scope> {
-  return Effect.gen(function* () {
+  return Effect.fn("view-server.react.websocket.browser_client")(function* () {
     const scope = yield* Effect.scope;
     const context = yield* Layer.buildWithScope(layerBrowserWebsocketRpcClient(url), scope);
     const rpcClient = yield* RpcClient.make(ViewServerRpcs).pipe(Effect.provide(context));
     return createViewServerClient<TConfig>(rpcClient, config);
-  });
+  })();
 }
 
 export function createViewServerHooks<TConfig extends ViewServerConfig>(
   client: ViewServerClient<TConfig>,
-  config?: TConfig,
+  config: TConfig,
 ): ViewServerHooks<TConfig> {
   return {
     useSubscription(topic, query, initialData) {
@@ -80,130 +80,126 @@ type ViewServerContextValue<TConfig extends ViewServerConfig = ViewServerConfig>
   readonly error?: unknown;
 };
 
-const ViewServerContext = createContext<ViewServerContextValue | undefined>(undefined);
+export function createViewServerReact<const TConfig extends ViewServerConfig>(config: TConfig) {
+  const ViewServerContext = createContext<ViewServerContextValue<TConfig> | undefined>(undefined);
 
-export function ViewServerProvider<TConfig extends ViewServerConfig>(props: {
-  readonly url: string;
-  readonly config: TConfig;
-  readonly children: ReactNode;
-}) {
-  const [state, setState] = useState<ViewServerContextValue<TConfig>>({
-    status: "connecting",
-    config: props.config,
-  });
+  function ViewServerProvider(props: { readonly url: string; readonly children: ReactNode }) {
+    const [state, setState] = useState<ViewServerContextValue<TConfig>>({
+      status: "connecting",
+      config,
+    });
 
-  useEffect(() => {
-    let disposed = false;
-    let scope: Scope.Closeable | undefined;
-    setState({ status: "connecting", config: props.config });
+    useEffect(() => {
+      let disposed = false;
+      let scope: Scope.Closeable | undefined;
+      setState({ status: "connecting", config });
 
-    Effect.runPromise(
-      Effect.gen(function* () {
-        scope = yield* Scope.make();
-        return yield* Scope.provide(scope)(
-          makeBrowserWebsocketClient<TConfig>(props.url, props.config),
-        );
+      Effect.runPromise(
+        Effect.fn("view-server.react.provider.connect")(function* () {
+          scope = yield* Scope.make();
+          return yield* Scope.provide(scope)(
+            makeBrowserWebsocketClient<TConfig>(props.url, config),
+          );
+        })(),
+      ).then(
+        (client) => {
+          if (!disposed) {
+            setState({ status: "ready", config, client });
+          }
+        },
+        (error: unknown) => {
+          if (!disposed) {
+            setState({ status: "error", config, error });
+          }
+        },
+      );
+
+      return () => {
+        disposed = true;
+        if (scope !== undefined) {
+          void Effect.runPromise(Scope.close(scope, Exit.void));
+        }
+      };
+    }, [props.url]);
+
+    return createElement(ViewServerContext.Provider, { value: state }, props.children);
+  }
+
+  function ViewServerClientProvider(props: {
+    readonly client: ViewServerClient<TConfig>;
+    readonly children: ReactNode;
+  }) {
+    const value = useMemo<ViewServerContextValue<TConfig>>(
+      () => ({
+        status: "ready",
+        config,
+        client: props.client,
       }),
-    ).then(
-      (client) => {
-        if (!disposed) {
-          setState({ status: "ready", config: props.config, client });
-        }
-      },
-      (error: unknown) => {
-        if (!disposed) {
-          setState({ status: "error", config: props.config, error });
-        }
-      },
+      [props.client],
     );
-
-    return () => {
-      disposed = true;
-      if (scope !== undefined) {
-        void Effect.runPromise(Scope.close(scope, Exit.void));
-      }
-    };
-  }, [props.config, props.url]);
-
-  return createElement(
-    ViewServerContext.Provider,
-    { value: state as ViewServerContextValue },
-    props.children,
-  );
-}
-
-export function ViewServerClientProvider<TConfig extends ViewServerConfig>(props: {
-  readonly client: ViewServerClient<TConfig>;
-  readonly config: TConfig;
-  readonly children: ReactNode;
-}) {
-  const value = useMemo<ViewServerContextValue<TConfig>>(
-    () => ({
-      status: "ready",
-      config: props.config,
-      client: props.client,
-    }),
-    [props.client, props.config],
-  );
-  return createElement(
-    ViewServerContext.Provider,
-    { value: value as ViewServerContextValue },
-    props.children,
-  );
-}
-
-export function useViewServerClient<TConfig extends ViewServerConfig>(): ViewServerClient<TConfig> {
-  const context = useContext(ViewServerContext);
-  if (context === undefined) {
-    throw new Error("ViewServerProvider is missing");
+    return createElement(ViewServerContext.Provider, { value }, props.children);
   }
-  if (context.client === undefined) {
-    throw context.error ?? new Error("ViewServer client is not ready");
-  }
-  return context.client as ViewServerClient<TConfig>;
-}
 
-export function useViewServerHooks<TConfig extends ViewServerConfig>(): ViewServerHooks<TConfig> {
-  const context = useContext(ViewServerContext);
-  if (context === undefined) {
-    throw new Error("ViewServerProvider is missing");
+  function useViewServerContext(): ViewServerContextValue<TConfig> {
+    const context = useContext(ViewServerContext);
+    if (context === undefined) {
+      throw new Error("ViewServerProvider is missing");
+    }
+    return context;
   }
-  return useMemo(
-    () => ({
-      useSubscription(topic, query, initialData) {
-        return useSubscriptionWithClient(
-          context.client as ViewServerClient<TConfig> | undefined,
-          context.config as TConfig,
-          topic,
-          query,
-          initialData,
-          context.status,
-          context.error,
-        );
-      },
-    }),
-    [context],
-  );
-}
 
-export function useSubscription<
-  TConfig extends ViewServerConfig,
-  TTopic extends ReadableTopicName<TConfig>,
-  TQuery extends QueryForReadableTopic<TConfig, TTopic>,
->(topic: TTopic, query: TQuery, initialData?: InferReadableQueryResult<TConfig, TTopic, TQuery>) {
-  const context = useContext(ViewServerContext);
-  if (context === undefined) {
-    throw new Error("ViewServerProvider is missing");
+  function useViewServerClient(): ViewServerClient<TConfig> {
+    const context = useViewServerContext();
+    if (context.client === undefined) {
+      throw context.error ?? new Error("ViewServer client is not ready");
+    }
+    return context.client;
   }
-  return useSubscriptionWithClient(
-    context.client as ViewServerClient<TConfig> | undefined,
-    context.config as TConfig,
-    topic,
-    query,
-    initialData,
-    context.status,
-    context.error,
-  );
+
+  function useViewServerHooks(): ViewServerHooks<TConfig> {
+    const context = useViewServerContext();
+    return useMemo(
+      () => ({
+        useSubscription(topic, query, initialData) {
+          return useSubscriptionWithClient(
+            context.client,
+            config,
+            topic,
+            query,
+            initialData,
+            context.status,
+            context.error,
+          );
+        },
+      }),
+      [context],
+    );
+  }
+
+  function useSubscription<
+    TTopic extends ReadableTopicName<TConfig>,
+    TQuery extends QueryForReadableTopic<TConfig, TTopic>,
+  >(topic: TTopic, query: TQuery, initialData?: InferReadableQueryResult<TConfig, TTopic, TQuery>) {
+    const context = useViewServerContext();
+    return useSubscriptionWithClient(
+      context.client,
+      config,
+      topic,
+      query,
+      initialData,
+      context.status,
+      context.error,
+    );
+  }
+
+  return {
+    ViewServerProvider,
+    ViewServerClientProvider,
+    useViewServerClient,
+    useViewServerHooks,
+    useSubscription,
+    createHooks: (client: ViewServerClient<TConfig>) => createViewServerHooks(client, config),
+  };
 }
 
 function useSubscriptionWithClient<
@@ -212,19 +208,22 @@ function useSubscriptionWithClient<
   TQuery extends QueryForReadableTopic<TConfig, TTopic>,
 >(
   client: ViewServerClient<TConfig> | undefined,
-  config: TConfig | undefined,
+  config: TConfig,
   topic: TTopic,
   query: TQuery,
   initialData?: InferReadableQueryResult<TConfig, TTopic, TQuery>,
   connectionStatus: "connecting" | "ready" | "error" = "ready",
   connectionError?: unknown,
 ) {
+  if (query === undefined) {
+    throw new Error(`useSubscription query is missing for topic ${String(topic)}`);
+  }
   const rowKey = useMemo(
-    () => rowKeyForQuery(query as RuntimeQuery, idFieldForTopic(config, topic)),
+    () => rowKeyForTypedQuery<TConfig, TTopic, TQuery>(query, idFieldForTopic(config, topic)),
     [config, query, topic],
   );
-  const initialRows = useMemo(() => (initialData ?? []) as readonly RuntimeRow[], [initialData]);
-  const storeRef = useRef<SubscriptionStore<readonly RuntimeRow[]> | undefined>(undefined);
+  const initialRows = useMemo(() => queryResultToRuntimeRows(initialData), [initialData]);
+  const storeRef = useRef<SubscriptionStore | undefined>(undefined);
   if (storeRef.current === undefined) {
     storeRef.current = new SubscriptionStore(initialRows, rowKey);
   }
@@ -249,12 +248,15 @@ function useSubscriptionWithClient<
 
     store.setStatus("snapshot_loading");
     Effect.runPromise(
-      Effect.gen(function* () {
+      Effect.fn("view-server.react.subscription.start")(function* () {
+        yield* Effect.annotateCurrentSpan({
+          "view_server.topic": String(topic),
+        });
         scope = yield* Scope.make();
         yield* Scope.provide(scope)(
           client.subscribe(topic, query, (event) => Effect.sync(() => store.apply(event))),
         );
-      }),
+      })(),
     ).catch((error) => {
       if (!disposed) {
         store.setError(error);
@@ -277,7 +279,7 @@ function useSubscriptionWithClient<
   );
 
   return {
-    data: state.data as InferReadableQueryResult<TConfig, TTopic, TQuery>,
+    data: runtimeRowsToQueryResult(state.data, query, config, topic),
     totalRows: state.totalRows,
     status: state.status,
     ...(state.error === undefined ? {} : { error: state.error }),
@@ -285,10 +287,10 @@ function useSubscriptionWithClient<
 }
 
 function idFieldForTopic<TConfig extends ViewServerConfig>(
-  config: TConfig | undefined,
+  config: TConfig,
   topic: ReadableTopicName<TConfig>,
 ): string {
-  return topic === "__view_server_health" ? "id" : String(config?.topics[topic]?.id ?? "id");
+  return topic === "__view_server_health" ? "id" : String(config.topics[topic]?.id ?? "id");
 }
 
 export * from "./metrics-ui.tsx";

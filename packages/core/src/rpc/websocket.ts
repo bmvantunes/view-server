@@ -37,11 +37,12 @@ export const layerNodeWebsocketRpcClient = (url: string) =>
 
 export function makeNodeWebsocketClient<TConfig extends ViewServerConfig>(
   url: string,
+  config: TConfig,
 ): Effect.Effect<ViewServerClient<TConfig>, never, import("effect/Scope").Scope> {
-  return Effect.gen(function* () {
+  return Effect.fn("view-server.rpc.websocket.node_client")(function* () {
     const scope = yield* Effect.scope;
     const context = yield* Layer.buildWithScope(layerNodeWebsocketRpcClient(url), scope);
     const rpcClient = yield* RpcClient.make(ViewServerRpcs).pipe(Effect.provide(context));
-    return createViewServerClient<TConfig>(rpcClient);
-  });
+    return createViewServerClient<TConfig>(rpcClient, config);
+  })();
 }

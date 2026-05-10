@@ -54,9 +54,9 @@ export function inMemoryViewServer<const TConfig extends ViewServerConfig>(
   config: TConfig,
   options: InMemoryViewServerOptions<TConfig> = {},
 ): Effect.Effect<InMemoryViewServer<TConfig>, ViewServerError, import("effect/Scope").Scope> {
-  return Effect.gen(function* () {
+  return Effect.fn("view-server.testing.in_memory.make")(function* () {
     const runtime = yield* makeViewServerRuntime(config, {
-      initialRows: options.initialRows as Readonly<Record<string, readonly RuntimeRow[]>>,
+      initialRows: normalizeInitialRows(options.initialRows),
       useMemorySnapshotBackend: true,
     });
     const rpcClient = yield* RpcTest.makeClient(ViewServerRpcs).pipe(
@@ -66,7 +66,7 @@ export function inMemoryViewServer<const TConfig extends ViewServerConfig>(
     const client = createViewServerClient<TConfig>(rpcClient, config);
     const hooks = createViewServerHooks(client, config);
 
-    return {
+    const server: InMemoryViewServer<TConfig> = {
       client,
       hooks,
       publish: async (topic, rows) => {
@@ -80,5 +80,21 @@ export function inMemoryViewServer<const TConfig extends ViewServerConfig>(
       health: () => Effect.runPromise(client.health()),
       close: () => Effect.runPromise(runtime.close),
     };
-  });
+    return server;
+  })();
+}
+
+function normalizeInitialRows<TConfig extends ViewServerConfig>(
+  initialRows: InMemoryViewServerOptions<TConfig>["initialRows"],
+): Readonly<Record<string, readonly RuntimeRow[]>> | undefined {
+  if (initialRows === undefined) {
+    return undefined;
+  }
+  const normalized: Record<string, readonly RuntimeRow[]> = {};
+  for (const [topic, rows] of Object.entries(initialRows)) {
+    if (rows !== undefined) {
+      normalized[topic] = rows.map((row) => Object.fromEntries(Object.entries(row)));
+    }
+  }
+  return normalized;
 }

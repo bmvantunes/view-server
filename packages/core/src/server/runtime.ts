@@ -96,7 +96,7 @@ export function makeViewServerRuntime(
   config: ViewServerConfig,
   options: ViewServerRuntimeOptions = {},
 ): Effect.Effect<ViewServerRuntimeShape, ViewServerError, import("effect/Scope").Scope> {
-  return Effect.gen(function* () {
+  return Effect.fn("view-server.runtime.make")(function* () {
     const normalized = yield* Effect.try({
       try: () => normalizeConfig(config),
       catch: (error) => schemaDecodeFailed("__config", error),
@@ -145,7 +145,7 @@ export function makeViewServerRuntime(
           ),
         );
 
-    const collectHealth = Effect.gen(function* () {
+    const collectHealth = Effect.fn("view-server.runtime.health")(function* () {
       const topics: Record<
         string,
         {
@@ -172,96 +172,171 @@ export function makeViewServerRuntime(
       };
     });
 
-    const syncHealthTopic = Effect.gen(function* () {
+    const syncHealthTopic = Effect.fn("view-server.runtime.health_topic.sync")(function* () {
       const healthWorker = workers.get(VIEW_SERVER_HEALTH_TOPIC);
       if (healthWorker === undefined) {
         return;
       }
-      const health = yield* collectHealth;
+      const health = yield* collectHealth();
       yield* Effect.forEach(healthRowsFromResponse(health), (row) => healthWorker.publish(row), {
         discard: true,
       });
     });
 
-    const syncHealthTopicIgnoringErrors = syncHealthTopic.pipe(Effect.ignore);
+    const syncHealthTopicIgnoringErrors = syncHealthTopic().pipe(Effect.ignore);
+
+    const publishWithTransportUntraced = Effect.fnUntraced(function* (
+      topic: string,
+      row: unknown,
+      transport: AuthorizationContext["transport"],
+    ) {
+      if (isReservedTopic(topic) && transport !== "internal") {
+        return yield* Effect.fail(invalidPublish(topic, "Cannot publish to reserved topics"));
+      }
+      yield* authorizePublish(topic, "publish", row, transport);
+      const worker = yield* workerFor(topic);
+      yield* worker.publish(row);
+      if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
+        yield* syncHealthTopic();
+      }
+    });
 
     const publishWithTransport = (
       topic: string,
       row: unknown,
       transport: AuthorizationContext["transport"],
     ) =>
-      Effect.gen(function* () {
-        if (isReservedTopic(topic) && transport !== "internal") {
-          return yield* Effect.fail(invalidPublish(topic, "Cannot publish to reserved topics"));
-        }
-        yield* authorizePublish(topic, "publish", row, transport);
-        const worker = yield* workerFor(topic);
-        yield* worker.publish(row);
-        if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
-          yield* syncHealthTopic;
-        }
-      });
+      transport === "internal"
+        ? publishWithTransportUntraced(topic, row, transport)
+        : Effect.fn("view-server.runtime.publish")(function* () {
+            yield* Effect.annotateCurrentSpan({
+              "view_server.topic": topic,
+            });
+            yield* publishWithTransportUntraced(topic, row, transport);
+          })();
+
+    const deltaPublishWithTransportUntraced = Effect.fnUntraced(function* (
+      topic: string,
+      patch: RuntimeRow,
+      transport: AuthorizationContext["transport"],
+    ) {
+      if (isReservedTopic(topic) && transport !== "internal") {
+        return yield* Effect.fail(invalidPublish(topic, "Cannot publish to reserved topics"));
+      }
+      yield* authorizePublish(topic, "delta-publish", patch, transport);
+      const worker = yield* workerFor(topic);
+      yield* worker.deltaPublish(patch);
+      if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
+        yield* syncHealthTopic();
+      }
+    });
 
     const deltaPublishWithTransport = (
       topic: string,
       patch: RuntimeRow,
       transport: AuthorizationContext["transport"],
     ) =>
-      Effect.gen(function* () {
-        if (isReservedTopic(topic) && transport !== "internal") {
-          return yield* Effect.fail(invalidPublish(topic, "Cannot publish to reserved topics"));
-        }
-        yield* authorizePublish(topic, "delta-publish", patch, transport);
-        const worker = yield* workerFor(topic);
-        yield* worker.deltaPublish(patch);
-        if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
-          yield* syncHealthTopic;
-        }
-      });
+      transport === "internal"
+        ? deltaPublishWithTransportUntraced(topic, patch, transport)
+        : Effect.fn("view-server.runtime.delta_publish")(function* () {
+            yield* Effect.annotateCurrentSpan({
+              "view_server.topic": topic,
+            });
+            yield* deltaPublishWithTransportUntraced(topic, patch, transport);
+          })();
+
+    const deleteByIdWithTransportUntraced = Effect.fnUntraced(function* (
+      topic: string,
+      id: string | number,
+      transport: AuthorizationContext["transport"],
+    ) {
+      if (isReservedTopic(topic) && transport !== "internal") {
+        return yield* Effect.fail(invalidPublish(topic, "Cannot publish to reserved topics"));
+      }
+      yield* authorizePublish(topic, "delete", id, transport);
+      const worker = yield* workerFor(topic);
+      yield* worker.deleteById(id);
+      if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
+        yield* syncHealthTopic();
+      }
+    });
 
     const deleteByIdWithTransport = (
       topic: string,
       id: string | number,
       transport: AuthorizationContext["transport"],
     ) =>
-      Effect.gen(function* () {
-        if (isReservedTopic(topic) && transport !== "internal") {
-          return yield* Effect.fail(invalidPublish(topic, "Cannot publish to reserved topics"));
-        }
-        yield* authorizePublish(topic, "delete", id, transport);
-        const worker = yield* workerFor(topic);
-        yield* worker.deleteById(id);
-        if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
-          yield* syncHealthTopic;
-        }
+      transport === "internal"
+        ? deleteByIdWithTransportUntraced(topic, id, transport)
+        : Effect.fn("view-server.runtime.delete")(function* () {
+            yield* Effect.annotateCurrentSpan({
+              "view_server.topic": topic,
+            });
+            yield* deleteByIdWithTransportUntraced(topic, id, transport);
+          })();
+
+    const queryRuntime = Effect.fn("view-server.runtime.query")(function* (
+      topic: string,
+      query: RuntimeQuery,
+    ) {
+      yield* Effect.annotateCurrentSpan({
+        "view_server.topic": topic,
       });
+      yield* authorizeQuery(topic, "query", query);
+      const worker = yield* workerFor(topic);
+      const response = yield* worker.query(query);
+      yield* Effect.annotateCurrentSpan({
+        "view_server.rows": response.rows.length,
+        "view_server.total_rows": response.totalRows,
+        "view_server.worker_version": response.version,
+      });
+      return response;
+    });
+
+    const subscribeRuntime = Effect.fn("view-server.runtime.subscribe")(function* (
+      requestId: string,
+      topic: string,
+      query: RuntimeQuery,
+    ) {
+      yield* Effect.annotateCurrentSpan({
+        "view_server.request_id": requestId,
+        "view_server.subscription_id": requestId,
+        "view_server.topic": topic,
+      });
+      yield* authorizeQuery(topic, "subscribe", query);
+      const worker = yield* workerFor(topic);
+      return worker.subscribe(requestId, query).pipe(
+        Stream.onFirst(() => syncHealthTopicIgnoringErrors),
+        Stream.ensuring(syncHealthTopicIgnoringErrors),
+      );
+    });
+
+    const unsubscribeRuntime = Effect.fn("view-server.runtime.unsubscribe")(function* (
+      requestId: string,
+    ) {
+      yield* Effect.annotateCurrentSpan({
+        "view_server.request_id": requestId,
+        "view_server.subscription_id": requestId,
+      });
+      yield* Effect.forEach(workers.values(), (worker) => worker.unsubscribe(requestId), {
+        discard: true,
+      });
+      yield* syncHealthTopicIgnoringErrors;
+    });
+
+    const closeRuntime = Effect.fn("view-server.runtime.close")(function* () {
+      yield* Effect.forEach(workers.values(), (worker) => worker.shutdown, { discard: true });
+    });
 
     const runtime: ViewServerRuntimeShape = {
       config: normalized,
 
-      query: (topic, query) =>
-        Effect.gen(function* () {
-          yield* authorizeQuery(topic, "query", query);
-          const worker = yield* workerFor(topic);
-          return yield* worker.query(query);
-        }),
+      query: queryRuntime,
 
       subscribe: (requestId, topic, query) =>
-        Stream.unwrap(
-          Effect.gen(function* () {
-            yield* authorizeQuery(topic, "subscribe", query);
-            const worker = yield* workerFor(topic);
-            return worker.subscribe(requestId, query).pipe(
-              Stream.onFirst(() => syncHealthTopicIgnoringErrors),
-              Stream.ensuring(syncHealthTopicIgnoringErrors),
-            );
-          }),
-        ),
+        Stream.unwrap(subscribeRuntime(requestId, topic, query)),
 
-      unsubscribe: (requestId) =>
-        Effect.forEach(workers.values(), (worker) => worker.unsubscribe(requestId), {
-          discard: true,
-        }).pipe(Effect.tap(() => syncHealthTopicIgnoringErrors)),
+      unsubscribe: unsubscribeRuntime,
 
       publish: (topic, row) => publishWithTransport(topic, row, "rpc"),
 
@@ -269,12 +344,12 @@ export function makeViewServerRuntime(
 
       deleteById: (topic, id) => deleteByIdWithTransport(topic, id, "rpc"),
 
-      health: collectHealth,
+      health: collectHealth(),
 
-      close: Effect.forEach(workers.values(), (worker) => worker.shutdown, { discard: true }),
+      close: closeRuntime(),
     };
 
-    yield* syncHealthTopic;
+    yield* syncHealthTopic();
     yield* startTopicSources(normalized, options, {
       publish: (topic, row) => publishWithTransport(topic, row, "internal"),
       deltaPublish: (topic, patch) => deltaPublishWithTransport(topic, patch, "internal"),
@@ -282,7 +357,7 @@ export function makeViewServerRuntime(
     });
 
     return runtime;
-  });
+  })();
 }
 
 function resolveSnapshotBackend(
@@ -410,24 +485,29 @@ function verifyKafkaSourceTopics(
   config: NormalizedViewServerConfig,
   options: ViewServerRuntimeOptions,
 ): Effect.Effect<void, ViewServerError> {
-  const sources = collectKafkaSources(config);
-  if (sources.length === 0) {
-    return Effect.void;
-  }
-  const verifier = options.kafkaTopicVerifier;
-  if (verifier === undefined) {
-    return Effect.fail(
-      kafkaIngestFailed(
-        sources[0].viewTopic,
-        new Error("KafkaSource requires a kafkaTopicVerifier runtime option"),
-      ),
+  return Effect.fn("view-server.kafka.verify_topics")(function* () {
+    const sources = collectKafkaSources(config);
+    yield* Effect.annotateCurrentSpan({
+      "view_server.batch_size": sources.length,
+    });
+    if (sources.length === 0) {
+      return;
+    }
+    const verifier = options.kafkaTopicVerifier;
+    if (verifier === undefined) {
+      return yield* Effect.fail(
+        kafkaIngestFailed(
+          sources[0].viewTopic,
+          new Error("KafkaSource requires a kafkaTopicVerifier runtime option"),
+        ),
+      );
+    }
+    yield* Effect.forEach(
+      kafkaVerificationGroups(sources),
+      ({ brokers, topics }) => verifier.verifyTopics({ brokers, topics }),
+      { discard: true },
     );
-  }
-  return Effect.forEach(
-    kafkaVerificationGroups(sources),
-    ({ brokers, topics }) => verifier.verifyTopics({ brokers, topics }),
-    { discard: true },
-  );
+  })();
 }
 
 function collectKafkaSources(
@@ -488,42 +568,53 @@ function startTopicSources(
     ) => Effect.Effect<void, ViewServerError>;
   },
 ): Effect.Effect<void, ViewServerError, import("effect/Scope").Scope> {
-  return Effect.forEach(
-    Object.entries(config.topics),
-    ([topic, topicConfig]) => {
-      if (topic === VIEW_SERVER_HEALTH_TOPIC || topicConfig.source === undefined) {
-        return Effect.void;
-      }
-      const context: EffectSourceContext<RowObject, string> = {
-        topic,
-        idField: topicConfig.id,
-        publish: (row) => runtime.publish(topic, row),
-        deltaPublish: (patch) => runtime.deltaPublish(topic, patch),
-        deleteById: (id) => runtime.deleteById(topic, id),
-      };
-      if (topicConfig.source._tag === "EffectSource") {
-        return topicConfig.source
-          .run(context)
-          .pipe(Effect.forkScoped({ startImmediately: true }), Effect.asVoid);
-      }
-      const source = topicConfig.source;
-      const consumer = options.kafkaConsumerFactory?.(source);
-      if (consumer === undefined) {
-        return Effect.fail(
-          kafkaIngestFailed(
+  return Effect.fn("view-server.runtime.sources.start")(function* () {
+    const entries = Object.entries(config.topics);
+    yield* Effect.annotateCurrentSpan({
+      "view_server.batch_size": entries.length,
+    });
+    yield* Effect.forEach(
+      entries,
+      ([topic, topicConfig]) =>
+        Effect.gen(function* () {
+          yield* Effect.annotateCurrentSpan({
+            "view_server.topic": topic,
+          });
+          if (topic === VIEW_SERVER_HEALTH_TOPIC || topicConfig.source === undefined) {
+            return;
+          }
+          const context: EffectSourceContext<RowObject, string> = {
             topic,
-            new Error("KafkaSource requires a kafkaConsumerFactory runtime option"),
-          ),
-        );
-      }
-      return runKafkaSource({
-        viewTopic: topic,
-        idField: topicConfig.id,
-        source,
-        consumer,
-        runtime: context,
-      }).pipe(Effect.forkScoped({ startImmediately: true }), Effect.asVoid);
-    },
-    { discard: true },
-  );
+            idField: topicConfig.id,
+            publish: (row) => runtime.publish(topic, row),
+            deltaPublish: (patch) => runtime.deltaPublish(topic, patch),
+            deleteById: (id) => runtime.deleteById(topic, id),
+          };
+          if (topicConfig.source._tag === "EffectSource") {
+            yield* topicConfig.source
+              .run(context)
+              .pipe(Effect.forkScoped({ startImmediately: true }), Effect.asVoid);
+            return;
+          }
+          const source = topicConfig.source;
+          const consumer = options.kafkaConsumerFactory?.(source);
+          if (consumer === undefined) {
+            return yield* Effect.fail(
+              kafkaIngestFailed(
+                topic,
+                new Error("KafkaSource requires a kafkaConsumerFactory runtime option"),
+              ),
+            );
+          }
+          yield* runKafkaSource({
+            viewTopic: topic,
+            idField: topicConfig.id,
+            source,
+            consumer,
+            runtime: context,
+          }).pipe(Effect.forkScoped({ startImmediately: true }), Effect.asVoid);
+        }).pipe(Effect.withSpan("view-server.runtime.source.start")),
+      { discard: true },
+    );
+  })();
 }

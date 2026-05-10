@@ -82,7 +82,11 @@ export function makeTopicWorkerCore(
   config: TopicConfig,
   options: TopicWorkerCoreOptions = {},
 ): Effect.Effect<TopicWorkerCore, ViewServerError, Scope.Scope> {
-  return Effect.gen(function* () {
+  return Effect.fn("view-server.worker.make")(function* () {
+    yield* Effect.annotateCurrentSpan({
+      "view_server.topic": topic,
+      "view_server.rows": options.initialRows?.length ?? 0,
+    });
     const idField = config.id;
     const literalStringFields = literalStringFieldsForSchema(config.schema);
     const backend = options.snapshotBackend ?? createMemorySnapshotBackend();
@@ -120,21 +124,34 @@ export function makeTopicWorkerCore(
     const memoryQuery = (query: RuntimeQuery) =>
       executeMemoryQuery(rows, query, idField, { literalStringFields });
 
-    const fencedQuery = (query: RuntimeQuery) =>
-      Effect.gen(function* () {
-        const targetVersion = version;
-        const memorySnapshot = () => ({
-          ...memoryQuery(query),
-          backendVersion: undefined,
-        });
-        const result = yield* backend.snapshot({ query, targetVersion }).pipe(
-          Effect.map(
-            (candidate) => reconcileSnapshot(candidate, query, targetVersion) ?? memorySnapshot(),
-          ),
-          Effect.catchTag("SnapshotBackendFailed", () => Effect.succeed(memorySnapshot())),
-        );
-        return { result, targetVersion };
+    const fencedQuery = Effect.fn("view-server.worker.snapshot.query")(function* (
+      query: RuntimeQuery,
+    ) {
+      yield* Effect.annotateCurrentSpan({
+        "view_server.topic": topic,
+        "view_server.worker_version": version.toString(),
       });
+      const targetVersion = version;
+      const memorySnapshot = () => ({
+        ...memoryQuery(query),
+        backendVersion: undefined,
+      });
+      const result = yield* backend.snapshot({ query, targetVersion }).pipe(
+        Effect.map(
+          (candidate) => reconcileSnapshot(candidate, query, targetVersion) ?? memorySnapshot(),
+        ),
+        Effect.catchTag("SnapshotBackendFailed", () => Effect.succeed(memorySnapshot())),
+      );
+      yield* Effect.annotateCurrentSpan({
+        "view_server.rows": result.rows.length,
+        "view_server.total_rows": result.totalRows,
+        "view_server.worker_version": targetVersion.toString(),
+        ...(result.backendVersion === undefined
+          ? {}
+          : { "view_server.backend_version": result.backendVersion.toString() }),
+      });
+      return { result, targetVersion };
+    });
 
     const reconcileSnapshot = (
       candidate: SnapshotBackendResult,
@@ -165,31 +182,43 @@ export function makeTopicWorkerCore(
       };
     };
 
-    const fencedSnapshot = (requestId: string, query: RuntimeQuery) =>
-      Effect.gen(function* () {
-        const { result, targetVersion } = yield* fencedQuery(query);
-        const snapshot: SnapshotEvent<readonly RuntimeRow[]> = {
-          type: "snapshot",
-          requestId,
-          rows: result.rows,
-          meta: {
-            version: targetVersion.toString(),
-            totalRows: result.totalRows,
-            ...(result.backendVersion === undefined
-              ? {}
-              : { backendVersion: result.backendVersion.toString() }),
-            serverTime: Date.now(),
-          },
-        };
-        return { snapshot, targetVersion, totalRows: result.totalRows };
+    const fencedSnapshot = Effect.fn("view-server.worker.snapshot.emit")(function* (
+      requestId: string,
+      query: RuntimeQuery,
+    ) {
+      yield* Effect.annotateCurrentSpan({
+        "view_server.request_id": requestId,
+        "view_server.subscription_id": requestId,
+        "view_server.topic": topic,
       });
+      const { result, targetVersion } = yield* fencedQuery(query);
+      const snapshot: SnapshotEvent<readonly RuntimeRow[]> = {
+        type: "snapshot",
+        requestId,
+        rows: result.rows,
+        meta: {
+          version: targetVersion.toString(),
+          totalRows: result.totalRows,
+          ...(result.backendVersion === undefined
+            ? {}
+            : { backendVersion: result.backendVersion.toString() }),
+          serverTime: Date.now(),
+        },
+      };
+      yield* Effect.annotateCurrentSpan({
+        "view_server.rows": result.rows.length,
+        "view_server.total_rows": result.totalRows,
+        "view_server.worker_version": targetVersion.toString(),
+      });
+      return { snapshot, targetVersion, totalRows: result.totalRows };
+    });
 
-    const fanout = (
+    const fanoutUntraced = Effect.fnUntraced(function* (
       fromVersion: WorkerVersion,
       toVersion: WorkerVersion,
       mutation: MutationLogEntry,
-    ) =>
-      Effect.forEach(
+    ) {
+      yield* Effect.forEach(
         subscriptions.values(),
         (subscription) => {
           if (
@@ -226,56 +255,73 @@ export function makeTopicWorkerCore(
         },
         { discard: true },
       );
+    });
 
-    const appendMutation = (mutation: Omit<MutationLogEntry, "version">) =>
-      Effect.gen(function* () {
-        const fromVersion = version;
-        version = version + 1n;
-        const entry: MutationLogEntry = { ...mutation, version };
-        mutationLog.append(entry);
-        yield* backend
-          .applyBatch({
-            mutations: [entry],
-            highestVersion: version,
-          })
-          .pipe(
-            Effect.catchTag("SnapshotBackendFailed", () =>
-              Effect.sync(() => {
-                status = "degraded";
-              }),
-            ),
-            Effect.forkIn(scope),
-          );
-        yield* fanout(fromVersion, version, entry);
-      });
+    const fanout = (
+      fromVersion: WorkerVersion,
+      toVersion: WorkerVersion,
+      mutation: MutationLogEntry,
+    ) =>
+      subscriptions.size === 0
+        ? fanoutUntraced(fromVersion, toVersion, mutation)
+        : Effect.fn("view-server.worker.fanout.delta")(function* () {
+            yield* Effect.annotateCurrentSpan({
+              "view_server.topic": topic,
+              "view_server.worker_version": toVersion.toString(),
+              "view_server.batch_size": subscriptions.size,
+            });
+            yield* fanoutUntraced(fromVersion, toVersion, mutation);
+          })();
 
-    const publishDecoded = (decoded: RuntimeRow) =>
-      Effect.gen(function* () {
-        const id = yield* ensureId(decoded);
-        const index = idIndex.get(id);
-        if (index === undefined) {
-          rows = [...rows, { ...decoded }];
-          replaceIndexes();
-          yield* appendMutation({
-            kind: "insert",
-            id,
-            after: { ...decoded },
-            changedFields: new Set(Object.keys(decoded)),
-          });
-          return;
-        }
+    const appendMutation = Effect.fnUntraced(function* (
+      mutation: Omit<MutationLogEntry, "version">,
+    ) {
+      const fromVersion = version;
+      version = version + 1n;
+      const entry: MutationLogEntry = { ...mutation, version };
+      mutationLog.append(entry);
+      yield* backend
+        .applyBatch({
+          mutations: [entry],
+          highestVersion: version,
+        })
+        .pipe(
+          Effect.catchTag("SnapshotBackendFailed", () =>
+            Effect.sync(() => {
+              status = "degraded";
+            }),
+          ),
+          Effect.forkIn(scope),
+        );
+      yield* fanout(fromVersion, version, entry);
+    });
 
-        const before = rows[index];
-        const after = { ...decoded };
-        rows[index] = after;
+    const publishDecoded = Effect.fnUntraced(function* (decoded: RuntimeRow) {
+      const id = yield* ensureId(decoded);
+      const index = idIndex.get(id);
+      if (index === undefined) {
+        rows = [...rows, { ...decoded }];
+        replaceIndexes();
         yield* appendMutation({
-          kind: "update",
+          kind: "insert",
           id,
-          before,
-          after,
-          changedFields: changedFields(before, after),
+          after: { ...decoded },
+          changedFields: new Set(Object.keys(decoded)),
         });
+        return;
+      }
+
+      const before = rows[index];
+      const after = { ...decoded };
+      rows[index] = after;
+      yield* appendMutation({
+        kind: "update",
+        id,
+        before,
+        after,
+        changedFields: changedFields(before, after),
       });
+    });
 
     const worker: TopicWorkerCore = {
       topic,
@@ -291,20 +337,35 @@ export function makeTopicWorkerCore(
 
       query: (query) =>
         gate.withPermit(
-          Effect.gen(function* () {
+          Effect.fn("view-server.worker.query")(function* () {
+            yield* Effect.annotateCurrentSpan({
+              "view_server.topic": topic,
+              "view_server.worker_version": version.toString(),
+            });
             const { result, targetVersion } = yield* fencedQuery(query);
+            yield* Effect.annotateCurrentSpan({
+              "view_server.rows": result.rows.length,
+              "view_server.total_rows": result.totalRows,
+              "view_server.worker_version": targetVersion.toString(),
+            });
             return {
               rows: result.rows,
               totalRows: result.totalRows,
               version: targetVersion.toString(),
             };
-          }),
+          })(),
         ),
 
       subscribe: (requestId, query) =>
         Stream.callback<SubscriptionEvent<readonly RuntimeRow[]>, ViewServerError>((queue) =>
           gate.withPermit(
-            Effect.gen(function* () {
+            Effect.fn("view-server.worker.subscribe")(function* () {
+              yield* Effect.annotateCurrentSpan({
+                "view_server.request_id": requestId,
+                "view_server.subscription_id": requestId,
+                "view_server.topic": topic,
+                "view_server.worker_version": version.toString(),
+              });
               const { snapshot, targetVersion, totalRows } = yield* fencedSnapshot(
                 requestId,
                 query,
@@ -321,37 +382,47 @@ export function makeTopicWorkerCore(
               subscriptions.set(requestId, active);
               yield* Queue.offer(queue, snapshot);
               yield* Effect.addFinalizer(() =>
-                Effect.sync(() => {
+                Effect.fn("view-server.worker.subscribe.finalize")(function* () {
+                  yield* Effect.annotateCurrentSpan({
+                    "view_server.request_id": requestId,
+                    "view_server.subscription_id": requestId,
+                    "view_server.topic": topic,
+                  });
                   subscriptions.delete(requestId);
-                }),
+                })(),
               );
-            }),
+            })(),
           ),
         ),
 
       unsubscribe: (requestId) =>
         gate.withPermit(
-          Effect.gen(function* () {
+          Effect.fn("view-server.worker.unsubscribe")(function* () {
+            yield* Effect.annotateCurrentSpan({
+              "view_server.request_id": requestId,
+              "view_server.subscription_id": requestId,
+              "view_server.topic": topic,
+            });
             const subscription = subscriptions.get(requestId);
             if (subscription === undefined) {
               return;
             }
             subscriptions.delete(requestId);
             yield* Queue.end(subscription.queue);
-          }),
+          })(),
         ),
 
       publish: (input) =>
         gate.withPermit(
-          Effect.gen(function* () {
+          Effect.fnUntraced(function* () {
             const decoded = yield* decodeRow(input);
             yield* publishDecoded(decoded);
-          }),
+          })(),
         ),
 
       deltaPublish: (patch) =>
         gate.withPermit(
-          Effect.gen(function* () {
+          Effect.fnUntraced(function* () {
             const id = patch[idField];
             if (typeof id !== "string" && typeof id !== "number") {
               return yield* Effect.fail(missingTopicId(topic, idField));
@@ -373,12 +444,12 @@ export function makeTopicWorkerCore(
               after: decoded,
               changedFields: changedFields(before, decoded),
             });
-          }),
+          })(),
         ),
 
       deleteById: (id) =>
         gate.withPermit(
-          Effect.gen(function* () {
+          Effect.fnUntraced(function* () {
             const index = idIndex.get(id);
             if (index === undefined) {
               return;
@@ -392,13 +463,17 @@ export function makeTopicWorkerCore(
               before,
               changedFields: new Set(Object.keys(before)),
             });
-          }),
+          })(),
         ),
 
       getRowsForTest: Effect.sync(() => rows.map((row) => ({ ...row }))),
 
       shutdown: gate.withPermit(
-        Effect.gen(function* () {
+        Effect.fn("view-server.worker.shutdown")(function* () {
+          yield* Effect.annotateCurrentSpan({
+            "view_server.topic": topic,
+            "view_server.worker_version": version.toString(),
+          });
           status = "stopping";
           yield* backend.close();
           yield* Effect.forEach(
@@ -407,7 +482,7 @@ export function makeTopicWorkerCore(
             { discard: true },
           );
           subscriptions.clear();
-        }),
+        })(),
       ),
     };
 
@@ -427,7 +502,7 @@ export function makeTopicWorkerCore(
     yield* Effect.addFinalizer(() => worker.shutdown.pipe(Effect.ignore));
 
     return worker;
-  });
+  })();
 }
 
 function hasDependency(

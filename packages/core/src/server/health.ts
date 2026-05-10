@@ -12,7 +12,7 @@ type HealthErrorResponse = {
 };
 
 export const layerViewServerHealthRoutes = HttpRouter.use(
-  Effect.fn(function* (router) {
+  Effect.fn("view-server.http.health.routes")(function* (router) {
     const runtime = yield* ViewServerRuntime;
     yield* router.add("GET", runtime.config.health.path, healthHttpResponse(runtime, "live"));
     yield* router.add("GET", runtime.config.health.readyPath, healthHttpResponse(runtime, "ready"));
@@ -23,18 +23,20 @@ function healthHttpResponse(
   runtime: ViewServerRuntimeShape,
   kind: "live" | "ready",
 ): Effect.Effect<HttpServerResponse.HttpServerResponse> {
-  return runtime.health.pipe(
-    Effect.match({
-      onFailure: (error) =>
-        HttpServerResponse.jsonUnsafe(errorBody(error), {
-          status: kind === "ready" ? 503 : 500,
-        }),
-      onSuccess: (health) =>
-        HttpServerResponse.jsonUnsafe(health satisfies HealthResponse, {
-          status: kind === "ready" && !health.ok ? 503 : 200,
-        }),
-    }),
-  );
+  return Effect.fn("view-server.http.health.response")(function* () {
+    return yield* runtime.health.pipe(
+      Effect.match({
+        onFailure: (error) =>
+          HttpServerResponse.jsonUnsafe(errorBody(error), {
+            status: kind === "ready" ? 503 : 500,
+          }),
+        onSuccess: (health) =>
+          HttpServerResponse.jsonUnsafe(health satisfies HealthResponse, {
+            status: kind === "ready" && !health.ok ? 503 : 200,
+          }),
+      }),
+    );
+  })();
 }
 
 function errorBody(error: ViewServerError): HealthErrorResponse {

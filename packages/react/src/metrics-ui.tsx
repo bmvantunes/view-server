@@ -1,10 +1,9 @@
 import {
+  type SubscriptionStatus,
   VIEW_SERVER_HEALTH_TOPIC,
   type RawQuery,
-  type ViewServerConfig,
   type ViewServerHealthRow,
 } from "@view-server/core";
-import type { ViewServerHooks } from "./index.ts";
 
 export const viewServerHealthQuery = {
   fields: {
@@ -55,16 +54,24 @@ export const viewServerHealthQuery = {
   }
 >;
 
-type MetricsRow = (typeof viewServerHealthQuery)["fields"] extends infer TFields
-  ? import("@view-server/core").InferRawResult<ViewServerHealthRow, TFields>
-  : never;
+export type ViewServerMetricsHooks = {
+  readonly useSubscription: (
+    topic: typeof VIEW_SERVER_HEALTH_TOPIC,
+    query: typeof viewServerHealthQuery,
+  ) => {
+    readonly data: readonly ViewServerHealthRow[];
+    readonly totalRows: number;
+    readonly status: SubscriptionStatus;
+    readonly error?: unknown;
+  };
+};
 
-export function ViewServerMetricsDashboard<TConfig extends ViewServerConfig>(props: {
-  readonly hooks: ViewServerHooks<TConfig>;
+export function ViewServerMetricsDashboard(props: {
+  readonly hooks: ViewServerMetricsHooks;
   readonly title?: string | undefined;
 }) {
   const result = props.hooks.useSubscription(VIEW_SERVER_HEALTH_TOPIC, viewServerHealthQuery);
-  const rows = result.data as readonly MetricsRow[];
+  const rows = result.data;
   const server = rows.find((row) => row.kind === "server");
   const topics = rows
     .filter((row) => row.kind === "topic")

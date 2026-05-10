@@ -52,6 +52,16 @@ export function toWireRow(row: object): Readonly<Record<string, RpcWireValue>> {
   return wireRow;
 }
 
+export function fromWireRow(row: Readonly<Record<string, RpcWireValue>>): RuntimeRow {
+  return Object.fromEntries(Object.entries(row));
+}
+
+export function fromWireRows(
+  rows: readonly Readonly<Record<string, RpcWireValue>>[],
+): readonly RuntimeRow[] {
+  return rows.map(fromWireRow);
+}
+
 function toWireValue(value: unknown): RpcWireValue | undefined {
   if (value === undefined) {
     return undefined;

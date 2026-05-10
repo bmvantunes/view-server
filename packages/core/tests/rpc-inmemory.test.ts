@@ -126,7 +126,7 @@ describe("Effect RPC in-memory", () => {
         Effect.provide(ViewServerHandlersLive),
         Effect.provideService(ViewServerRuntime, runtime),
       );
-      const client = createViewServerClient<typeof config>(rpcClient);
+      const client = createViewServerClient<typeof config>(rpcClient, config);
       const firstEvent = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
 
       yield* client.subscribe("orders", query, (event) =>
@@ -173,7 +173,7 @@ describe("Effect RPC in-memory", () => {
         DeltaPublish: () => Effect.void,
         Health: () => Effect.succeed({ ok: true, topics: {} }),
       };
-      const client = createViewServerClient<typeof config>(transport);
+      const client = createViewServerClient<typeof config>(transport, config);
 
       const subscription = yield* client.subscribe("orders", query, (event) =>
         Deferred.succeed(firstEvent, event).pipe(Effect.asVoid),

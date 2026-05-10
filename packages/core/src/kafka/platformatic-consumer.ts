@@ -1,4 +1,4 @@
-import { Admin, Consumer, type Message } from "@platformatic/kafka";
+import { Admin, Consumer, type Message, type Offsets } from "@platformatic/kafka";
 import { Effect } from "effect";
 import type { KafkaSourceConfig, RowObject } from "../config/index.ts";
 import { kafkaIngestFailed, isViewServerError, type ViewServerError } from "../errors.ts";
@@ -10,6 +10,7 @@ export type PlatformaticKafkaTopicConsumerOptions = {
   readonly batchSize?: number | undefined;
   readonly sessionTimeout?: number | undefined;
   readonly heartbeatInterval?: number | undefined;
+  readonly lagMonitoringIntervalMs?: number | undefined;
 };
 
 export type PlatformaticKafkaConsumerFactoryOptions = Omit<
@@ -37,61 +38,89 @@ export function createPlatformaticKafkaTopicConsumer(
 ): KafkaTopicConsumer {
   return {
     run: (args) =>
-      Effect.tryPromise({
-        try: async (signal) => {
-          const consumer = new Consumer({
-            clientId: options.clientId,
-            groupId: args.groupId,
-            bootstrapBrokers: [...options.brokers],
-          });
-          const stream = await consumer.consume({
-            topics: [args.topic],
-            autocommit: false,
-            sessionTimeout: options.sessionTimeout,
-            heartbeatInterval: options.heartbeatInterval,
-          });
-          const pending: PlatformaticMessage[] = [];
-
-          const flush = async () => {
-            if (pending.length === 0) {
-              return;
-            }
-            const messages = pending.splice(0, pending.length);
-            await Effect.runPromise(
-              args.onBatch({
-                records: messages.map(toKafkaConsumerRecord),
-                commit:
-                  args.commitPolicy === "after-ingest"
-                    ? commitMessages(args.topic, messages)
-                    : Effect.void,
-              }),
-            );
-          };
-
-          signal.addEventListener("abort", () => {
-            void stream.close().finally(() => {
-              void closeConsumer(consumer);
+      Effect.fn("view-server.kafka.platformatic.run")(function* () {
+        yield* Effect.annotateCurrentSpan({
+          "view_server.topic": args.topic,
+        });
+        yield* Effect.tryPromise({
+          try: async (signal) => {
+            const consumer = new Consumer({
+              clientId: options.clientId,
+              groupId: args.groupId,
+              bootstrapBrokers: [...options.brokers],
             });
-          });
+            const latestLagByPartition = new Map<number, bigint>();
+            const onLag = (lag: Offsets) => {
+              latestLagByPartition.clear();
+              const topicLag = lag.get(args.topic);
+              if (topicLag === undefined) {
+                return;
+              }
+              topicLag.forEach((partitionLag, partition) => {
+                if (partitionLag >= 0n) {
+                  latestLagByPartition.set(partition, partitionLag);
+                }
+              });
+            };
+            consumer.on("consumer:lag", onLag);
+            const stream = await consumer.consume({
+              topics: [args.topic],
+              autocommit: false,
+              sessionTimeout: options.sessionTimeout,
+              heartbeatInterval: options.heartbeatInterval,
+            });
+            consumer.startLagMonitoring(
+              { topics: [args.topic] },
+              options.lagMonitoringIntervalMs ?? 1_000,
+            );
+            const pending: PlatformaticMessage[] = [];
 
-          try {
-            for await (const message of stream) {
-              if (signal.aborted) {
-                break;
+            const flush = async () => {
+              if (pending.length === 0) {
+                return;
               }
-              pending.push(message);
-              if (pending.length >= (options.batchSize ?? 100)) {
-                await flush();
+              const messages = pending.splice(0, pending.length);
+              const lag = maxLagForMessages(messages, latestLagByPartition);
+              await Effect.runPromise(
+                args.onBatch({
+                  records: messages.map(toKafkaConsumerRecord),
+                  ...(lag === undefined ? {} : { lag }),
+                  commit:
+                    args.commitPolicy === "after-ingest"
+                      ? commitMessages(args.topic, messages, lag)
+                      : Effect.void,
+                }),
+              );
+            };
+
+            signal.addEventListener("abort", () => {
+              void stream.close().finally(() => {
+                void closeConsumer(consumer);
+              });
+            });
+
+            try {
+              for await (const message of stream) {
+                if (signal.aborted) {
+                  break;
+                }
+                pending.push(message);
+                if (pending.length >= (options.batchSize ?? 100)) {
+                  await flush();
+                }
               }
+              await flush();
+            } finally {
+              consumer.stopLagMonitoring();
+              consumer.off("consumer:lag", onLag);
+              await stream.close();
+              await closeConsumer(consumer);
             }
-            await flush();
-          } finally {
-            await stream.close();
-            await closeConsumer(consumer);
-          }
-        },
-        catch: (error) => (isViewServerError(error) ? error : kafkaIngestFailed(args.topic, error)),
-      }),
+          },
+          catch: (error) =>
+            isViewServerError(error) ? error : kafkaIngestFailed(args.topic, error),
+        });
+      })(),
   };
 }
 
@@ -113,30 +142,35 @@ export function createPlatformaticKafkaTopicVerifier(
 ): KafkaTopicVerifier {
   return {
     verifyTopics: (args) =>
-      Effect.tryPromise({
-        try: async () => {
-          const admin = new Admin({
-            clientId: options.clientId ?? "view-server-topic-verifier",
-            bootstrapBrokers: [...args.brokers],
-            timeout: options.timeout,
-            retries: options.retries,
-          });
-          try {
-            const metadata = await admin.metadata({
-              topics: [...args.topics],
-              autocreateTopics: false,
-              forceUpdate: true,
+      Effect.fn("view-server.kafka.platformatic.verify_topics")(function* () {
+        yield* Effect.annotateCurrentSpan({
+          "view_server.batch_size": args.topics.length,
+        });
+        yield* Effect.tryPromise({
+          try: async () => {
+            const admin = new Admin({
+              clientId: options.clientId ?? "view-server-topic-verifier",
+              bootstrapBrokers: [...args.brokers],
+              timeout: options.timeout,
+              retries: options.retries,
             });
-            const missing = args.topics.filter((topic) => !metadata.topics.has(topic));
-            if (missing.length > 0) {
-              throw new Error(`Kafka topics not found: ${missing.join(", ")}`);
+            try {
+              const metadata = await admin.metadata({
+                topics: [...args.topics],
+                autocreateTopics: false,
+                forceUpdate: true,
+              });
+              const missing = args.topics.filter((topic) => !metadata.topics.has(topic));
+              if (missing.length > 0) {
+                throw new Error(`Kafka topics not found: ${missing.join(", ")}`);
+              }
+            } finally {
+              await admin.close();
             }
-          } finally {
-            await admin.close();
-          }
-        },
-        catch: (error) => kafkaIngestFailed(args.topics[0] ?? "__kafka", error),
-      }),
+          },
+          catch: (error) => kafkaIngestFailed(args.topics[0] ?? "__kafka", error),
+        });
+      })(),
   };
 }
 
@@ -155,15 +189,57 @@ function closeConsumer(consumer: Consumer): Promise<void> {
 function commitMessages(
   topic: string,
   messages: readonly PlatformaticMessage[],
+  lag: number | undefined,
 ): Effect.Effect<void, ViewServerError> {
-  return Effect.tryPromise({
-    try: async () => {
-      for (const message of messages) {
-        await message.commit();
-      }
-    },
-    catch: (error) => kafkaIngestFailed(topic, error),
-  });
+  return Effect.fn("view-server.kafka.platformatic.commit")(function* () {
+    const lastMessage = messages[messages.length - 1];
+    yield* Effect.annotateCurrentSpan({
+      "view_server.topic": topic,
+      "view_server.batch_size": messages.length,
+      ...(lag === undefined ? {} : { "view_server.kafka.lag": lag }),
+      ...(lastMessage === undefined
+        ? {}
+        : {
+            "view_server.kafka.partition": lastMessage.partition,
+            "view_server.kafka.offset": lastMessage.offset.toString(),
+          }),
+    });
+    yield* Effect.tryPromise({
+      try: async () => {
+        for (const message of messages) {
+          await message.commit();
+        }
+      },
+      catch: (error) => kafkaIngestFailed(topic, error),
+    });
+  })();
+}
+
+function maxLagForMessages(
+  messages: readonly PlatformaticMessage[],
+  latestLagByPartition: ReadonlyMap<number, bigint>,
+): number | undefined {
+  let maxLag: bigint | undefined;
+  for (const message of messages) {
+    const lag = latestLagByPartition.get(message.partition);
+    if (lag !== undefined && (maxLag === undefined || lag > maxLag)) {
+      maxLag = lag;
+    }
+  }
+  return spanSafeNumber(maxLag);
+}
+
+function spanSafeNumber(value: bigint | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value <= 0n) {
+    return 0;
+  }
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  return Number(value);
 }
 
 function toKafkaConsumerRecord(message: PlatformaticMessage) {

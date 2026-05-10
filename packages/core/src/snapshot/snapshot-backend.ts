@@ -39,6 +39,7 @@ export interface SnapshotBackend {
 }
 
 export function createMemorySnapshotBackend(): SnapshotBackend {
+  let topic = "";
   let idField = "id";
   let rows: RuntimeRow[] = [];
   let backendVersion = 0n;
@@ -46,12 +47,18 @@ export function createMemorySnapshotBackend(): SnapshotBackend {
 
   return {
     init: (args) =>
-      Effect.sync(() => {
+      Effect.fn("view-server.snapshot.memory.init")(function* () {
+        yield* Effect.annotateCurrentSpan({
+          "view_server.topic": args.topic,
+          "view_server.rows": args.rows.length,
+          "view_server.backend_version": args.version.toString(),
+        });
+        topic = args.topic;
         idField = args.idField;
         rows = args.rows.map((entry) => ({ ...entry.row }));
         backendVersion = args.version;
         queryOptions = { literalStringFields: args.literalStringFields };
-      }),
+      })(),
 
     applyBatch: (args) =>
       Effect.sync(() => {
@@ -74,16 +81,31 @@ export function createMemorySnapshotBackend(): SnapshotBackend {
       }),
 
     snapshot: (args) =>
-      Effect.sync(() => {
+      Effect.fn("view-server.snapshot.memory.query")(function* () {
+        yield* Effect.annotateCurrentSpan({
+          "view_server.topic": topic,
+          "view_server.worker_version": args.targetVersion.toString(),
+          "view_server.backend_version": backendVersion.toString(),
+        });
         const result = executeMemoryQuery(rows, args.query, idField, queryOptions);
+        yield* Effect.annotateCurrentSpan({
+          "view_server.rows": result.rows.length,
+          "view_server.total_rows": result.totalRows,
+        });
         return {
           rows: result.rows,
           totalRows: result.totalRows,
           backendVersion,
           replayRows: rows.map((row) => ({ ...row })),
         };
-      }),
+      })(),
 
-    close: () => Effect.void,
+    close: () =>
+      Effect.fn("view-server.snapshot.memory.close")(function* () {
+        yield* Effect.annotateCurrentSpan({
+          "view_server.topic": topic,
+          "view_server.backend_version": backendVersion.toString(),
+        });
+      })(),
   };
 }

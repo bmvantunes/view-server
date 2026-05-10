@@ -11,8 +11,8 @@ import {
   type ViewServerError,
   workerUnavailable,
 } from "../errors.ts";
-import type { RuntimeQuery, RuntimeRow } from "../protocol/index.ts";
-import { toWireRow, type RpcWireValue } from "../rpc/index.ts";
+import type { RuntimeQuery } from "../protocol/index.ts";
+import { fromWireRows, toWireRow, type RpcWireValue } from "../rpc/index.ts";
 import {
   TopicWorkerRpcs,
   type TopicWorkerInitialMessage as TopicWorkerInitialMessageType,
@@ -44,7 +44,11 @@ export const makeNodeThreadTopicWorkerHostFactory = (
   const rpcConcurrency = options.rpcConcurrency ?? 64;
   const workerNamePrefix = options.workerNamePrefix ?? "view-server-topic";
   return (topic, config, hostOptions) =>
-    Effect.gen(function* () {
+    Effect.fn("view-server.worker.node.host.make")(function* () {
+      yield* Effect.annotateCurrentSpan({
+        "view_server.topic": topic,
+        "view_server.rows": hostOptions.initialRows?.length ?? 0,
+      });
       const workerEntryUrl = resolveWorkerEntryUrl(options.workerEntryUrl);
       const initialMessage: TopicWorkerInitialMessageType = {
         configModuleUrl,
@@ -75,7 +79,7 @@ export const makeNodeThreadTopicWorkerHostFactory = (
       );
       const client = yield* RpcClient.make(TopicWorkerRpcs).pipe(Effect.provide(context));
       return topicWorkerHostFromClient(topic, config.id, client);
-    });
+    })();
 };
 
 function topicWorkerHostFromClient(
@@ -101,37 +105,68 @@ function topicWorkerHostFromClient(
       Effect.mapError((error) => toWorkerError(topic, error)),
     ),
     query: (query: RuntimeQuery) =>
-      client.Query({ query }).pipe(
-        Effect.map((response) => ({
+      Effect.fn("view-server.worker.node.query")(function* () {
+        yield* Effect.annotateCurrentSpan({
+          "view_server.topic": topic,
+        });
+        const response = yield* client.Query({ query });
+        yield* Effect.annotateCurrentSpan({
+          "view_server.rows": response.rows.length,
+          "view_server.total_rows": response.totalRows,
+          "view_server.worker_version": response.version,
+        });
+        return {
           rows: response.rows,
           totalRows: response.totalRows,
           version: response.version,
-        })),
-        Effect.mapError((error) => toWorkerError(topic, error)),
-      ),
+        };
+      })().pipe(Effect.mapError((error) => toWorkerError(topic, error))),
     subscribe: (requestId, query) =>
-      client.Subscribe({ requestId, query }).pipe(
-        Stream.map((event) => event),
-        Stream.mapError((error) => toWorkerError(topic, error)),
+      Stream.unwrap(
+        Effect.fn("view-server.worker.node.subscribe")(function* () {
+          yield* Effect.annotateCurrentSpan({
+            "view_server.request_id": requestId,
+            "view_server.subscription_id": requestId,
+            "view_server.topic": topic,
+          });
+          return client.Subscribe({ requestId, query }).pipe(
+            Stream.map((event) => event),
+            Stream.mapError((error) => toWorkerError(topic, error)),
+          );
+        })(),
       ),
     unsubscribe: (requestId) =>
-      client
-        .Unsubscribe({ requestId })
-        .pipe(Effect.mapError((error) => toWorkerError(topic, error))),
+      Effect.fn("view-server.worker.node.unsubscribe")(function* () {
+        yield* Effect.annotateCurrentSpan({
+          "view_server.request_id": requestId,
+          "view_server.subscription_id": requestId,
+          "view_server.topic": topic,
+        });
+        yield* client.Unsubscribe({ requestId });
+      })().pipe(Effect.mapError((error) => toWorkerError(topic, error))),
     publish: (row) =>
-      toRpcRow(topic, row).pipe(
-        Effect.flatMap((rpcRow) => client.Publish({ row: rpcRow })),
-        Effect.mapError((error) => toWorkerError(topic, error)),
-      ),
+      Effect.fnUntraced(function* () {
+        const rpcRow = yield* toRpcRow(topic, row);
+        yield* client.Publish({ row: rpcRow });
+      })().pipe(Effect.mapError((error) => toWorkerError(topic, error))),
     deltaPublish: (patch) =>
-      client.DeltaPublish({ patch }).pipe(Effect.mapError((error) => toWorkerError(topic, error))),
+      Effect.fnUntraced(function* () {
+        yield* client.DeltaPublish({ patch });
+      })().pipe(Effect.mapError((error) => toWorkerError(topic, error))),
     deleteById: (id) =>
-      client.DeleteById({ id }).pipe(Effect.mapError((error) => toWorkerError(topic, error))),
+      Effect.fnUntraced(function* () {
+        yield* client.DeleteById({ id });
+      })().pipe(Effect.mapError((error) => toWorkerError(topic, error))),
     getRowsForTest: client.RowsForTest().pipe(
-      Effect.map((rows) => rows as readonly RuntimeRow[]),
+      Effect.map(fromWireRows),
       Effect.mapError((error) => toWorkerError(topic, error)),
     ),
-    shutdown: client.Shutdown().pipe(Effect.mapError((error) => toWorkerError(topic, error))),
+    shutdown: Effect.fn("view-server.worker.node.shutdown")(function* () {
+      yield* Effect.annotateCurrentSpan({
+        "view_server.topic": topic,
+      });
+      yield* client.Shutdown();
+    })().pipe(Effect.mapError((error) => toWorkerError(topic, error))),
   };
 }
 
@@ -187,7 +222,7 @@ function toRpcRow(
   row: unknown,
 ): Effect.Effect<Readonly<Record<string, RpcWireValue>>, ViewServerError> {
   if (row !== null && typeof row === "object" && !Array.isArray(row)) {
-    return Effect.succeed(row as Readonly<Record<string, RpcWireValue>>);
+    return Effect.succeed(toWireRow(row));
   }
   return Effect.fail(invalidPublish(topic, "Worker publish requires an object row"));
 }

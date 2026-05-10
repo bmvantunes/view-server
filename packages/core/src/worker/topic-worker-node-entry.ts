@@ -7,6 +7,7 @@ import {
   type NormalizedViewServerConfig,
   normalizeConfig,
   type TopicConfig,
+  type TopicConfigMap,
   type ViewServerConfig,
 } from "../config/index.ts";
 import { missingTopic, schemaDecodeFailed, type ViewServerError } from "../errors.ts";
@@ -21,10 +22,14 @@ import {
 } from "./topic-worker-rpcs.ts";
 
 const TopicWorkerHandlersLive = TopicWorkerRpcs.toLayer(
-  Effect.gen(function* () {
+  Effect.fn("view-server.worker.node.entry.handlers.make")(function* () {
     const initialMessage = yield* Schema.decodeUnknownEffect(TopicWorkerInitialMessage)(
       workerData,
     ).pipe(Effect.mapError((error) => schemaDecodeFailed("__worker_initial_message", error)));
+    yield* Effect.annotateCurrentSpan({
+      "view_server.topic": initialMessage.topic,
+      "view_server.rows": initialMessage.initialRows?.length ?? 0,
+    });
     const config = yield* loadConfig(initialMessage.configModuleUrl);
     const topicConfig = config.topics[initialMessage.topic];
     if (topicConfig === undefined) {
@@ -38,15 +43,51 @@ const TopicWorkerHandlersLive = TopicWorkerRpcs.toLayer(
 
     return TopicWorkerRpcs.of({
       Subscribe: (payload) =>
-        worker
-          .subscribe(payload.requestId, payload.query)
-          .pipe(Stream.map(wireSubscriptionEvent))
-          .pipe(Stream.toQueue({ capacity: 64 })),
-      Unsubscribe: (payload) => worker.unsubscribe(payload.requestId),
-      Query: (payload) => worker.query(payload.query).pipe(Effect.map(wireQueryResponse)),
-      Publish: (payload) => worker.publish(payload.row),
-      DeltaPublish: (payload) => worker.deltaPublish(payload.patch),
-      DeleteById: (payload) => worker.deleteById(payload.id),
+        Effect.fn("view-server.worker.node.entry.subscribe")(function* () {
+          yield* Effect.annotateCurrentSpan({
+            "view_server.request_id": payload.requestId,
+            "view_server.subscription_id": payload.requestId,
+            "view_server.topic": initialMessage.topic,
+          });
+          return yield* worker
+            .subscribe(payload.requestId, payload.query)
+            .pipe(Stream.map(wireSubscriptionEvent))
+            .pipe(Stream.toQueue({ capacity: 64 }));
+        })(),
+      Unsubscribe: (payload) =>
+        Effect.fn("view-server.worker.node.entry.unsubscribe")(function* () {
+          yield* Effect.annotateCurrentSpan({
+            "view_server.request_id": payload.requestId,
+            "view_server.subscription_id": payload.requestId,
+            "view_server.topic": initialMessage.topic,
+          });
+          yield* worker.unsubscribe(payload.requestId);
+        })(),
+      Query: (payload) =>
+        Effect.fn("view-server.worker.node.entry.query")(function* () {
+          yield* Effect.annotateCurrentSpan({
+            "view_server.topic": initialMessage.topic,
+          });
+          const response = yield* worker.query(payload.query);
+          yield* Effect.annotateCurrentSpan({
+            "view_server.rows": response.rows.length,
+            "view_server.total_rows": response.totalRows,
+            "view_server.worker_version": response.version,
+          });
+          return wireQueryResponse(response);
+        })(),
+      Publish: (payload) =>
+        Effect.fnUntraced(function* () {
+          yield* worker.publish(payload.row);
+        })(),
+      DeltaPublish: (payload) =>
+        Effect.fnUntraced(function* () {
+          yield* worker.deltaPublish(payload.patch);
+        })(),
+      DeleteById: (payload) =>
+        Effect.fnUntraced(function* () {
+          yield* worker.deleteById(payload.id);
+        })(),
       RowsForTest: () => worker.getRowsForTest.pipe(Effect.map((rows) => rows.map(toWireRow))),
       Metrics: () =>
         worker.metrics.pipe(
@@ -58,9 +99,15 @@ const TopicWorkerHandlersLive = TopicWorkerRpcs.toLayer(
             status: metrics.status,
           })),
         ),
-      Shutdown: () => worker.shutdown,
+      Shutdown: () =>
+        Effect.fn("view-server.worker.node.entry.shutdown")(function* () {
+          yield* Effect.annotateCurrentSpan({
+            "view_server.topic": initialMessage.topic,
+          });
+          yield* worker.shutdown;
+        })(),
     });
-  }),
+  })(),
 );
 
 const MainLive = RpcServer.layer(TopicWorkerRpcs).pipe(
@@ -97,9 +144,9 @@ function makeSnapshotBackend(
 function loadConfig(
   configModuleUrl: string,
 ): Effect.Effect<NormalizedViewServerConfig, ViewServerError> {
-  return Effect.gen(function* () {
+  return Effect.fn("view-server.worker.node.entry.load_config")(function* () {
     const moduleValue = yield* Effect.tryPromise({
-      try: () => import(configModuleUrl) as Promise<unknown>,
+      try: () => importConfigModule(configModuleUrl),
       catch: (error) => schemaDecodeFailed("__config", error),
     });
     const config = yield* Effect.try({
@@ -110,7 +157,11 @@ function loadConfig(
       try: () => normalizeConfig(config),
       catch: (error) => schemaDecodeFailed("__config", error),
     });
-  });
+  })();
+}
+
+async function importConfigModule(configModuleUrl: string): Promise<unknown> {
+  return import(configModuleUrl);
 }
 
 function readConfigExport(moduleValue: unknown): ViewServerConfig {
@@ -118,10 +169,25 @@ function readConfigExport(moduleValue: unknown): ViewServerConfig {
     throw new Error("Config module did not resolve to an object");
   }
   const config = moduleValue.default ?? moduleValue.config ?? moduleValue.viewServerConfig;
-  if (!isRecord(config) || !isRecord(config.topics)) {
+  if (!isViewServerConfig(config)) {
     throw new Error("Config module must export a defineConfig result");
   }
-  return config as ViewServerConfig;
+  return config;
+}
+
+function isViewServerConfig(value: unknown): value is ViewServerConfig {
+  return isRecord(value) && isTopicConfigMap(value.topics);
+}
+
+function isTopicConfigMap(value: unknown): value is TopicConfigMap {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return Object.values(value).every(isTopicConfig);
+}
+
+function isTopicConfig(value: unknown): value is TopicConfig {
+  return isRecord(value) && typeof value.id === "string" && Schema.isSchema(value.schema);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

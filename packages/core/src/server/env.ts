@@ -27,38 +27,36 @@ export class ViewServerStartupEnvService extends Context.Service<
 export function decodeViewServerStartupEnv(
   env: Record<string, string | undefined>,
 ): Effect.Effect<ViewServerStartupEnv, InvalidStartupEnv> {
-  return Schema.decodeUnknownEffect(RawViewServerStartupEnv)(env).pipe(
-    Effect.mapError((error) => invalidStartupEnv("Invalid startup environment", error)),
-    Effect.flatMap((raw) =>
-      Effect.gen(function* () {
-        const kafkaBrokers = splitKafkaBrokers(raw.KAFKA_BROKERS);
-        if (kafkaBrokers === undefined) {
-          return yield* Effect.fail(
-            invalidStartupEnv(
-              "KAFKA_BROKERS must contain at least one broker",
-              undefined,
-              "KAFKA_BROKERS",
-            ),
-          );
-        }
-        const rpcPath = raw.VIEW_SERVER_RPC_PATH;
-        if (!isRpcPath(rpcPath)) {
-          return yield* Effect.fail(
-            invalidStartupEnv(
-              "VIEW_SERVER_RPC_PATH must start with /",
-              undefined,
-              "VIEW_SERVER_RPC_PATH",
-            ),
-          );
-        }
-        return {
-          kafkaBrokers,
-          rpcPort: raw.VIEW_SERVER_PORT,
-          rpcPath,
-        };
-      }),
-    ),
-  );
+  return Effect.fn("view-server.env.decode")(function* () {
+    const raw = yield* Schema.decodeUnknownEffect(RawViewServerStartupEnv)(env).pipe(
+      Effect.mapError((error) => invalidStartupEnv("Invalid startup environment", error)),
+    );
+    const kafkaBrokers = splitKafkaBrokers(raw.KAFKA_BROKERS);
+    if (kafkaBrokers === undefined) {
+      return yield* Effect.fail(
+        invalidStartupEnv(
+          "KAFKA_BROKERS must contain at least one broker",
+          undefined,
+          "KAFKA_BROKERS",
+        ),
+      );
+    }
+    const rpcPath = raw.VIEW_SERVER_RPC_PATH;
+    if (!isRpcPath(rpcPath)) {
+      return yield* Effect.fail(
+        invalidStartupEnv(
+          "VIEW_SERVER_RPC_PATH must start with /",
+          undefined,
+          "VIEW_SERVER_RPC_PATH",
+        ),
+      );
+    }
+    return {
+      kafkaBrokers,
+      rpcPort: raw.VIEW_SERVER_PORT,
+      rpcPath,
+    };
+  })();
 }
 
 export const layerViewServerStartupEnv = (

@@ -41,7 +41,7 @@ describe("browser websocket client", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const client = yield* makeBrowserWebsocketClient<typeof config>(url);
+          const client = yield* makeBrowserWebsocketClient<typeof config>(url, config);
           yield* client.publish("orders", {
             id: `${runId}-1`,
             symbol: `${runId}-A`,

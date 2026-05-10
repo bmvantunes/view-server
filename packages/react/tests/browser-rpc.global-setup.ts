@@ -63,7 +63,7 @@ export default async function setup(project: TestProject) {
   await Effect.runPromise(
     Effect.scoped(
       Effect.gen(function* () {
-        const client = yield* makeNodeWebsocketClient<typeof config>(url);
+        const client = yield* makeNodeWebsocketClient<typeof config>(url, config);
         const rows = yield* client.query("orders", smokeQuery).pipe(Effect.timeout("1 second"));
         if (rows[0]?.id !== "o-2") {
           return yield* Effect.die(new Error("Websocket smoke query returned unexpected rows"));

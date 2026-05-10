@@ -4,6 +4,7 @@ import type { ViewServerError } from "../errors.ts";
 
 export type KafkaRecordBatch = {
   readonly records: readonly KafkaConsumerRecord[];
+  readonly lag?: number | undefined;
   readonly commit: Effect.Effect<void, ViewServerError>;
 };
 

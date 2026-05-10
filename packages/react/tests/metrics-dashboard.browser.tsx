@@ -2,15 +2,11 @@ import React from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import {
-  VIEW_SERVER_HEALTH_TOPIC,
-  type ViewServerConfig,
-  type ViewServerHealthRow,
-} from "@view-server/core";
+import { VIEW_SERVER_HEALTH_TOPIC, type ViewServerHealthRow } from "@view-server/core";
 import {
   ViewServerMetricsDashboard,
   viewServerHealthQuery,
-  type ViewServerHooks,
+  type ViewServerMetricsHooks,
 } from "../src/index.ts";
 
 const roots: Root[] = [];
@@ -25,8 +21,8 @@ afterEach(() => {
 describe("ViewServerMetricsDashboard", () => {
   test("renders live health topic rows through the public subscription hook", () => {
     const calls: { topic?: unknown; query?: unknown } = {};
-    const hooks = {
-      useSubscription(topic: unknown, query: unknown) {
+    const hooks: ViewServerMetricsHooks = {
+      useSubscription(topic, query) {
         calls.topic = topic;
         calls.query = query;
         return {
@@ -35,7 +31,7 @@ describe("ViewServerMetricsDashboard", () => {
           status: "live",
         };
       },
-    } as ViewServerHooks<ViewServerConfig>;
+    };
 
     render(<ViewServerMetricsDashboard hooks={hooks} />);
 

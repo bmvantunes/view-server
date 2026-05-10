@@ -156,6 +156,40 @@ describe("topic worker version fence", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("replays all mutation-log entries above the backend contiguous version", () =>
+    Effect.gen(function* () {
+      const worker = yield* makeTopicWorkerCore(
+        "orders",
+        {
+          id: "id",
+          schema: Order,
+        },
+        {
+          snapshotBackend: replayableBackend([{ id: "o-1", symbol: "AAPL", price: 100 }], 1n),
+        },
+      );
+
+      yield* worker.publish({ id: "o-1", symbol: "AAPL", price: 100 });
+      yield* worker.publish({ id: "o-2", symbol: "MSFT", price: 200 });
+      yield* worker.publish({ id: "o-1", symbol: "AAPL", price: 125 });
+
+      const [snapshot] = yield* worker
+        .subscribe("sub-replay-2-through-3", query)
+        .pipe(Stream.take(1), Stream.runCollect);
+
+      if (snapshot?.type !== "snapshot") {
+        throw new Error("Expected snapshot");
+      }
+      expect(snapshot.meta.version).toBe("3");
+      expect(snapshot.meta.backendVersion).toBe("1");
+      expect(snapshot.rows).toEqual([
+        { id: "o-2", price: 200 },
+        { id: "o-1", price: 125 },
+      ]);
+      expect(snapshot.meta.totalRows).toBe(2);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("falls back to memory when the backend is too far behind for the mutation log", () =>
     Effect.gen(function* () {
       const worker = yield* makeTopicWorkerCore(

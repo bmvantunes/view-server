@@ -7,6 +7,7 @@ import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import { defineConfig, KafkaSource } from "../src/config/index.ts";
 import {
   decodeJsonRecord,
+  kafkaRecordLag,
   protobufDecimalToBigDecimal,
   unscaledDecimalToBigDecimal,
 } from "../src/kafka/index.ts";
@@ -247,6 +248,13 @@ describe("Kafka ingestion", () => {
     expect(BigDecimal.format(unscaledDecimalToBigDecimal(new Uint8Array([0xff, 0x85]), 2))).toBe(
       "-1.23",
     );
+  });
+
+  it("derives Kafka record lag from exposed end offsets", () => {
+    expect(kafkaRecordLag({ value: "{}", offset: "7", highWatermark: "10" })).toBe(2);
+    expect(kafkaRecordLag({ value: "{}", offset: "7", endOffset: "10" })).toBe(2);
+    expect(kafkaRecordLag({ value: "{}", offset: "10", highWatermark: "10" })).toBe(0);
+    expect(kafkaRecordLag({ value: "{}", offset: "7" })).toBeUndefined();
   });
 });
 

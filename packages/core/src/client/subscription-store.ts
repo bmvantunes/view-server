@@ -9,24 +9,25 @@ import {
 } from "../protocol/index.ts";
 import { versionGap, type ViewServerError } from "../errors.ts";
 
-export type SubscriptionState<TData extends readonly RuntimeRow[]> = {
-  readonly data: TData;
+export type SubscriptionState = {
+  readonly data: readonly RuntimeRow[];
   readonly totalRows: number;
   readonly status: SubscriptionStatus;
   readonly error?: ViewServerError | undefined;
 };
 
-export type SubscriptionListener<TData extends readonly RuntimeRow[]> = (
-  state: SubscriptionState<TData>,
-) => void;
+export type SubscriptionListener = (state: SubscriptionState) => void;
 
-export class SubscriptionStore<TData extends readonly RuntimeRow[]> {
-  #state: SubscriptionState<TData>;
-  #listeners = new Set<SubscriptionListener<TData>>();
+export class SubscriptionStore {
+  #state: SubscriptionState;
+  #listeners = new Set<SubscriptionListener>();
   #version: bigint | undefined;
   #rowKey: RuntimeRowKeyFn;
 
-  constructor(initialData: TData, rowKey: RuntimeRowKeyFn = (row) => rowKeyByField(row, "id")) {
+  constructor(
+    initialData: readonly RuntimeRow[],
+    rowKey: RuntimeRowKeyFn = (row) => rowKeyByField(row, "id"),
+  ) {
     this.#state = {
       data: initialData,
       totalRows: initialData.length,
@@ -35,11 +36,11 @@ export class SubscriptionStore<TData extends readonly RuntimeRow[]> {
     this.#rowKey = rowKey;
   }
 
-  get snapshot(): SubscriptionState<TData> {
+  get snapshot(): SubscriptionState {
     return this.#state;
   }
 
-  subscribe(listener: SubscriptionListener<TData>): () => void {
+  subscribe(listener: SubscriptionListener): () => void {
     this.#listeners.add(listener);
     listener(this.#state);
     return () => {
@@ -63,7 +64,7 @@ export class SubscriptionStore<TData extends readonly RuntimeRow[]> {
     if (event.type === "snapshot") {
       this.#version = BigInt(event.meta.version);
       this.#update({
-        data: event.rows as TData,
+        data: event.rows,
         totalRows: event.meta.totalRows,
         status: "live",
         error: undefined,
@@ -81,14 +82,14 @@ export class SubscriptionStore<TData extends readonly RuntimeRow[]> {
       data:
         event.ops.length === 0
           ? this.#state.data
-          : (applyDeltaOperations(this.#state.data, event, this.#rowKey) as TData),
+          : applyDeltaOperations(this.#state.data, event, this.#rowKey),
       totalRows: event.meta.totalRows,
       status: "live",
       error: undefined,
     });
   }
 
-  #update(next: SubscriptionState<TData>): void {
+  #update(next: SubscriptionState): void {
     this.#state = next;
     for (const listener of this.#listeners) {
       listener(next);
@@ -96,8 +97,8 @@ export class SubscriptionStore<TData extends readonly RuntimeRow[]> {
   }
 }
 
-export function applyDeltaOperations<TData extends readonly RuntimeRow[]>(
-  rows: TData,
+export function applyDeltaOperations(
+  rows: readonly RuntimeRow[],
   event: DeltaEvent<readonly RuntimeRow[]>,
   rowKeyOrIdField: RuntimeRowKeyFn | string = "id",
 ): readonly RuntimeRow[] {

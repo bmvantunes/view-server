@@ -16,7 +16,11 @@ import {
   type VersionedRow,
 } from "./snapshot-backend.ts";
 
-type ColumnType = "String" | "Float64" | "Int64" | "UInt8" | "Decimal(76, 38)";
+const BIG_DECIMAL_SCALE = 38;
+type BigDecimalColumnType = "Decimal(76, 38)";
+const BIG_DECIMAL_COLUMN_TYPE: BigDecimalColumnType = "Decimal(76, 38)";
+
+type ColumnType = "String" | "Float64" | "Int64" | "UInt8" | BigDecimalColumnType;
 
 type Column = {
   readonly name: string;
@@ -49,8 +53,7 @@ class ChdbSnapshotBackend implements SnapshotBackend {
   #columns: readonly Column[] = [];
   #backendVersion = 0n;
   #literalStringFields: ReadonlySet<string> = new Set();
-  #pendingMutations: MutationLogEntry[] = [];
-  #pendingHighestVersion: WorkerVersion | undefined;
+  #pendingByVersion = new Map<WorkerVersion, MutationLogEntry>();
   #flushScheduled = false;
   #closed = false;
   #lastFlushError: unknown;
@@ -63,98 +66,128 @@ class ChdbSnapshotBackend implements SnapshotBackend {
     readonly version: WorkerVersion;
     readonly literalStringFields?: ReadonlySet<string> | undefined;
   }): Effect.Effect<void, ViewServerError> {
-    return Effect.try({
-      try: () => {
-        this.#topic = args.topic;
-        this.#idField = args.idField;
-        const initialRows = args.rows.map((entry) => ({ ...entry.row }));
-        this.#backendVersion = args.version;
-        this.#literalStringFields = args.literalStringFields ?? new Set();
-        this.#pendingMutations = [];
-        this.#pendingHighestVersion = undefined;
-        this.#flushScheduled = false;
-        this.#closed = false;
-        this.#lastFlushError = undefined;
-        this.#tableReady = false;
-        this.#columns = inferColumns(initialRows, this.#idField);
-        this.#session.query(`DROP TABLE IF EXISTS ${TABLE_NAME}`);
-        if (this.#columns.length > 0) {
-          this.#createTable();
-          this.#insertEvents(
-            initialRows.map((row) => ({
-              row,
-              deleted: false,
-              version: args.version,
-            })),
-          );
-        }
-      },
-      catch: (error) => snapshotBackendFailed(args.topic, error),
-    });
+    return Effect.fn("view-server.chdb.init")(function* (backend: ChdbSnapshotBackend) {
+      yield* Effect.annotateCurrentSpan({
+        "view_server.topic": args.topic,
+        "view_server.rows": args.rows.length,
+        "view_server.backend_version": args.version.toString(),
+      });
+      yield* Effect.try({
+        try: () => {
+          backend.#topic = args.topic;
+          backend.#idField = args.idField;
+          const initialRows = args.rows.map((entry) => ({ ...entry.row }));
+          backend.#backendVersion = args.version;
+          backend.#literalStringFields = args.literalStringFields ?? new Set();
+          backend.#pendingByVersion = new Map();
+          backend.#flushScheduled = false;
+          backend.#closed = false;
+          backend.#lastFlushError = undefined;
+          backend.#tableReady = false;
+          backend.#columns = inferColumns(initialRows, backend.#idField);
+          backend.#session.query(`DROP TABLE IF EXISTS ${TABLE_NAME}`);
+          if (backend.#columns.length > 0) {
+            backend.#createTable();
+            backend.#insertEvents(
+              initialRows.map((row) => ({
+                row,
+                deleted: false,
+                version: args.version,
+              })),
+            );
+          }
+        },
+        catch: (error) => snapshotBackendFailed(args.topic, error),
+      });
+    })(this);
   }
 
   applyBatch(args: {
     readonly mutations: readonly MutationLogEntry[];
     readonly highestVersion: WorkerVersion;
   }): Effect.Effect<void, ViewServerError> {
-    return Effect.try({
-      try: () => {
-        if (this.#closed) {
-          return;
-        }
-        this.#pendingMutations.push(...args.mutations);
-        this.#pendingHighestVersion = args.highestVersion;
-        this.#scheduleFlush();
-      },
-      catch: (error) => snapshotBackendFailed(this.#topic, error),
-    });
+    return Effect.fnUntraced(function* (backend: ChdbSnapshotBackend) {
+      yield* Effect.try({
+        try: () => {
+          if (backend.#closed) {
+            return;
+          }
+          for (const mutation of args.mutations) {
+            if (mutation.version > backend.#backendVersion) {
+              backend.#pendingByVersion.set(mutation.version, mutation);
+            }
+          }
+          backend.#scheduleFlush();
+        },
+        catch: (error) => snapshotBackendFailed(backend.#topic, error),
+      });
+    })(this);
   }
 
   snapshot(args: {
     readonly query: RuntimeQuery;
     readonly targetVersion: WorkerVersion;
   }): Effect.Effect<SnapshotBackendResult, ViewServerError> {
-    return Effect.try({
-      try: () => {
-        if (this.#lastFlushError !== undefined) {
-          throw this.#lastFlushError;
-        }
-        if (!this.#tableReady) {
+    return Effect.fn("view-server.chdb.snapshot")(function* (backend: ChdbSnapshotBackend) {
+      yield* Effect.annotateCurrentSpan({
+        "view_server.topic": backend.#topic,
+        "view_server.worker_version": args.targetVersion.toString(),
+        "view_server.backend_version": backend.#backendVersion.toString(),
+      });
+      const result = yield* Effect.try({
+        try: () => {
+          if (backend.#lastFlushError !== undefined) {
+            throw backend.#lastFlushError;
+          }
+          if (!backend.#tableReady) {
+            return {
+              rows: [],
+              totalRows: 0,
+              backendVersion: backend.#backendVersion,
+            };
+          }
+          const sql = compileQuerySql(
+            args.query,
+            backend.#idField,
+            backend.#columns,
+            backend.#literalStringFields,
+          );
+          const rows = parseJsonEachRow(
+            backend.#session.query(withJsonSettings(sql.rowsSql), "JSONEachRow"),
+            sql.decimalFields,
+          );
+          const totalRows = parseCount(
+            backend.#session.query(withJsonSettings(sql.countSql), "JSONEachRow"),
+          );
           return {
-            rows: [],
-            totalRows: 0,
-            backendVersion: this.#backendVersion,
+            rows,
+            totalRows,
+            backendVersion: backend.#backendVersion,
           };
-        }
-        const sql = compileQuerySql(
-          args.query,
-          this.#idField,
-          this.#columns,
-          this.#literalStringFields,
-        );
-        const rows = parseJsonEachRow(
-          this.#session.query(withJsonSettings(sql.rowsSql), "JSONEachRow"),
-          sql.decimalFields,
-        );
-        const totalRows = parseCount(
-          this.#session.query(withJsonSettings(sql.countSql), "JSONEachRow"),
-        );
-        return {
-          rows,
-          totalRows,
-          backendVersion: this.#backendVersion,
-        };
-      },
-      catch: (error) => snapshotBackendFailed(this.#topic, error),
-    });
+        },
+        catch: (error) => snapshotBackendFailed(backend.#topic, error),
+      });
+      yield* Effect.annotateCurrentSpan({
+        "view_server.rows": result.rows.length,
+        "view_server.total_rows": result.totalRows,
+        "view_server.backend_version": result.backendVersion.toString(),
+      });
+      return result;
+    })(this);
   }
 
   close(): Effect.Effect<void> {
-    return Effect.sync(() => {
-      this.#closed = true;
-      this.#flushPending();
-      this.#session.cleanup();
-    });
+    return Effect.fn("view-server.chdb.close")(function* (backend: ChdbSnapshotBackend) {
+      yield* Effect.annotateCurrentSpan({
+        "view_server.topic": backend.#topic,
+        "view_server.backend_version": backend.#backendVersion.toString(),
+      });
+      backend.#closed = true;
+      yield* backend.#flushPendingEffect();
+      yield* Effect.sync(() => {
+        backend.#session.cleanup();
+      });
+    })(this);
   }
 
   #scheduleFlush(): void {
@@ -163,25 +196,56 @@ class ChdbSnapshotBackend implements SnapshotBackend {
     }
     this.#flushScheduled = true;
     queueMicrotask(() => {
-      this.#flushPending();
+      Effect.runFork(this.#flushPendingEffect());
     });
   }
 
-  #flushPending(): void {
-    this.#flushScheduled = false;
-    if (this.#pendingMutations.length === 0 || this.#pendingHighestVersion === undefined) {
-      return;
-    }
-    const mutations = this.#pendingMutations;
-    const highestVersion = this.#pendingHighestVersion;
-    this.#pendingMutations = [];
-    this.#pendingHighestVersion = undefined;
-    try {
-      this.#applyMutations(mutations);
-      this.#backendVersion = highestVersion;
-      this.#lastFlushError = undefined;
-    } catch (error) {
-      this.#lastFlushError = error;
+  #flushPendingEffect(): Effect.Effect<void> {
+    return Effect.fn("view-server.chdb.flush")(function* (backend: ChdbSnapshotBackend) {
+      backend.#flushScheduled = false;
+      const mutations = backend.#contiguousPendingMutations();
+      yield* Effect.annotateCurrentSpan({
+        "view_server.topic": backend.#topic,
+        "view_server.batch_size": mutations.length,
+        "view_server.backend_version": backend.#backendVersion.toString(),
+      });
+      if (mutations.length === 0) {
+        return;
+      }
+      const highestVersion = mutations[mutations.length - 1]?.version;
+      if (highestVersion === undefined) {
+        return;
+      }
+      let flushedVersion: WorkerVersion | undefined;
+      try {
+        backend.#applyMutations(mutations);
+        for (const mutation of mutations) {
+          backend.#pendingByVersion.delete(mutation.version);
+        }
+        backend.#backendVersion = highestVersion;
+        backend.#lastFlushError = undefined;
+        flushedVersion = highestVersion;
+      } catch (error) {
+        backend.#lastFlushError = error;
+      }
+      if (flushedVersion !== undefined) {
+        yield* Effect.annotateCurrentSpan({
+          "view_server.backend_version": flushedVersion.toString(),
+        });
+      }
+    })(this);
+  }
+
+  #contiguousPendingMutations(): readonly MutationLogEntry[] {
+    const mutations: MutationLogEntry[] = [];
+    let nextVersion = this.#backendVersion + 1n;
+    while (true) {
+      const mutation = this.#pendingByVersion.get(nextVersion);
+      if (mutation === undefined) {
+        return mutations;
+      }
+      mutations.push(mutation);
+      nextVersion = nextVersion + 1n;
     }
   }
 
@@ -311,7 +375,7 @@ function inferColumnType(values: readonly unknown[]): ColumnType {
     return "String";
   }
   if (values.some(BigDecimal.isBigDecimal)) {
-    return "Decimal(76, 38)";
+    return BIG_DECIMAL_COLUMN_TYPE;
   }
   if (values.some((value) => typeof value === "boolean")) {
     return "UInt8";
@@ -414,7 +478,9 @@ function selectedDecimalFields(
   columns: readonly Column[],
 ): ReadonlySet<string> {
   const decimalColumns = new Set(
-    columns.filter((column) => column.type === "Decimal(76, 38)").map((column) => column.name),
+    columns
+      .filter((column) => column.type === BIG_DECIMAL_COLUMN_TYPE)
+      .map((column) => column.name),
   );
   return new Set(selected.filter((field) => decimalColumns.has(field)));
 }
@@ -424,7 +490,9 @@ function groupedDecimalFields(
   columns: readonly Column[],
 ): ReadonlySet<string> {
   const decimalColumns = new Set(
-    columns.filter((column) => column.type === "Decimal(76, 38)").map((column) => column.name),
+    columns
+      .filter((column) => column.type === BIG_DECIMAL_COLUMN_TYPE)
+      .map((column) => column.name),
   );
   const fields = new Set(query.groupBy.filter((field) => decimalColumns.has(field)));
   for (const [alias, aggregate] of Object.entries(query.aggregates)) {
@@ -581,7 +649,7 @@ function isGroupedQuery(query: RuntimeQuery): query is RuntimeGroupedQuery {
 
 function compileValue(value: unknown): string {
   if (BigDecimal.isBigDecimal(value)) {
-    return `toDecimal256(${literal(BigDecimal.format(value))}, 38)`;
+    return `toDecimal256(${literal(BigDecimal.format(value))}, ${BIG_DECIMAL_SCALE})`;
   }
   if (typeof value === "string") {
     return literal(value);

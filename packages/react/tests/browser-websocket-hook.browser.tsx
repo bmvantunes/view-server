@@ -5,10 +5,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, inject, test } from "vite-plus/test";
 import { defineConfig, type RawQuery } from "@view-server/core";
 import {
-  ViewServerProvider,
+  createViewServerReact,
   createViewServerHooks,
   makeBrowserWebsocketClient,
-  useSubscription,
   type ViewServerHooks,
 } from "../src/index.ts";
 
@@ -32,6 +31,9 @@ const config = defineConfig({
     },
   },
 });
+
+const viewServerReact = createViewServerReact(config);
+const { ViewServerProvider, useSubscription } = viewServerReact;
 
 const roots: Root[] = [];
 
@@ -74,8 +76,8 @@ describe("browser websocket useSubscription", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const client = yield* makeBrowserWebsocketClient<typeof config>(url);
-          const hooks = createViewServerHooks(client);
+          const client = yield* makeBrowserWebsocketClient<typeof config>(url, config);
+          const hooks = createViewServerHooks(client, config);
 
           yield* client.publish("orders", {
             id: `${runId}-1`,
@@ -162,7 +164,7 @@ function renderProviderGrid(url: string, query: ReturnType<typeof makeQuery>) {
   roots.push(root);
   flushSync(() =>
     root.render(
-      <ViewServerProvider url={url} config={config}>
+      <ViewServerProvider url={url}>
         <ProviderOrdersGrid query={query} />
       </ViewServerProvider>,
     ),
@@ -170,10 +172,7 @@ function renderProviderGrid(url: string, query: ReturnType<typeof makeQuery>) {
 }
 
 function ProviderOrdersGrid(props: { readonly query: ReturnType<typeof makeQuery> }) {
-  const result = useSubscription<typeof config, "orders", ReturnType<typeof makeQuery>>(
-    "orders",
-    props.query,
-  );
+  const result = useSubscription("orders", props.query);
   return (
     <div>
       <div>provider:rows={result.totalRows}</div>

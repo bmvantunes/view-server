@@ -36,7 +36,7 @@ export function MetricsApp(props: { readonly rpcUrl?: string | undefined }) {
       Effect.gen(function* () {
         scope = yield* Scope.make();
         const client = yield* Scope.provide(scope)(
-          makeBrowserWebsocketClient<MetricsViewServerConfig>(rpcUrl),
+          makeBrowserWebsocketClient<MetricsViewServerConfig>(rpcUrl, metricsViewServerConfig),
         );
         return createViewServerHooks(client, metricsViewServerConfig);
       }),
