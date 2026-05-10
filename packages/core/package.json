@@ -1,0 +1,53 @@
+{
+  "name": "@view-server/core",
+  "version": "0.0.0",
+  "private": true,
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./snapshot/chdb": {
+      "types": "./src/snapshot/chdb-backend.ts",
+      "import": "./src/snapshot/chdb-backend.ts"
+    },
+    "./rpc/websocket": {
+      "types": "./src/rpc/websocket.ts",
+      "import": "./src/rpc/websocket.ts"
+    },
+    "./kafka/platformatic": {
+      "types": "./src/kafka/platformatic-consumer.ts",
+      "import": "./src/kafka/platformatic-consumer.ts"
+    },
+    "./worker/node": {
+      "types": "./src/worker/topic-worker-node-host.ts",
+      "import": "./src/worker/topic-worker-node-host.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "vp pack",
+    "dev": "vp pack --watch",
+    "test": "vitest run --config vitest.config.ts",
+    "check": "vp check"
+  },
+  "dependencies": {
+    "@effect/platform-node": "catalog:",
+    "@effect/sql-clickhouse": "catalog:",
+    "@platformatic/kafka": "catalog:",
+    "chdb": "catalog:",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/node": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
+  }
+}

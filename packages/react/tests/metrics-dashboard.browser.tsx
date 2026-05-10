@@ -1,0 +1,104 @@
+import React from "react";
+import { flushSync } from "react-dom";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, describe, expect, test } from "vite-plus/test";
+import {
+  VIEW_SERVER_HEALTH_TOPIC,
+  type ViewServerConfig,
+  type ViewServerHealthRow,
+} from "@view-server/core";
+import {
+  ViewServerMetricsDashboard,
+  viewServerHealthQuery,
+  type ViewServerHooks,
+} from "../src/index.ts";
+
+const roots: Root[] = [];
+
+afterEach(() => {
+  for (const root of roots.splice(0)) {
+    root.unmount();
+  }
+  document.body.innerHTML = "";
+});
+
+describe("ViewServerMetricsDashboard", () => {
+  test("renders live health topic rows through the public subscription hook", () => {
+    const calls: { topic?: unknown; query?: unknown } = {};
+    const hooks = {
+      useSubscription(topic: unknown, query: unknown) {
+        calls.topic = topic;
+        calls.query = query;
+        return {
+          data: healthRows,
+          totalRows: healthRows.length,
+          status: "live",
+        };
+      },
+    } as ViewServerHooks<ViewServerConfig>;
+
+    render(<ViewServerMetricsDashboard hooks={hooks} />);
+
+    expect(calls.topic).toBe(VIEW_SERVER_HEALTH_TOPIC);
+    expect(calls.query).toBe(viewServerHealthQuery);
+    expect(document.body.textContent).toContain("Realtime view control");
+    expect(document.body.textContent).toContain("ready");
+    expect(document.body.textContent).toContain("orders");
+    expect(document.body.textContent).toContain("1,024");
+    expect(document.body.textContent).toContain("12ms");
+  });
+});
+
+function render(element: React.ReactNode): void {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.push(root);
+  flushSync(() => root.render(element));
+}
+
+const now = BigInt(Date.UTC(2026, 4, 10, 12, 0, 0));
+
+const healthRows: readonly ViewServerHealthRow[] = [
+  {
+    id: "server",
+    kind: "server",
+    rows: 1_024,
+    subscribers: 3,
+    queueDepth: 0,
+    workerLagP95Ms: 2,
+    deltaFanoutP95Ms: 4,
+    publishLatencyP95Ms: 12,
+    snapshotLatencyP95Ms: 31,
+    chdbSnapshotLatencyP95Ms: 9,
+    kafkaLagTotal: 0,
+    kafkaLagMax: 0,
+    kafkaPartitions: 0,
+    lastKafkaOffset: 0,
+    lastKafkaEndOffset: 0,
+    rssMb: 96,
+    status: "ready",
+    updatedAt: now,
+  },
+  {
+    id: "topic:orders",
+    kind: "topic",
+    topic: "orders",
+    rows: 1_024,
+    subscribers: 3,
+    queueDepth: 0,
+    workerLagP95Ms: 2,
+    deltaFanoutP95Ms: 4,
+    publishLatencyP95Ms: 12,
+    snapshotLatencyP95Ms: 31,
+    chdbSnapshotLatencyP95Ms: 9,
+    kafkaLagTotal: 0,
+    kafkaLagMax: 0,
+    kafkaPartitions: 0,
+    lastKafkaOffset: 0,
+    lastKafkaEndOffset: 0,
+    rssMb: 96,
+    status: "ready",
+    updatedAt: now,
+  },
+];

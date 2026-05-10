@@ -1,0 +1,95 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: #e8eee9;
+  background:
+    linear-gradient(90deg, rgba(191, 219, 199, 0.05) 1px, transparent 1px),
+    linear-gradient(rgba(191, 219, 199, 0.05) 1px, transparent 1px), #050705;
+  background-size: 32px 32px;
+  font-family:
+    "IBM Plex Sans",
+    "Aptos",
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.metrics-app {
+  min-height: 100vh;
+  padding: 18px 0;
+}
+
+.metrics-app__state {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 18px;
+}
+
+.metrics-app__panel {
+  width: min(560px, 100%);
+  border: 1px solid rgba(154, 181, 164, 0.28);
+  border-radius: 8px;
+  background: #0a0e0b;
+  padding: 22px;
+}
+
+.metrics-app__label {
+  margin: 0;
+  color: #a9b7ad;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.metrics-app__title {
+  margin: 8px 0 0;
+  color: #f4f8f2;
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 24px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.metrics-app__message {
+  margin: 14px 0 0;
+  color: #d9e4dc;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.metrics-app__panel[data-status="error"] {
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.metrics-app__panel[data-status="error"] .metrics-app__label {
+  color: #ffb4a9;
+}
+
+@media (max-width: 720px) {
+  .metrics-app {
+    padding: 12px 0;
+  }
+
+  .metrics-app__state {
+    padding: 12px;
+  }
+}
