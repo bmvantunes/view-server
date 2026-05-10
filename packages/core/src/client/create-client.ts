@@ -1,4 +1,4 @@
-import { Effect, Fiber, Stream } from "effect";
+import { Effect, Fiber, Queue, Stream } from "effect";
 import type * as Scope from "effect/Scope";
 import type * as RpcClient from "effect/unstable/rpc/RpcClient";
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError";
@@ -169,18 +169,40 @@ export function createViewServerClient<TConfig extends ViewServerConfig>(
                 ),
               ),
             );
-          yield* stream.pipe(Stream.runForEach(onEvent), Effect.mapError(toViewServerError));
+          const events = yield* stream.pipe(Stream.toQueue({ capacity: 16 }));
+          yield* Effect.whileLoop({
+            while: () => !closed,
+            body: () =>
+              Queue.take(events).pipe(
+                Effect.flatMap((event) =>
+                  event.requestId === currentRequestId ? onEvent(event) : Effect.void,
+                ),
+              ),
+            step: () => undefined,
+          }).pipe(
+            Effect.mapError(toViewServerError),
+            Effect.flatMap(() => Effect.fail(transportError("subscription stream ended"))),
+          );
         });
-        const fiber = yield* Effect.whileLoop({
+        const scope = yield* Effect.scope;
+        const subscriptionLoop = Effect.whileLoop({
           while: () => !closed,
           body: () =>
             runAttempt().pipe(
-              Effect.catchTag("TransportError", () =>
-                !closed ? Effect.sleep("250 millis") : Effect.void,
-              ),
+              Effect.catchTags({
+                TransportError: () => (!closed ? Effect.sleep("250 millis") : Effect.void),
+                BackpressureExceeded: () =>
+                  !closed
+                    ? rpcClient.Unsubscribe({ requestId: currentRequestId }).pipe(
+                        Effect.ignore,
+                        Effect.flatMap(() => Effect.sleep("250 millis")),
+                      )
+                    : Effect.void,
+              }),
             ),
           step: () => undefined,
-        }).pipe(Effect.forkScoped({ startImmediately: true }));
+        });
+        const fiber = yield* Effect.forkIn(subscriptionLoop, scope, { startImmediately: true });
         return {
           get requestId() {
             return currentRequestId;

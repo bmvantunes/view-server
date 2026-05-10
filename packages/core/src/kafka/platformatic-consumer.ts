@@ -2,7 +2,7 @@ import { Admin, Consumer, type Message, type Offsets } from "@platformatic/kafka
 import { Effect } from "effect";
 import type { KafkaSourceConfig, RowObject } from "../config/index.ts";
 import { kafkaIngestFailed, isViewServerError, type ViewServerError } from "../errors.ts";
-import type { KafkaTopicConsumer, KafkaTopicVerifier } from "./types.ts";
+import type { KafkaBatchMetrics, KafkaTopicConsumer, KafkaTopicVerifier } from "./types.ts";
 
 export type PlatformaticKafkaTopicConsumerOptions = {
   readonly brokers: readonly string[];
@@ -50,10 +50,12 @@ export function createPlatformaticKafkaTopicConsumer(
               bootstrapBrokers: [...options.brokers],
             });
             const latestLagByPartition = new Map<number, bigint>();
+            let latestLagMetrics: KafkaBatchMetrics | undefined;
             const onLag = (lag: Offsets) => {
               latestLagByPartition.clear();
               const topicLag = lag.get(args.topic);
               if (topicLag === undefined) {
+                latestLagMetrics = undefined;
                 return;
               }
               topicLag.forEach((partitionLag, partition) => {
@@ -61,6 +63,7 @@ export function createPlatformaticKafkaTopicConsumer(
                   latestLagByPartition.set(partition, partitionLag);
                 }
               });
+              latestLagMetrics = kafkaLagMetrics(topicLag);
             };
             consumer.on("consumer:lag", onLag);
             const stream = await consumer.consume({
@@ -81,10 +84,21 @@ export function createPlatformaticKafkaTopicConsumer(
               }
               const messages = pending.splice(0, pending.length);
               const lag = maxLagForMessages(messages, latestLagByPartition);
+              const lastMessage = messages[messages.length - 1];
+              const metrics =
+                latestLagMetrics === undefined
+                  ? undefined
+                  : {
+                      ...latestLagMetrics,
+                      ...(lastMessage === undefined
+                        ? {}
+                        : { offset: spanSafeNumber(lastMessage.offset) }),
+                    };
               await Effect.runPromise(
                 args.onBatch({
                   records: messages.map(toKafkaConsumerRecord),
                   ...(lag === undefined ? {} : { lag }),
+                  ...(metrics === undefined ? {} : { metrics }),
                   commit:
                     args.commitPolicy === "after-ingest"
                       ? commitMessages(args.topic, messages, lag)
@@ -128,13 +142,21 @@ export function createPlatformaticKafkaConsumerFactory(
   options: PlatformaticKafkaConsumerFactoryOptions = {},
 ): (source: KafkaSourceConfig<RowObject, string>) => KafkaTopicConsumer {
   return (source) =>
-    createPlatformaticKafkaTopicConsumer({
-      brokers: source.brokers,
-      clientId: `${options.clientIdPrefix ?? "view-server"}-${source.topic}`,
-      batchSize: options.batchSize,
-      sessionTimeout: options.sessionTimeout,
-      heartbeatInterval: options.heartbeatInterval,
-    });
+    createPlatformaticKafkaTopicConsumer(platformaticKafkaTopicConsumerOptions(source, options));
+}
+
+export function platformaticKafkaTopicConsumerOptions(
+  source: KafkaSourceConfig<RowObject, string>,
+  options: PlatformaticKafkaConsumerFactoryOptions = {},
+): PlatformaticKafkaTopicConsumerOptions {
+  return {
+    brokers: source.brokers,
+    clientId: `${options.clientIdPrefix ?? "view-server"}-${source.topic}`,
+    batchSize: options.batchSize,
+    sessionTimeout: options.sessionTimeout,
+    heartbeatInterval: options.heartbeatInterval,
+    lagMonitoringIntervalMs: options.lagMonitoringIntervalMs,
+  };
 }
 
 export function createPlatformaticKafkaTopicVerifier(
@@ -227,6 +249,27 @@ function maxLagForMessages(
     }
   }
   return spanSafeNumber(maxLag);
+}
+
+function kafkaLagMetrics(topicLag: readonly bigint[]): KafkaBatchMetrics {
+  let lagTotal = 0n;
+  let lagMax = 0n;
+  let partitions = 0;
+  for (const partitionLag of topicLag) {
+    if (partitionLag < 0n) {
+      continue;
+    }
+    partitions += 1;
+    lagTotal += partitionLag;
+    if (partitionLag > lagMax) {
+      lagMax = partitionLag;
+    }
+  }
+  return {
+    lagTotal: spanSafeNumber(lagTotal) ?? 0,
+    lagMax: spanSafeNumber(lagMax) ?? 0,
+    partitions,
+  };
 }
 
 function spanSafeNumber(value: bigint | undefined): number | undefined {

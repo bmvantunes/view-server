@@ -5,7 +5,16 @@ import type { ViewServerError } from "../errors.ts";
 export type KafkaRecordBatch = {
   readonly records: readonly KafkaConsumerRecord[];
   readonly lag?: number | undefined;
+  readonly metrics?: KafkaBatchMetrics | undefined;
   readonly commit: Effect.Effect<void, ViewServerError>;
+};
+
+export type KafkaBatchMetrics = {
+  readonly lagTotal: number;
+  readonly lagMax: number;
+  readonly partitions: number;
+  readonly offset?: number | undefined;
+  readonly endOffset?: number | undefined;
 };
 
 export type KafkaTopicConsumerRunArgs = {

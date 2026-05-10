@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Deferred, Effect, Exit, Fiber, Queue, Schema, Stream } from "effect";
+import { Deferred, Effect, Exit, Fiber, Option, Queue, Schema, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import * as RpcTest from "effect/unstable/rpc/RpcTest";
 import { createViewServerClient, type ViewServerRpcTransport } from "../src/client/index.ts";
@@ -26,6 +26,18 @@ type OrderRow = {
 };
 
 const config = defineConfig({
+  topics: {
+    orders: {
+      id: "id",
+      schema: Order,
+    },
+  },
+});
+
+const backpressureConfig = defineConfig({
+  worker: {
+    maxQueueDepth: 1,
+  },
   topics: {
     orders: {
       id: "id",
@@ -194,6 +206,110 @@ describe("Effect RPC in-memory", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("ignores stale events from old subscription request ids after resubscribe", () =>
+    Effect.gen(function* () {
+      const seen: SubscriptionEvent<readonly RuntimeRow[]>[] = [];
+      const requestIds: string[] = [];
+      const freshSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+      const freshDelta = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+      const transport: ViewServerRpcTransport = {
+        Query: () => Effect.succeed({ rows: [], totalRows: 0, version: "0" }),
+        Subscribe: (payload) => {
+          requestIds.push(payload.requestId);
+          if (requestIds.length === 1) {
+            return Stream.fail(transportError("socket closed"));
+          }
+          const staleRequestId = requestIds[0] ?? "stale";
+          return Stream.concat(
+            Stream.make(
+              {
+                type: "snapshot" as const,
+                requestId: payload.requestId,
+                rows: [{ id: "fresh-snapshot", price: 100 }],
+                meta: {
+                  version: "1",
+                  totalRows: 1,
+                  serverTime: 1,
+                },
+              },
+              {
+                type: "delta" as const,
+                requestId: staleRequestId,
+                ops: [
+                  {
+                    type: "upsert" as const,
+                    row: { id: "stale-delta", price: 999 },
+                  },
+                ],
+                meta: {
+                  fromVersion: "1",
+                  toVersion: "2",
+                  totalRows: 2,
+                  serverTime: 2,
+                },
+              },
+              {
+                type: "delta" as const,
+                requestId: payload.requestId,
+                ops: [
+                  {
+                    type: "upsert" as const,
+                    row: { id: "fresh-delta", price: 200 },
+                  },
+                ],
+                meta: {
+                  fromVersion: "2",
+                  toVersion: "3",
+                  totalRows: 2,
+                  serverTime: 3,
+                },
+              },
+            ),
+            Stream.never,
+          );
+        },
+        Unsubscribe: () => Effect.void,
+        Publish: () => Effect.void,
+        DeltaPublish: () => Effect.void,
+        Health: () => Effect.succeed({ ok: true, topics: {} }),
+      };
+      const client = createViewServerClient<typeof config>(transport, config);
+
+      const subscription = yield* client.subscribe("orders", query, (event) =>
+        Effect.sync(() => {
+          seen.push(event);
+        }).pipe(
+          Effect.flatMap(() =>
+            event.type === "snapshot"
+              ? Deferred.succeed(freshSnapshot, event)
+              : Deferred.succeed(freshDelta, event),
+          ),
+          Effect.asVoid,
+        ),
+      );
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust(250);
+
+      const snapshot = yield* Deferred.await(freshSnapshot).pipe(Effect.timeout("1 second"));
+      const delta = yield* Deferred.await(freshDelta).pipe(Effect.timeout("1 second"));
+
+      expect(snapshot.requestId).toBe(requestIds[1]);
+      expect(delta.requestId).toBe(requestIds[1]);
+      expect(seen.map((event) => event.requestId)).toEqual([requestIds[1], requestIds[1]]);
+      expect(
+        seen.some(
+          (event) =>
+            event.type === "delta" &&
+            event.ops.some(
+              (operation) => operation.type === "upsert" && operation.row.id === "stale-delta",
+            ),
+        ),
+      ).toBe(false);
+
+      yield* subscription.close;
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("Unsubscribe closes the stream and stops future deltas", () =>
     Effect.gen(function* () {
       const runtime = yield* makeViewServerRuntime(config, {
@@ -298,6 +414,232 @@ describe("Effect RPC in-memory", () => {
         query: healthQuery,
       });
       expect(rowById(unsubscribedHealth.rows, "topic:orders").subscribers).toBe(0);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("reports queued subscription deltas as health queue depth", () =>
+    Effect.gen(function* () {
+      const runtime = yield* makeViewServerRuntime(
+        defineConfig({
+          worker: {
+            maxQueueDepth: 1,
+          },
+          topics: {
+            orders: {
+              id: "id",
+              schema: Order,
+            },
+          },
+        }),
+        {
+          initialRows: {
+            orders: [{ id: "o-1", symbol: "AAPL", price: 100 }],
+          },
+        },
+      );
+      const client = yield* RpcTest.makeClient(ViewServerRpcs).pipe(
+        Effect.provide(ViewServerHandlersLive),
+        Effect.provideService(ViewServerRuntime, runtime),
+      );
+      const firstSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+      const firstDelta = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+      const releaseDelta = yield* Deferred.make<void>();
+
+      yield* client
+        .Subscribe({
+          requestId: "health-queue-depth",
+          topic: "orders",
+          query,
+        })
+        .pipe(
+          Stream.runForEach((event) => {
+            if (event.type === "snapshot") {
+              return Deferred.succeed(firstSnapshot, event).pipe(Effect.asVoid);
+            }
+            return Deferred.succeed(firstDelta, event).pipe(
+              Effect.flatMap(() => Deferred.await(releaseDelta)),
+            );
+          }),
+          Effect.forkScoped,
+        );
+
+      const snapshot = yield* Deferred.await(firstSnapshot).pipe(Effect.timeout("1 second"));
+      expect(snapshot.type).toBe("snapshot");
+
+      yield* client.Publish({
+        topic: "orders",
+        row: { id: "o-2", symbol: "MSFT", price: 200 },
+      });
+      const delta = yield* Deferred.await(firstDelta).pipe(Effect.timeout("1 second"));
+      expect(delta.type).toBe("delta");
+
+      yield* client.Publish({
+        topic: "orders",
+        row: { id: "o-3", symbol: "NVDA", price: 300 },
+      });
+
+      const health = yield* client.Query({
+        topic: VIEW_SERVER_HEALTH_TOPIC,
+        query: healthQuery,
+      });
+      expect(rowById(health.rows, "topic:orders")).toMatchObject({
+        queueDepth: 1,
+        status: "degraded",
+      });
+
+      yield* Deferred.succeed(releaseDelta, undefined);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("fails slow raw subscription streams with BackpressureExceeded", () =>
+    Effect.gen(function* () {
+      const runtime = yield* makeViewServerRuntime(
+        defineConfig({
+          worker: {
+            maxQueueDepth: 1,
+          },
+          topics: {
+            orders: {
+              id: "id",
+              schema: Order,
+            },
+          },
+        }),
+        {
+          initialRows: {
+            orders: [{ id: "o-1", symbol: "AAPL", price: 100 }],
+          },
+        },
+      );
+      const client = yield* RpcTest.makeClient(ViewServerRpcs).pipe(
+        Effect.provide(ViewServerHandlersLive),
+        Effect.provideService(ViewServerRuntime, runtime),
+      );
+      const firstSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+      const firstDelta = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+      const releaseDelta = yield* Deferred.make<void>();
+      let blockedFirstDelta = false;
+
+      const streamFiber = yield* client
+        .Subscribe({
+          requestId: "raw-backpressure",
+          topic: "orders",
+          query,
+        })
+        .pipe(
+          Stream.runForEach((event) => {
+            if (event.type === "snapshot") {
+              return Deferred.succeed(firstSnapshot, event).pipe(Effect.asVoid);
+            }
+            if (!blockedFirstDelta) {
+              blockedFirstDelta = true;
+              return Deferred.succeed(firstDelta, event).pipe(
+                Effect.flatMap(() => Deferred.await(releaseDelta)),
+              );
+            }
+            return Effect.void;
+          }),
+          Effect.exit,
+          Effect.forkScoped,
+        );
+
+      const snapshot = yield* Deferred.await(firstSnapshot).pipe(Effect.timeout("1 second"));
+      expect(snapshot.type).toBe("snapshot");
+
+      yield* client.Publish({
+        topic: "orders",
+        row: { id: "o-2", symbol: "MSFT", price: 200 },
+      });
+      const delta = yield* Deferred.await(firstDelta).pipe(Effect.timeout("1 second"));
+      expect(delta.type).toBe("delta");
+
+      yield* client.Publish({
+        topic: "orders",
+        row: { id: "o-3", symbol: "NVDA", price: 300 },
+      });
+      yield* client.Publish({
+        topic: "orders",
+        row: { id: "o-4", symbol: "TSLA", price: 400 },
+      });
+      yield* Deferred.succeed(releaseDelta, undefined);
+
+      const exit = yield* Fiber.join(streamFiber).pipe(Effect.timeout("1 second"));
+      const error = Option.getOrUndefined(Exit.findErrorOption(exit));
+      expect(error?._tag).toBe("BackpressureExceeded");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("generated clients resubscribe after server backpressure closes a stream", () =>
+    Effect.gen(function* () {
+      const runtime = yield* makeViewServerRuntime(backpressureConfig, {
+        initialRows: {
+          orders: [{ id: "o-1", symbol: "AAPL", price: 100 }],
+        },
+      });
+      const rpcClient = yield* RpcTest.makeClient(ViewServerRpcs).pipe(
+        Effect.provide(ViewServerHandlersLive),
+        Effect.provideService(ViewServerRuntime, runtime),
+      );
+      const client = createViewServerClient<typeof backpressureConfig>(
+        rpcClient,
+        backpressureConfig,
+      );
+      const firstSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+      const firstDelta = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+      const resubscribedSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+      const releaseDelta = yield* Deferred.make<void>();
+      let snapshots = 0;
+      let blockedFirstDelta = false;
+
+      const subscription = yield* client.subscribe("orders", query, (event) => {
+        if (event.type === "snapshot") {
+          snapshots += 1;
+          return snapshots === 1
+            ? Deferred.succeed(firstSnapshot, event).pipe(Effect.asVoid)
+            : Deferred.succeed(resubscribedSnapshot, event).pipe(Effect.asVoid);
+        }
+        if (!blockedFirstDelta) {
+          blockedFirstDelta = true;
+          return Deferred.succeed(firstDelta, event).pipe(
+            Effect.flatMap(() => Deferred.await(releaseDelta)),
+          );
+        }
+        return Effect.void;
+      });
+
+      const snapshot = yield* Deferred.await(firstSnapshot).pipe(Effect.timeout("1 second"));
+      expect(snapshot.type).toBe("snapshot");
+      yield* Effect.yieldNow;
+
+      yield* client
+        .publish("orders", { id: "o-2", symbol: "MSFT", price: 200 })
+        .pipe(Effect.timeout("1 second"));
+      const delta = yield* Deferred.await(firstDelta).pipe(Effect.timeout("1 second"));
+      expect(delta.type).toBe("delta");
+
+      const overflowPublish = yield* Effect.forEach(
+        Array.from({ length: 96 }, (_, index) => index + 3),
+        (index) =>
+          client.publish("orders", {
+            id: `o-${index}`,
+            symbol: `SYM-${index}`,
+            price: index * 100,
+          }),
+        { discard: true },
+      ).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(releaseDelta, undefined);
+      yield* Fiber.join(overflowPublish).pipe(Effect.ignore);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust(250);
+
+      const nextSnapshot = yield* Deferred.await(resubscribedSnapshot).pipe(
+        Effect.timeout("1 second"),
+      );
+      expect(nextSnapshot.type).toBe("snapshot");
+      expect(nextSnapshot.meta.totalRows).toBeGreaterThanOrEqual(3);
+
+      yield* subscription.close;
     }).pipe(Effect.scoped),
   );
 

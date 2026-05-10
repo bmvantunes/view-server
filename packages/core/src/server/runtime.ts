@@ -29,6 +29,7 @@ import type {
 } from "../protocol/index.ts";
 import {
   runKafkaSource,
+  type KafkaBatchMetrics,
   type KafkaTopicConsumer,
   type KafkaTopicVerifier,
 } from "../kafka/index.ts";
@@ -68,6 +69,11 @@ export type HealthResponse = {
         readonly subscribers: number;
         readonly queueDepth: number;
         readonly version: string;
+        readonly kafkaLagTotal: number;
+        readonly kafkaLagMax: number;
+        readonly kafkaPartitions: number;
+        readonly lastKafkaOffset: number;
+        readonly lastKafkaEndOffset: number;
         readonly status: "ready" | "degraded" | "stopping";
       }
     >
@@ -103,6 +109,7 @@ export function makeViewServerRuntime(
     });
     yield* verifyKafkaSourceTopics(normalized, options);
     const workers = new Map<string, TopicWorkerHost>();
+    const kafkaMetricsByTopic = new Map<string, KafkaRuntimeMetrics>();
     const makeTopicWorker = options.topicWorkerFactory ?? makeInProcessTopicWorkerHost;
 
     for (const [topic, topicConfig] of Object.entries(normalized.topics)) {
@@ -112,6 +119,7 @@ export function makeViewServerRuntime(
       const worker = yield* makeTopicWorker(topic, topicConfig, {
         initialRows: options.initialRows?.[topic],
         snapshotBackend: backend,
+        maxQueueDepth: normalized.worker.maxQueueDepth,
         mutationLogSize: normalized.worker.mutationLogSize,
       });
       workers.set(topic, worker);
@@ -153,16 +161,27 @@ export function makeViewServerRuntime(
           subscribers: number;
           queueDepth: number;
           version: string;
+          kafkaLagTotal: number;
+          kafkaLagMax: number;
+          kafkaPartitions: number;
+          lastKafkaOffset: number;
+          lastKafkaEndOffset: number;
           status: "ready" | "degraded" | "stopping";
         }
       > = {};
       for (const [topic, worker] of workers) {
         const metrics = yield* worker.metrics;
+        const kafkaMetrics = kafkaMetricsByTopic.get(topic) ?? emptyKafkaRuntimeMetrics;
         topics[topic] = {
           rows: metrics.rows,
           subscribers: metrics.subscribers,
           queueDepth: metrics.queueDepth,
           version: metrics.version.toString(),
+          kafkaLagTotal: kafkaMetrics.lagTotal,
+          kafkaLagMax: kafkaMetrics.lagMax,
+          kafkaPartitions: kafkaMetrics.partitions,
+          lastKafkaOffset: kafkaMetrics.offset,
+          lastKafkaEndOffset: kafkaMetrics.endOffset,
           status: metrics.status,
         };
       }
@@ -328,6 +347,14 @@ export function makeViewServerRuntime(
       yield* Effect.forEach(workers.values(), (worker) => worker.shutdown, { discard: true });
     });
 
+    const recordKafkaMetrics = Effect.fnUntraced(function* (
+      topic: string,
+      metrics: KafkaBatchMetrics,
+    ) {
+      kafkaMetricsByTopic.set(topic, kafkaRuntimeMetrics(metrics));
+      yield* syncHealthTopic();
+    });
+
     const runtime: ViewServerRuntimeShape = {
       config: normalized,
 
@@ -354,6 +381,7 @@ export function makeViewServerRuntime(
       publish: (topic, row) => publishWithTransport(topic, row, "internal"),
       deltaPublish: (topic, patch) => deltaPublishWithTransport(topic, patch, "internal"),
       deleteById: (topic, id) => deleteByIdWithTransport(topic, id, "internal"),
+      recordKafkaMetrics,
     });
 
     return runtime;
@@ -417,6 +445,11 @@ function healthRowsFromResponse(health: HealthResponse): readonly ViewServerHeal
     rows: sumTopicMetric(topicEntries, "rows"),
     subscribers: sumTopicMetric(topicEntries, "subscribers"),
     queueDepth: sumTopicMetric(topicEntries, "queueDepth"),
+    kafkaLagTotal: sumTopicMetric(topicEntries, "kafkaLagTotal"),
+    kafkaLagMax: maxTopicMetric(topicEntries, "kafkaLagMax"),
+    kafkaPartitions: sumTopicMetric(topicEntries, "kafkaPartitions"),
+    lastKafkaOffset: maxTopicMetric(topicEntries, "lastKafkaOffset"),
+    lastKafkaEndOffset: maxTopicMetric(topicEntries, "lastKafkaEndOffset"),
     status: serverStatus,
     updatedAt,
   });
@@ -428,6 +461,11 @@ function healthRowsFromResponse(health: HealthResponse): readonly ViewServerHeal
       rows: metrics.rows,
       subscribers: metrics.subscribers,
       queueDepth: metrics.queueDepth,
+      kafkaLagTotal: metrics.kafkaLagTotal,
+      kafkaLagMax: metrics.kafkaLagMax,
+      kafkaPartitions: metrics.kafkaPartitions,
+      lastKafkaOffset: metrics.lastKafkaOffset,
+      lastKafkaEndOffset: metrics.lastKafkaEndOffset,
       status: metrics.status,
       updatedAt,
     }),
@@ -442,6 +480,11 @@ function healthRow(input: {
   readonly rows: number;
   readonly subscribers: number;
   readonly queueDepth: number;
+  readonly kafkaLagTotal: number;
+  readonly kafkaLagMax: number;
+  readonly kafkaPartitions: number;
+  readonly lastKafkaOffset: number;
+  readonly lastKafkaEndOffset: number;
   readonly status: ViewServerHealthRow["status"];
   readonly updatedAt: bigint;
 }): ViewServerHealthRow {
@@ -457,11 +500,11 @@ function healthRow(input: {
     publishLatencyP95Ms: 0,
     snapshotLatencyP95Ms: 0,
     chdbSnapshotLatencyP95Ms: 0,
-    kafkaLagTotal: 0,
-    kafkaLagMax: 0,
-    kafkaPartitions: 0,
-    lastKafkaOffset: 0,
-    lastKafkaEndOffset: 0,
+    kafkaLagTotal: input.kafkaLagTotal,
+    kafkaLagMax: input.kafkaLagMax,
+    kafkaPartitions: input.kafkaPartitions,
+    lastKafkaOffset: input.lastKafkaOffset,
+    lastKafkaEndOffset: input.lastKafkaEndOffset,
     rssMb: 0,
     status: input.status,
     updatedAt: input.updatedAt,
@@ -470,9 +513,16 @@ function healthRow(input: {
 
 function sumTopicMetric(
   entries: readonly (readonly [string, HealthResponse["topics"][string]])[],
-  field: "rows" | "subscribers" | "queueDepth",
+  field: "rows" | "subscribers" | "queueDepth" | "kafkaLagTotal" | "kafkaPartitions",
 ): number {
   return entries.reduce((sum, [, metrics]) => sum + metrics[field], 0);
+}
+
+function maxTopicMetric(
+  entries: readonly (readonly [string, HealthResponse["topics"][string]])[],
+  field: "kafkaLagMax" | "lastKafkaOffset" | "lastKafkaEndOffset",
+): number {
+  return entries.reduce((max, [, metrics]) => Math.max(max, metrics[field]), 0);
 }
 
 type KafkaSourceForVerification = {
@@ -480,6 +530,32 @@ type KafkaSourceForVerification = {
   readonly brokers: readonly string[];
   readonly kafkaTopic: string;
 };
+
+type KafkaRuntimeMetrics = {
+  readonly lagTotal: number;
+  readonly lagMax: number;
+  readonly partitions: number;
+  readonly offset: number;
+  readonly endOffset: number;
+};
+
+const emptyKafkaRuntimeMetrics: KafkaRuntimeMetrics = {
+  lagTotal: 0,
+  lagMax: 0,
+  partitions: 0,
+  offset: 0,
+  endOffset: 0,
+};
+
+function kafkaRuntimeMetrics(metrics: KafkaBatchMetrics): KafkaRuntimeMetrics {
+  return {
+    lagTotal: metrics.lagTotal,
+    lagMax: metrics.lagMax,
+    partitions: metrics.partitions,
+    offset: metrics.offset ?? 0,
+    endOffset: metrics.endOffset ?? 0,
+  };
+}
 
 function verifyKafkaSourceTopics(
   config: NormalizedViewServerConfig,
@@ -566,6 +642,10 @@ function startTopicSources(
       topic: string,
       id: string | number,
     ) => Effect.Effect<void, ViewServerError>;
+    readonly recordKafkaMetrics: (
+      topic: string,
+      metrics: KafkaBatchMetrics,
+    ) => Effect.Effect<void, ViewServerError>;
   },
 ): Effect.Effect<void, ViewServerError, import("effect/Scope").Scope> {
   return Effect.fn("view-server.runtime.sources.start")(function* () {
@@ -612,6 +692,7 @@ function startTopicSources(
             source,
             consumer,
             runtime: context,
+            onBatchMetrics: (metrics) => runtime.recordKafkaMetrics(topic, metrics),
           }).pipe(Effect.forkScoped({ startImmediately: true }), Effect.asVoid);
         }).pipe(Effect.withSpan("view-server.runtime.source.start")),
       { discard: true },

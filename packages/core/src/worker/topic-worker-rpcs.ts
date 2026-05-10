@@ -1,19 +1,13 @@
 import { Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/unstable/rpc";
 import { ViewServerError } from "../errors.ts";
-import {
-  RpcHealthTopic,
-  RpcQuery,
-  RpcQueryResponse,
-  RpcRow,
-  RpcRows,
-  RpcSubscriptionEvent,
-} from "../rpc/index.ts";
+import { RpcQuery, RpcQueryResponse, RpcRow, RpcRows, RpcSubscriptionEvent } from "../rpc/index.ts";
 
 export const TopicWorkerInitialMessage = Schema.Struct({
   configModuleUrl: Schema.String,
   topic: Schema.String,
   initialRows: Schema.optional(RpcRows),
+  maxQueueDepth: Schema.optional(Schema.Number),
   mutationLogSize: Schema.optional(Schema.Number),
   snapshotBackend: Schema.optional(Schema.Literals(["config", "memory", "chdb"])),
 });
@@ -41,6 +35,14 @@ const TopicWorkerDeltaPublishPayload = Schema.Struct({
 
 const TopicWorkerDeleteByIdPayload = Schema.Struct({
   id: Schema.Union([Schema.String, Schema.Number]),
+});
+
+export const TopicWorkerMetricsSchema = Schema.Struct({
+  rows: Schema.Number,
+  subscribers: Schema.Number,
+  queueDepth: Schema.Number,
+  version: Schema.String,
+  status: Schema.Literals(["ready", "degraded", "stopping"]),
 });
 
 export const TopicWorkerRpcs = RpcGroup.make(
@@ -80,7 +82,7 @@ export const TopicWorkerRpcs = RpcGroup.make(
     error: ViewServerError,
   }),
   Rpc.make("Metrics", {
-    success: RpcHealthTopic,
+    success: TopicWorkerMetricsSchema,
     error: ViewServerError,
   }),
   Rpc.make("Shutdown", {

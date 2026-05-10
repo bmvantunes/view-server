@@ -4,6 +4,7 @@ import type * as Scope from "effect/Scope";
 import type { TopicConfig } from "../config/index.ts";
 import { literalStringFieldsForSchema } from "../config/index.ts";
 import {
+  backpressureExceeded,
   invalidPublish,
   missingTopicId,
   schemaDecodeFailed,
@@ -74,6 +75,7 @@ type ActiveSubscription = {
 export type TopicWorkerCoreOptions = {
   readonly initialRows?: readonly RuntimeRow[] | undefined;
   readonly snapshotBackend?: SnapshotBackend | undefined;
+  readonly maxQueueDepth?: number | undefined;
   readonly mutationLogSize?: number | undefined;
 };
 
@@ -90,6 +92,7 @@ export function makeTopicWorkerCore(
     const idField = config.id;
     const literalStringFields = literalStringFieldsForSchema(config.schema);
     const backend = options.snapshotBackend ?? createMemorySnapshotBackend();
+    const maxQueueDepth = options.maxQueueDepth ?? 100_000;
     const mutationLog = new MutationLog(options.mutationLogSize ?? 10_000);
     const gate = yield* Semaphore.make(1);
     const scope = yield* Effect.scope;
@@ -237,21 +240,35 @@ export function makeTopicWorkerCore(
             subscription.lastVersion = toVersion;
             return Effect.void;
           }
-          const event: DeltaEvent<readonly RuntimeRow[]> = {
-            type: "delta",
-            requestId: subscription.requestId,
-            ops: operations,
-            meta: {
-              fromVersion: fromVersion.toString(),
-              toVersion: toVersion.toString(),
-              totalRows: next.totalRows,
-              serverTime: Date.now(),
-            },
-          };
-          subscription.lastRows = next.rows;
-          subscription.lastTotalRows = next.totalRows;
-          subscription.lastVersion = toVersion;
-          return Queue.offer(subscription.queue, event);
+          return Effect.gen(function* () {
+            const depth = yield* Queue.size(subscription.queue);
+            if (wouldExceedQueueLimit(depth)) {
+              subscriptions.delete(subscription.requestId);
+              yield* Queue.fail(
+                subscription.queue,
+                backpressureExceeded(
+                  subscription.requestId,
+                  `Subscription ${subscription.requestId} exceeded maxQueueDepth ${maxQueueDepth}`,
+                ),
+              );
+              return;
+            }
+            const event: DeltaEvent<readonly RuntimeRow[]> = {
+              type: "delta",
+              requestId: subscription.requestId,
+              ops: operations,
+              meta: {
+                fromVersion: fromVersion.toString(),
+                toVersion: toVersion.toString(),
+                totalRows: next.totalRows,
+                serverTime: Date.now(),
+              },
+            };
+            subscription.lastRows = next.rows;
+            subscription.lastTotalRows = next.totalRows;
+            subscription.lastVersion = toVersion;
+            yield* Queue.offer(subscription.queue, event);
+          });
         },
         { discard: true },
       );
@@ -272,6 +289,23 @@ export function makeTopicWorkerCore(
             });
             yield* fanoutUntraced(fromVersion, toVersion, mutation);
           })();
+
+    const queueDepth = Effect.fnUntraced(function* () {
+      let total = 0;
+      for (const subscription of subscriptions.values()) {
+        total += yield* Queue.size(subscription.queue);
+      }
+      return total;
+    });
+
+    const wouldExceedQueueLimit = (depth: number): boolean =>
+      maxQueueDepth <= 0 ? depth >= 0 : depth >= maxQueueDepth;
+
+    const isQueueAtLimit = (depth: number): boolean =>
+      maxQueueDepth <= 0 ? depth > 0 : depth >= maxQueueDepth;
+
+    const statusForQueueDepth = (depth: number): TopicWorkerMetrics["status"] =>
+      status === "ready" && isQueueAtLimit(depth) ? "degraded" : status;
 
     const appendMutation = Effect.fnUntraced(function* (
       mutation: Omit<MutationLogEntry, "version">,
@@ -327,13 +361,20 @@ export function makeTopicWorkerCore(
       topic,
       idField,
       version: Effect.sync(() => version),
-      metrics: Effect.sync(() => ({
-        rows: rows.length,
-        subscribers: subscriptions.size,
-        version,
-        queueDepth: 0,
-        status,
-      })),
+      metrics: Effect.fn("view-server.worker.metrics")(function* () {
+        const depth = yield* queueDepth();
+        yield* Effect.annotateCurrentSpan({
+          "view_server.topic": topic,
+          "view_server.rows": rows.length,
+        });
+        return {
+          rows: rows.length,
+          subscribers: subscriptions.size,
+          version,
+          queueDepth: depth,
+          status: statusForQueueDepth(depth),
+        };
+      })(),
 
       query: (query) =>
         gate.withPermit(
@@ -519,24 +560,35 @@ function hasDependency(
 
 function replayMutations(
   baseRows: readonly RuntimeRow[],
-  mutations: readonly MutationLogEntry[],
+  entries: readonly MutationLogEntry[],
   idField: string,
 ): readonly RuntimeRow[] {
-  let rows = baseRows.map((row) => ({ ...row }));
-  for (const mutation of mutations) {
-    if (mutation.kind === "delete") {
-      rows = rows.filter((row) => rowId(row, idField) !== mutation.id);
+  let replayRows = baseRows.map((row) => ({ ...row }));
+  let replayIndex = new Map<string | number, number>();
+  const rebuildIndex = () => {
+    replayIndex = new Map();
+    replayRows.forEach((row, index) => {
+      const id = rowId(row, idField);
+      if (id !== undefined) {
+        replayIndex.set(id, index);
+      }
+    });
+  };
+  rebuildIndex();
+  for (const entry of entries) {
+    if (entry.kind === "delete") {
+      replayRows = replayRows.filter((row) => rowId(row, idField) !== entry.id);
+      rebuildIndex();
       continue;
     }
-    if (mutation.after === undefined) {
-      continue;
-    }
-    const index = rows.findIndex((row) => rowId(row, idField) === mutation.id);
-    if (index >= 0) {
-      rows[index] = { ...mutation.after };
+    const next = { ...entry.after };
+    const index = replayIndex.get(entry.id);
+    if (index === undefined) {
+      replayRows = [...replayRows, next];
+      rebuildIndex();
     } else {
-      rows = [...rows, { ...mutation.after }];
+      replayRows[index] = next;
     }
   }
-  return rows;
+  return replayRows;
 }

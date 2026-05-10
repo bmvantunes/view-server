@@ -10,6 +10,7 @@ export type TopicWorkerHost = TopicWorkerCore;
 export type TopicWorkerHostOptions = {
   readonly initialRows?: readonly Record<string, unknown>[] | undefined;
   readonly snapshotBackend?: SnapshotBackend | undefined;
+  readonly maxQueueDepth?: number | undefined;
   readonly mutationLogSize?: number | undefined;
 };
 

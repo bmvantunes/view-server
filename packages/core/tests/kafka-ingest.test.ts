@@ -4,7 +4,12 @@ import { BigDecimal, Effect, Layer, Queue, Schema, Stream } from "effect";
 import { HttpServer } from "effect/unstable/http";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
-import { defineConfig, KafkaSource } from "../src/config/index.ts";
+import {
+  defineConfig,
+  KafkaSource,
+  VIEW_SERVER_HEALTH_TOPIC,
+  type ViewServerHealthRow,
+} from "../src/config/index.ts";
 import {
   decodeJsonRecord,
   kafkaRecordLag,
@@ -23,6 +28,7 @@ import type { RawQuery } from "../src/protocol/index.ts";
 import { ViewServerRpcs } from "../src/rpc/index.ts";
 import { layerViewServerWebsocketServer } from "../src/rpc/websocket.ts";
 import { layerViewServerRuntime, makeViewServerRuntime } from "../src/server/index.ts";
+import { platformaticKafkaTopicConsumerOptions } from "../src/kafka/platformatic-consumer.ts";
 
 type OrderRow = {
   readonly id: string;
@@ -44,6 +50,33 @@ const query = {
   orderBy: [{ field: "price", direction: "desc" }],
   limit: 10,
 } satisfies RawQuery<OrderRow, { readonly id: true; readonly price: true }>;
+
+const healthQuery = {
+  fields: {
+    id: true,
+    kind: true,
+    topic: true,
+    kafkaLagTotal: true,
+    kafkaLagMax: true,
+    kafkaPartitions: true,
+    lastKafkaOffset: true,
+    lastKafkaEndOffset: true,
+  },
+  orderBy: [{ field: "id", direction: "asc" }],
+  limit: 10,
+} satisfies RawQuery<
+  ViewServerHealthRow,
+  {
+    readonly id: true;
+    readonly kind: true;
+    readonly topic: true;
+    readonly kafkaLagTotal: true;
+    readonly kafkaLagMax: true;
+    readonly kafkaPartitions: true;
+    readonly lastKafkaOffset: true;
+    readonly lastKafkaEndOffset: true;
+  }
+>;
 
 describe("Kafka ingestion", () => {
   it.effect("decodes Kafka records and applies them to the topic worker", () =>
@@ -111,6 +144,58 @@ describe("Kafka ingestion", () => {
       expect(result.totalRows).toBe(1);
       expect(result.rows[0]?.id).toBe("o-1");
       expect(result.rows[0]?.price).toBe(125);
+      expect(consumer.commits).toBe(1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("updates health topic Kafka lag metrics after Kafka batches", () =>
+    Effect.gen(function* () {
+      const consumer = new FakeKafkaTopicConsumer();
+      const runtime = yield* makeViewServerRuntime(kafkaConfig(), {
+        kafkaConsumerFactory: () => consumer,
+        kafkaTopicVerifier: new FakeKafkaTopicVerifier(["orders-events"]),
+      });
+
+      yield* consumer.offer("orders-events", {
+        records: [
+          {
+            topic: "orders-events",
+            key: "o-1",
+            value: JSON.stringify({ id: "o-1", symbol: "AAPL", price: 100 }),
+            partition: 0,
+            offset: "7",
+            highWatermark: "10",
+          },
+        ],
+        metrics: {
+          lagTotal: 5,
+          lagMax: 3,
+          partitions: 2,
+          offset: 7,
+          endOffset: 10,
+        },
+        commit: Effect.sync(() => {
+          consumer.commits += 1;
+        }),
+      });
+
+      const health = yield* runtime.query(VIEW_SERVER_HEALTH_TOPIC, healthQuery);
+      expect(rowById(health.rows, "server")).toMatchObject({
+        kafkaLagTotal: 5,
+        kafkaLagMax: 3,
+        kafkaPartitions: 2,
+        lastKafkaOffset: 7,
+        lastKafkaEndOffset: 10,
+      });
+      expect(rowById(health.rows, "topic:orders")).toMatchObject({
+        kind: "topic",
+        topic: "orders",
+        kafkaLagTotal: 5,
+        kafkaLagMax: 3,
+        kafkaPartitions: 2,
+        lastKafkaOffset: 7,
+        lastKafkaEndOffset: 10,
+      });
       expect(consumer.commits).toBe(1);
     }).pipe(Effect.scoped),
   );
@@ -256,6 +341,30 @@ describe("Kafka ingestion", () => {
     expect(kafkaRecordLag({ value: "{}", offset: "10", highWatermark: "10" })).toBe(0);
     expect(kafkaRecordLag({ value: "{}", offset: "7" })).toBeUndefined();
   });
+
+  it("propagates Platformatic lag monitoring options from factory options", () => {
+    const source = kafkaConfig().topics.orders.source;
+    if (source === undefined) {
+      throw new Error("Expected Kafka source");
+    }
+
+    expect(
+      platformaticKafkaTopicConsumerOptions(source, {
+        clientIdPrefix: "custom",
+        batchSize: 25,
+        sessionTimeout: 30_000,
+        heartbeatInterval: 3_000,
+        lagMonitoringIntervalMs: 250,
+      }),
+    ).toEqual({
+      brokers: ["127.0.0.1:9092"],
+      clientId: "custom-orders-events",
+      batchSize: 25,
+      sessionTimeout: 30_000,
+      heartbeatInterval: 3_000,
+      lagMonitoringIntervalMs: 250,
+    });
+  });
 });
 
 function kafkaConfig() {
@@ -348,4 +457,16 @@ class FakeKafkaTopicVerifier implements KafkaTopicVerifier {
           ),
         );
   }
+}
+
+function rowById(
+  rows: readonly Readonly<Record<string, unknown>>[],
+  id: string,
+): Readonly<Record<string, unknown>> {
+  const row = rows.find((entry) => entry.id === id);
+  expect(row).toBeDefined();
+  if (row === undefined) {
+    throw new Error(`Missing row ${id}`);
+  }
+  return row;
 }

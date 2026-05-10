@@ -37,6 +37,7 @@ const TopicWorkerHandlersLive = TopicWorkerRpcs.toLayer(
     }
     const worker = yield* makeTopicWorkerCore(initialMessage.topic, topicConfig, {
       initialRows: initialMessage.initialRows,
+      maxQueueDepth: initialMessage.maxQueueDepth,
       mutationLogSize: initialMessage.mutationLogSize,
       snapshotBackend: makeSnapshotBackend(initialMessage, topicConfig),
     });

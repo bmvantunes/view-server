@@ -1,13 +1,25 @@
 import { NodeHttpServer, NodeSocket } from "@effect/platform-node";
 import { describe, expect, it } from "@effect/vitest";
-import { BigDecimal, Effect, Layer, Queue, Schema, Stream } from "effect";
+import {
+  BigDecimal,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Option,
+  Queue,
+  Schema,
+  Stream,
+} from "effect";
 import { HttpServer } from "effect/unstable/http";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
+import { createViewServerClient } from "../src/client/index.ts";
 import { defineConfig } from "../src/config/index.ts";
-import type { RawQuery } from "../src/protocol/index.ts";
+import type { RawQuery, RuntimeRow, SubscriptionEvent } from "../src/protocol/index.ts";
 import { ViewServerRpcs } from "../src/rpc/index.ts";
-import { layerViewServerWebsocketServer } from "../src/rpc/websocket.ts";
+import { layerViewServerWebsocketServer, makeNodeWebsocketClient } from "../src/rpc/websocket.ts";
 import { layerViewServerRuntime } from "../src/server/index.ts";
 import { createChdbSnapshotBackendFactory } from "../src/snapshot/chdb-backend.ts";
 
@@ -24,6 +36,18 @@ type OrderRow = {
 };
 
 const config = defineConfig({
+  topics: {
+    orders: {
+      id: "id",
+      schema: Order,
+    },
+  },
+});
+
+const backpressureConfig = defineConfig({
+  worker: {
+    maxQueueDepth: 1,
+  },
   topics: {
     orders: {
       id: "id",
@@ -254,6 +278,104 @@ describe("Effect RPC websocket", () => {
     }).pipe(Effect.scoped),
   );
 
+  it("makeNodeWebsocketClient runs queries over websocket NDJSON", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
+          Layer.provide(
+            layerViewServerRuntime(config, {
+              initialRows: {
+                orders: [
+                  { id: "o-1", symbol: "AAPL", price: 100 },
+                  { id: "o-2", symbol: "MSFT", price: 200 },
+                ],
+              },
+            }),
+          ),
+        );
+        const testServerLayer = serverLayer.pipe(Layer.provideMerge(NodeHttpServer.layerTest));
+
+        yield* Effect.gen(function* () {
+          const server = yield* HttpServer.HttpServer;
+          const address = server.address;
+          if (address._tag !== "TcpAddress") {
+            return yield* Effect.die(new Error("Expected test server to listen on TCP"));
+          }
+          const client = yield* makeNodeWebsocketClient<typeof config>(
+            `ws://127.0.0.1:${address.port}/rpc`,
+            config,
+          );
+
+          const rows = yield* client.query("orders", query).pipe(Effect.timeout("1 second"));
+          expect(rows).toEqual([
+            { id: "o-2", price: 200 },
+            { id: "o-1", price: 100 },
+          ]);
+        }).pipe(Effect.provide(testServerLayer));
+      }).pipe(Effect.scoped),
+    );
+  });
+
+  it("makeNodeWebsocketClient subscribes over websocket NDJSON", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
+          Layer.provide(
+            layerViewServerRuntime(config, {
+              initialRows: {
+                orders: [{ id: "o-1", symbol: "AAPL", price: 100 }],
+              },
+            }),
+          ),
+        );
+        const testServerLayer = serverLayer.pipe(Layer.provideMerge(NodeHttpServer.layerTest));
+
+        yield* Effect.gen(function* () {
+          const server = yield* HttpServer.HttpServer;
+          const address = server.address;
+          if (address._tag !== "TcpAddress") {
+            return yield* Effect.die(new Error("Expected test server to listen on TCP"));
+          }
+          const client = yield* makeNodeWebsocketClient<typeof config>(
+            `ws://127.0.0.1:${address.port}/rpc`,
+            config,
+          );
+          const firstSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+          const firstDelta = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+
+          const subscription = yield* client.subscribe("orders", query, (event) => {
+            if (event.type === "snapshot") {
+              return Deferred.succeed(firstSnapshot, event).pipe(Effect.asVoid);
+            }
+            return Deferred.succeed(firstDelta, event).pipe(Effect.asVoid);
+          });
+
+          const snapshot = yield* Deferred.await(firstSnapshot).pipe(Effect.timeout("1 second"));
+          expect(snapshot.type).toBe("snapshot");
+          expect(snapshot.requestId).toBe(subscription.requestId);
+          expect(snapshot.meta.totalRows).toBe(1);
+
+          yield* client
+            .publish("orders", { id: "o-2", symbol: "MSFT", price: 200 })
+            .pipe(Effect.timeout("1 second"));
+          const delta = yield* Deferred.await(firstDelta).pipe(Effect.timeout("1 second"));
+          expect(delta.type).toBe("delta");
+          expect(delta.requestId).toBe(subscription.requestId);
+          if (delta.type === "delta") {
+            expect(delta.meta.totalRows).toBe(2);
+            expect(
+              delta.ops.some(
+                (operation) => operation.type === "upsert" && operation.row.id === "o-2",
+              ),
+            ).toBe(true);
+          }
+
+          yield* subscription.close;
+        }).pipe(Effect.provide(testServerLayer));
+      }).pipe(Effect.scoped),
+    );
+  });
+
   it.effect("multiplexes multiple subscriptions over one websocket client", () =>
     Effect.gen(function* () {
       const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
@@ -375,6 +497,203 @@ describe("Effect RPC websocket", () => {
       }).pipe(Effect.provide(transportLayer));
     }).pipe(Effect.scoped),
   );
+
+  it.effect("propagates typed backpressure errors over websocket", () =>
+    Effect.gen(function* () {
+      const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
+        Layer.provide(
+          layerViewServerRuntime(backpressureConfig, {
+            initialRows: {
+              orders: [{ id: "o-1", symbol: "AAPL", price: 100 }],
+            },
+          }),
+        ),
+      );
+      const socketLayer = Effect.gen(function* () {
+        const server = yield* HttpServer.HttpServer;
+        const address = server.address;
+        if (address._tag !== "TcpAddress") {
+          return yield* Effect.die(new Error("Expected test server to listen on TCP"));
+        }
+        return NodeSocket.layerWebSocket(`ws://127.0.0.1:${address.port}/rpc`);
+      }).pipe(Layer.unwrap);
+      const clientLayer = RpcClient.layerProtocolSocket().pipe(
+        Layer.provide(socketLayer),
+        Layer.provide(RpcSerialization.layerNdjson),
+      );
+      const transportLayer = clientLayer.pipe(
+        Layer.provideMerge(serverLayer),
+        Layer.provide(NodeHttpServer.layerTest),
+      );
+
+      yield* Effect.gen(function* () {
+        const rpcClient = yield* RpcClient.make(ViewServerRpcs);
+        const events = yield* rpcClient
+          .Subscribe({
+            requestId: "websocket-backpressure",
+            topic: "orders",
+            query,
+          })
+          .pipe(Stream.toQueue({ capacity: 1 }));
+
+        const snapshot = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+        expect(snapshot.type).toBe("snapshot");
+        expect(snapshot.requestId).toBe("websocket-backpressure");
+
+        yield* Effect.forEach(
+          Array.from({ length: 96 }, (_, index) => index + 2),
+          (index) =>
+            rpcClient.Publish({
+              topic: "orders",
+              row: { id: `o-${index}`, symbol: `SYM-${index}`, price: index * 100 },
+            }),
+          { discard: true },
+        );
+
+        const error = yield* Effect.gen(function* () {
+          for (let index = 0; index < 96; index++) {
+            const exit = yield* Queue.take(events).pipe(Effect.exit);
+            if (Exit.isFailure(exit)) {
+              return Option.getOrUndefined(Exit.findErrorOption(exit));
+            }
+          }
+          return undefined;
+        }).pipe(Effect.timeout("2 seconds"));
+        expect(error).toMatchObject({
+          _tag: "BackpressureExceeded",
+          requestId: "websocket-backpressure",
+        });
+
+        const health = yield* rpcClient.Health({}).pipe(Effect.timeout("1 second"));
+        expect(health.topics.orders).toMatchObject({
+          subscribers: 0,
+          queueDepth: 0,
+        });
+      }).pipe(Effect.provide(transportLayer));
+    }).pipe(Effect.scoped),
+  );
+
+  it("generated clients resubscribe after websocket backpressure", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
+          Layer.provide(
+            layerViewServerRuntime(backpressureConfig, {
+              initialRows: {
+                orders: [{ id: "o-1", symbol: "AAPL", price: 100 }],
+              },
+            }),
+          ),
+        );
+        const testServerLayer = serverLayer.pipe(Layer.provideMerge(NodeHttpServer.layerTest));
+
+        yield* Effect.gen(function* () {
+          const server = yield* HttpServer.HttpServer;
+          const address = server.address;
+          if (address._tag !== "TcpAddress") {
+            return yield* Effect.die(new Error("Expected test server to listen on TCP"));
+          }
+          const clientLayer = RpcClient.layerProtocolSocket().pipe(
+            Layer.provide(NodeSocket.layerWebSocket(`ws://127.0.0.1:${address.port}/rpc`)),
+            Layer.provide(RpcSerialization.layerNdjson),
+          );
+
+          yield* Effect.gen(function* () {
+            const rpcClient = yield* RpcClient.make(ViewServerRpcs);
+            const client = createViewServerClient<typeof backpressureConfig>(
+              rpcClient,
+              backpressureConfig,
+            );
+            const firstSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+            const firstDelta = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+            const resubscribedSnapshot =
+              yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+            const postResubscribeDelta =
+              yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+            const releaseDelta = yield* Deferred.make<void>();
+            let snapshots = 0;
+            let blockedFirstDelta = false;
+
+            const subscription = yield* client.subscribe("orders", query, (event) => {
+              if (event.type === "snapshot") {
+                snapshots += 1;
+                return snapshots === 1
+                  ? Deferred.succeed(firstSnapshot, event).pipe(Effect.asVoid)
+                  : Deferred.succeed(resubscribedSnapshot, event).pipe(Effect.asVoid);
+              }
+              if (!blockedFirstDelta) {
+                blockedFirstDelta = true;
+                return Deferred.succeed(firstDelta, event).pipe(
+                  Effect.flatMap(() => Deferred.await(releaseDelta)),
+                );
+              }
+              return snapshots >= 2
+                ? Deferred.succeed(postResubscribeDelta, event).pipe(Effect.asVoid)
+                : Effect.void;
+            });
+
+            const snapshot = yield* Deferred.await(firstSnapshot).pipe(Effect.timeout("1 second"));
+            expect(snapshot.type).toBe("snapshot");
+            const firstRequestId = snapshot.requestId;
+            expect(firstRequestId).toBe(subscription.requestId);
+
+            yield* client
+              .publish("orders", { id: "o-2", symbol: "MSFT", price: 200 })
+              .pipe(Effect.timeout("1 second"));
+            const delta = yield* Deferred.await(firstDelta).pipe(Effect.timeout("1 second"));
+            expect(delta.type).toBe("delta");
+            expect(delta.requestId).toBe(firstRequestId);
+
+            const overflowPublish = yield* Effect.forEach(
+              Array.from({ length: 160 }, (_, index) => index + 3),
+              (index) =>
+                client.publish("orders", {
+                  id: `o-${index}`,
+                  symbol: `SYM-${index}`,
+                  price: index * 100,
+                }),
+              { discard: true },
+            ).pipe(Effect.forkScoped);
+            yield* Effect.sleep("100 millis");
+            yield* Deferred.succeed(releaseDelta, undefined);
+            yield* Effect.sleep("350 millis");
+
+            const nextSnapshot = yield* Deferred.await(resubscribedSnapshot).pipe(
+              Effect.timeout("2 seconds"),
+            );
+            yield* Fiber.interrupt(overflowPublish).pipe(Effect.ignore);
+            expect(nextSnapshot.type).toBe("snapshot");
+            expect(nextSnapshot.requestId).not.toBe(firstRequestId);
+            expect(nextSnapshot.requestId).toBe(subscription.requestId);
+            expect(nextSnapshot.meta.totalRows).toBeGreaterThanOrEqual(3);
+
+            const health = yield* client.health().pipe(Effect.timeout("1 second"));
+            expect(health.topics.orders).toMatchObject({
+              subscribers: 1,
+              queueDepth: 0,
+            });
+
+            yield* client.publish("orders", { id: "o-200", symbol: "AMZN", price: 20_000 });
+            const nextDelta = yield* Deferred.await(postResubscribeDelta).pipe(
+              Effect.timeout("1 second"),
+            );
+            expect(nextDelta.type).toBe("delta");
+            expect(nextDelta.requestId).toBe(nextSnapshot.requestId);
+            if (nextDelta.type === "delta") {
+              expect(nextDelta.meta.totalRows).toBeGreaterThanOrEqual(4);
+              expect(
+                nextDelta.ops.some(
+                  (operation) => operation.type === "upsert" && operation.row.id === "o-200",
+                ),
+              ).toBe(true);
+            }
+
+            yield* subscription.close;
+          }).pipe(Effect.provide(clientLayer));
+        }).pipe(Effect.provide(testServerLayer));
+      }).pipe(Effect.scoped),
+    );
+  });
 
   it.effect("round-trips BigInt row values and filters over websocket NDJSON", () =>
     Effect.gen(function* () {

@@ -8,7 +8,7 @@ import type {
   RowObject,
 } from "../config/index.ts";
 import { kafkaIngestFailed, type ViewServerError } from "../errors.ts";
-import type { KafkaRecordBatch, KafkaTopicConsumer } from "./types.ts";
+import type { KafkaBatchMetrics, KafkaRecordBatch, KafkaTopicConsumer } from "./types.ts";
 
 export type KafkaSourceRuntime<TRow extends RowObject, TId extends keyof TRow & string> = Pick<
   EffectSourceContext<TRow, TId>,
@@ -21,6 +21,9 @@ export function runKafkaSource<TRow extends RowObject, TId extends keyof TRow & 
   readonly source: KafkaSourceConfig<TRow, TId>;
   readonly consumer: KafkaTopicConsumer;
   readonly runtime: KafkaSourceRuntime<TRow, TId>;
+  readonly onBatchMetrics?:
+    | ((metrics: KafkaBatchMetrics) => Effect.Effect<void, ViewServerError>)
+    | undefined;
 }): Effect.Effect<void, ViewServerError> {
   return Effect.fn("view-server.kafka.source.run")(function* () {
     yield* Effect.annotateCurrentSpan({
@@ -39,6 +42,7 @@ export function runKafkaSource<TRow extends RowObject, TId extends keyof TRow & 
           runtime: args.runtime,
           batch,
           commitPolicy,
+          onBatchMetrics: args.onBatchMetrics,
         }),
     });
   })();
@@ -51,10 +55,14 @@ export function ingestKafkaBatch<TRow extends RowObject, TId extends keyof TRow 
   readonly runtime: KafkaSourceRuntime<TRow, TId>;
   readonly batch: KafkaRecordBatch;
   readonly commitPolicy: "after-ingest" | "none";
+  readonly onBatchMetrics?:
+    | ((metrics: KafkaBatchMetrics) => Effect.Effect<void, ViewServerError>)
+    | undefined;
 }): Effect.Effect<void, ViewServerError> {
   return Effect.fn("view-server.kafka.batch.ingest")(function* () {
     const lastRecord = args.batch.records[args.batch.records.length - 1];
-    const lag = args.batch.lag ?? kafkaRecordLag(lastRecord);
+    const metrics = kafkaBatchMetrics(args.batch);
+    const lag = metrics?.lagMax ?? args.batch.lag ?? kafkaRecordLag(lastRecord);
     yield* Effect.annotateCurrentSpan({
       "view_server.topic": args.viewTopic,
       "view_server.batch_size": args.batch.records.length,
@@ -78,10 +86,33 @@ export function ingestKafkaBatch<TRow extends RowObject, TId extends keyof TRow 
           ),
       { discard: true },
     );
+    if (metrics !== undefined && args.onBatchMetrics !== undefined) {
+      yield* args.onBatchMetrics(metrics);
+    }
     if (args.commitPolicy === "after-ingest") {
       yield* args.batch.commit;
     }
   })();
+}
+
+export function kafkaBatchMetrics(batch: KafkaRecordBatch): KafkaBatchMetrics | undefined {
+  if (batch.metrics !== undefined) {
+    return batch.metrics;
+  }
+  const lastRecord = batch.records[batch.records.length - 1];
+  if (lastRecord === undefined && batch.lag === undefined) {
+    return undefined;
+  }
+  const offset = kafkaOffsetNumber(lastRecord?.offset);
+  const endOffset = kafkaOffsetNumber(lastRecord?.highWatermark ?? lastRecord?.endOffset);
+  const lag = batch.lag ?? kafkaRecordLag(lastRecord) ?? 0;
+  return {
+    lagTotal: lag,
+    lagMax: lag,
+    partitions: lastRecord?.partition === undefined ? 0 : 1,
+    ...(offset === undefined ? {} : { offset }),
+    ...(endOffset === undefined ? {} : { endOffset }),
+  };
 }
 
 export function kafkaRecordLag(record: KafkaConsumerRecord | undefined): number | undefined {
@@ -131,6 +162,11 @@ function parseKafkaOffset(offset: string | number | undefined): bigint | undefin
   } catch {
     return undefined;
   }
+}
+
+function kafkaOffsetNumber(offset: string | number | undefined): number | undefined {
+  const value = parseKafkaOffset(offset);
+  return value === undefined ? undefined : spanSafeNumber(value);
 }
 
 function spanSafeNumber(value: bigint): number {

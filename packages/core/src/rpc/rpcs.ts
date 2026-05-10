@@ -218,6 +218,11 @@ export const RpcHealthTopic = Schema.Struct({
   subscribers: Schema.Number,
   queueDepth: Schema.Number,
   version: Schema.String,
+  kafkaLagTotal: Schema.Number,
+  kafkaLagMax: Schema.Number,
+  kafkaPartitions: Schema.Number,
+  lastKafkaOffset: Schema.Number,
+  lastKafkaEndOffset: Schema.Number,
   status: Schema.Literals(["ready", "degraded", "stopping"]),
 });
 

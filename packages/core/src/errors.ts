@@ -204,6 +204,12 @@ export const transportError = (error: unknown): TransportError =>
     cause: error,
   });
 
+export const backpressureExceeded = (requestId: string, message: string): BackpressureExceeded =>
+  new BackpressureExceeded({
+    requestId,
+    message,
+  });
+
 export const invalidStartupEnv = (
   message: string,
   error?: unknown,

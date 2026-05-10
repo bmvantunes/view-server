@@ -56,6 +56,9 @@ export const makeNodeThreadTopicWorkerHostFactory = (
         ...(hostOptions.initialRows === undefined
           ? {}
           : { initialRows: hostOptions.initialRows.map(toWireRow) }),
+        ...(hostOptions.maxQueueDepth === undefined
+          ? {}
+          : { maxQueueDepth: hostOptions.maxQueueDepth }),
         ...(hostOptions.mutationLogSize === undefined
           ? {}
           : { mutationLogSize: hostOptions.mutationLogSize }),
