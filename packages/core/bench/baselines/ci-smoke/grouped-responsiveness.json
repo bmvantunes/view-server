@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "grouped-responsiveness",
+  "generatedAt": "2026-05-14T00:00:00.000Z",
+  "config": {
+    "rows": 1000,
+    "operations": 3,
+    "operation": "deltaPublish",
+    "aggregateCounts": "3",
+    "groupedRefreshDebounceMs": 50,
+    "operationPauseMs": 1,
+    "limit": 50
+  },
+  "results": [
+    {
+      "case": {
+        "operation": "deltaPublish",
+        "rows": 1000,
+        "operations": 3,
+        "aggregateCount": 3,
+        "groupedRefreshDebounceMs": 50,
+        "operationPauseMs": 1,
+        "limit": 50
+      },
+      "metrics": [
+        {
+          "name": "operationP99Ms",
+          "value": 50,
+          "unit": "ms"
+        },
+        {
+          "name": "metricsP99Ms",
+          "value": 10,
+          "unit": "ms"
+        }
+      ]
+    }
+  ]
+}

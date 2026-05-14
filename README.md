@@ -27,3 +27,5 @@ vp run -r build
 ```bash
 vp run dev
 ```
+
+- Benchmark smoke CI and baseline refresh notes live in `docs/benchmarks.md`.

@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "grouped-refresh-overlap",
+  "generatedAt": "2026-05-14T00:00:00.000Z",
+  "config": {
+    "backend": "memory",
+    "rows": 1000,
+    "operations": 3,
+    "aggregateCount": 3,
+    "groupedRefreshDebounceMs": 1,
+    "operationPauseMs": 1,
+    "settleTimeoutMs": 15000,
+    "limit": 50
+  },
+  "results": [
+    {
+      "case": {
+        "backend": "memory",
+        "rows": 1000,
+        "operations": 3,
+        "aggregateCount": 3,
+        "groupedRefreshDebounceMs": 1,
+        "operationPauseMs": 1,
+        "limit": 50
+      },
+      "metrics": [
+        {
+          "name": "operationP99Ms",
+          "value": 50,
+          "unit": "ms"
+        },
+        {
+          "name": "startGapMaxMs",
+          "value": 50,
+          "unit": "ms"
+        }
+      ]
+    }
+  ]
+}

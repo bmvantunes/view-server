@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "active-view",
+  "generatedAt": "2026-05-14T00:00:00.000Z",
+  "config": {
+    "rows": 1000,
+    "subscriptions": 5,
+    "mutations": 5,
+    "pageSizes": "50",
+    "scenarios": "hot-key-updates",
+    "indexes": "blocks",
+    "sharing": "shared",
+    "queryShape": "mixed",
+    "blockSize": 1024,
+    "maxActivePlans": null,
+    "maxActivePlanEstimatedBytes": null,
+    "memory": false,
+    "baseline": false,
+    "validate": true
+  },
+  "results": [
+    {
+      "case": {
+        "scenario": "hot-key-updates",
+        "index": "blocks",
+        "sharing": "shared",
+        "queryShape": "mixed",
+        "pageSize": 50
+      },
+      "metrics": [
+        {
+          "name": "activeBuildMs",
+          "value": 250,
+          "unit": "ms"
+        },
+        {
+          "name": "activeUpdateMs",
+          "value": 25,
+          "unit": "ms"
+        }
+      ]
+    }
+  ]
+}

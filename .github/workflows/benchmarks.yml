@@ -1,0 +1,91 @@
+name: Benchmarks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+env:
+  VS_BENCH_BLOCKING: "0"
+
+jobs:
+  smoke:
+    name: Smoke Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare artifact directory
+        run: mkdir -p packages/core/bench/.artifacts/ci
+
+      - name: Active view smoke
+        continue-on-error: ${{ env.VS_BENCH_BLOCKING != '1' }}
+        env:
+          VS_ACTIVE_VIEW_ROWS: "1000"
+          VS_ACTIVE_VIEW_SUBSCRIPTIONS: "5"
+          VS_ACTIVE_VIEW_MUTATIONS: "5"
+          VS_ACTIVE_VIEW_BASELINE: "0"
+          VS_ACTIVE_VIEW_SCENARIOS: hot-key-updates
+          VS_ACTIVE_VIEW_PAGE_SIZES: "50"
+          VS_ACTIVE_VIEW_SHARING: shared
+          VS_BENCH_ARTIFACT: packages/core/bench/.artifacts/ci/active-view.json
+          VS_BENCH_BASELINE: packages/core/bench/baselines/ci-smoke/active-view.json
+          VS_BENCH_REGRESSION_METRICS: activeBuildMs,activeUpdateMs
+        run: node --experimental-strip-types packages/core/bench/active-view.bench.ts
+
+      - name: Active plan responsiveness smoke
+        continue-on-error: ${{ env.VS_BENCH_BLOCKING != '1' }}
+        env:
+          VS_ACTIVE_PLAN_RESPONSIVENESS_ROWS: "1000"
+          VS_ACTIVE_PLAN_RESPONSIVENESS_OPERATIONS: "3"
+          VS_ACTIVE_PLAN_RESPONSIVENESS_OPERATION: publish
+          VS_BENCH_ARTIFACT: packages/core/bench/.artifacts/ci/active-plan-responsiveness.json
+          VS_BENCH_BASELINE: packages/core/bench/baselines/ci-smoke/active-plan-responsiveness.json
+          VS_BENCH_REGRESSION_METRICS: operationP99Ms,metricsP99Ms
+        run: node --experimental-strip-types packages/core/bench/active-plan-responsiveness.bench.ts
+
+      - name: Grouped responsiveness smoke
+        continue-on-error: ${{ env.VS_BENCH_BLOCKING != '1' }}
+        env:
+          VS_GROUPED_RESPONSIVENESS_ROWS: "1000"
+          VS_GROUPED_RESPONSIVENESS_OPERATIONS: "3"
+          VS_GROUPED_RESPONSIVENESS_AGGREGATES: "3"
+          VS_BENCH_ARTIFACT: packages/core/bench/.artifacts/ci/grouped-responsiveness.json
+          VS_BENCH_BASELINE: packages/core/bench/baselines/ci-smoke/grouped-responsiveness.json
+          VS_BENCH_REGRESSION_METRICS: operationP99Ms,metricsP99Ms
+        run: node --experimental-strip-types packages/core/bench/grouped-responsiveness.bench.ts
+
+      - name: Grouped refresh overlap smoke
+        continue-on-error: ${{ env.VS_BENCH_BLOCKING != '1' }}
+        env:
+          VS_GROUPED_REFRESH_OVERLAP_ROWS: "1000"
+          VS_GROUPED_REFRESH_OVERLAP_OPERATIONS: "3"
+          VS_GROUPED_REFRESH_OVERLAP_AGGREGATES: "3"
+          VS_GROUPED_REFRESH_OVERLAP_BACKEND: memory
+          VS_BENCH_ARTIFACT: packages/core/bench/.artifacts/ci/grouped-refresh-overlap.json
+          VS_BENCH_BASELINE: packages/core/bench/baselines/ci-smoke/grouped-refresh-overlap.json
+          VS_BENCH_REGRESSION_METRICS: operationP99Ms,startGapMaxMs
+        run: node --experimental-strip-types packages/core/bench/grouped-refresh-overlap.bench.ts
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-artifacts
+          path: packages/core/bench/.artifacts/ci/*.json
+          if-no-files-found: warn

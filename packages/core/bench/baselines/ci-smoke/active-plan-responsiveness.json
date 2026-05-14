@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "active-plan-responsiveness",
+  "generatedAt": "2026-05-14T00:00:00.000Z",
+  "config": {
+    "rows": 1000,
+    "operations": 3,
+    "operation": "publish",
+    "pageSize": 50,
+    "chunkSize": "default"
+  },
+  "results": [
+    {
+      "case": {
+        "operation": "publish",
+        "rows": 1000,
+        "operations": 3,
+        "pageSize": 50,
+        "chunkSize": "default"
+      },
+      "metrics": [
+        {
+          "name": "operationP99Ms",
+          "value": 50,
+          "unit": "ms"
+        },
+        {
+          "name": "metricsP99Ms",
+          "value": 10,
+          "unit": "ms"
+        }
+      ]
+    }
+  ]
+}
