@@ -21,8 +21,11 @@ describe("benchmark artifacts", () => {
       {
         VS_BENCH_ARTIFACT: undefined,
         VS_BENCH_BASELINE: undefined,
+        VS_BENCH_REGRESSION_MIN_DELTA_MS: undefined,
+        VS_BENCH_REGRESSION_REPORT_ONLY: undefined,
         VS_BENCH_REGRESSION_TOLERANCE: undefined,
         VS_BENCH_REGRESSION_METRICS: undefined,
+        GITHUB_STEP_SUMMARY: undefined,
       },
       Effect.gen(function* () {
         const artifactPath = yield* tempArtifactPath("current.json");
@@ -44,6 +47,7 @@ describe("benchmark artifacts", () => {
           artifactPath,
           compared: false,
           regressionCount: 0,
+          warningCount: 0,
         });
         expect(artifact).toMatchObject({
           schemaVersion: 1,
@@ -78,8 +82,11 @@ describe("benchmark artifacts", () => {
       {
         VS_BENCH_ARTIFACT: undefined,
         VS_BENCH_BASELINE: undefined,
+        VS_BENCH_REGRESSION_MIN_DELTA_MS: undefined,
+        VS_BENCH_REGRESSION_REPORT_ONLY: undefined,
         VS_BENCH_REGRESSION_TOLERANCE: undefined,
         VS_BENCH_REGRESSION_METRICS: undefined,
+        GITHUB_STEP_SUMMARY: undefined,
       },
       Effect.gen(function* () {
         const baselinePath = yield* tempArtifactPath("baseline.json");
@@ -118,8 +125,11 @@ describe("benchmark artifacts", () => {
       {
         VS_BENCH_ARTIFACT: undefined,
         VS_BENCH_BASELINE: undefined,
+        VS_BENCH_REGRESSION_MIN_DELTA_MS: undefined,
+        VS_BENCH_REGRESSION_REPORT_ONLY: undefined,
         VS_BENCH_REGRESSION_TOLERANCE: undefined,
         VS_BENCH_REGRESSION_METRICS: undefined,
+        GITHUB_STEP_SUMMARY: undefined,
       },
       Effect.gen(function* () {
         const baselinePath = yield* tempArtifactPath("baseline.json");
@@ -161,6 +171,120 @@ describe("benchmark artifacts", () => {
         ]);
 
         expect(result.compared).toBe(true);
+        expect(result.regressionCount).toBe(0);
+        expect(result.warningCount).toBe(0);
+      }),
+    ),
+  );
+
+  it.effect("downgrades tiny millisecond regressions to warnings and writes summaries", () =>
+    withBenchmarkEnv(
+      {
+        VS_BENCH_ARTIFACT: undefined,
+        VS_BENCH_BASELINE: undefined,
+        VS_BENCH_REGRESSION_MIN_DELTA_MS: undefined,
+        VS_BENCH_REGRESSION_REPORT_ONLY: undefined,
+        VS_BENCH_REGRESSION_TOLERANCE: undefined,
+        VS_BENCH_REGRESSION_METRICS: undefined,
+        GITHUB_STEP_SUMMARY: undefined,
+      },
+      Effect.gen(function* () {
+        const baselinePath = yield* tempArtifactPath("baseline.json");
+        const artifactPath = yield* tempArtifactPath("current.json");
+        const summaryPath = yield* tempArtifactPath("summary.md");
+        yield* writeJson(baselinePath, {
+          schemaVersion: 1,
+          benchmark: "active-plan-responsiveness",
+          generatedAt: "2026-01-01T00:00:00.000Z",
+          config: { rows: 1_000 },
+          results: [
+            {
+              case: { operation: "publish" },
+              metrics: [{ name: "operationP99Ms", value: 1, unit: "ms" }],
+            },
+          ],
+        });
+        process.env.VS_BENCH_ARTIFACT = artifactPath;
+        process.env.VS_BENCH_BASELINE = baselinePath;
+        process.env.VS_BENCH_REGRESSION_TOLERANCE = "0.1";
+        process.env.VS_BENCH_REGRESSION_MIN_DELTA_MS = "5";
+        process.env.VS_BENCH_REGRESSION_METRICS = "operationP99Ms";
+        process.env.GITHUB_STEP_SUMMARY = summaryPath;
+
+        const result = yield* writeBenchmarkArtifact(
+          "active-plan-responsiveness",
+          { rows: 1_000 },
+          [
+            {
+              case: { operation: "publish" },
+              metrics: [{ name: "operationP99Ms", value: 1.4, unit: "ms" }],
+            },
+          ],
+        );
+        const summary = yield* readText(summaryPath);
+
+        expect(result.compared).toBe(true);
+        expect(result.regressionCount).toBe(0);
+        expect(result.warningCount).toBe(1);
+        expect(result.summaryPath).toBe(summaryPath);
+        expect(summary).toContain("### Benchmark: active-plan-responsiveness");
+        expect(summary).toContain("| warn | `operationP99Ms`");
+        expect(summary).toContain("40.0% (0.40ms)");
+      }),
+    ),
+  );
+
+  it.effect("reports hard regressions without failing in report-only mode", () =>
+    withBenchmarkEnv(
+      {
+        VS_BENCH_ARTIFACT: undefined,
+        VS_BENCH_BASELINE: undefined,
+        VS_BENCH_REGRESSION_MIN_DELTA_MS: undefined,
+        VS_BENCH_REGRESSION_REPORT_ONLY: undefined,
+        VS_BENCH_REGRESSION_TOLERANCE: undefined,
+        VS_BENCH_REGRESSION_METRICS: undefined,
+        GITHUB_STEP_SUMMARY: undefined,
+      },
+      Effect.gen(function* () {
+        const baselinePath = yield* tempArtifactPath("baseline.json");
+        const artifactPath = yield* tempArtifactPath("current.json");
+        const summaryPath = yield* tempArtifactPath("summary.md");
+        yield* writeJson(baselinePath, {
+          schemaVersion: 1,
+          benchmark: "active-plan-responsiveness",
+          generatedAt: "2026-01-01T00:00:00.000Z",
+          config: { rows: 1_000 },
+          results: [
+            {
+              case: { operation: "publish" },
+              metrics: [{ name: "operationP99Ms", value: 10, unit: "ms" }],
+            },
+          ],
+        });
+        process.env.VS_BENCH_ARTIFACT = artifactPath;
+        process.env.VS_BENCH_BASELINE = baselinePath;
+        process.env.VS_BENCH_REGRESSION_REPORT_ONLY = "1";
+        process.env.VS_BENCH_REGRESSION_TOLERANCE = "0.1";
+        process.env.VS_BENCH_REGRESSION_METRICS = "operationP99Ms";
+        process.env.GITHUB_STEP_SUMMARY = summaryPath;
+
+        const result = yield* writeBenchmarkArtifact(
+          "active-plan-responsiveness",
+          { rows: 1_000 },
+          [
+            {
+              case: { operation: "publish" },
+              metrics: [{ name: "operationP99Ms", value: 20, unit: "ms" }],
+            },
+          ],
+        );
+        const summary = yield* readText(summaryPath);
+
+        expect(result.compared).toBe(true);
+        expect(result.regressionCount).toBe(1);
+        expect(result.warningCount).toBe(0);
+        expect(summary).toContain("| fail | `operationP99Ms`");
+        expect(summary).toContain("100.0% (10.00ms)");
       }),
     ),
   );
@@ -197,6 +321,10 @@ function tempArtifactPath(name: string): Effect.Effect<string> {
 }
 
 function readArtifact(path: string): Effect.Effect<BenchmarkArtifact> {
+  return readText(path).pipe(Effect.map((json) => parseArtifact(json)));
+}
+
+function readText(path: string): Effect.Effect<string> {
   return Effect.tryPromise({
     try: () => readFile(path, "utf8"),
     catch: (cause) =>
@@ -204,10 +332,7 @@ function readArtifact(path: string): Effect.Effect<BenchmarkArtifact> {
         message: `Failed to read benchmark artifact: ${String(cause)}`,
         cause,
       }),
-  }).pipe(
-    Effect.map((json) => parseArtifact(json)),
-    Effect.orDie,
-  );
+  }).pipe(Effect.orDie);
 }
 
 function writeJson(path: string, value: BenchmarkArtifact): Effect.Effect<void> {

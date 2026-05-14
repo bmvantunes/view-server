@@ -1,7 +1,7 @@
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,6 +31,24 @@ export type BenchmarkArtifactResult = {
   readonly artifactPath: string;
   readonly compared: boolean;
   readonly regressionCount: number;
+  readonly warningCount: number;
+  readonly summaryPath?: string | undefined;
+};
+
+type BenchmarkComparisonStatus = "pass" | "warn" | "fail";
+
+type BenchmarkComparison = {
+  readonly benchmark: string;
+  readonly caseKey: string;
+  readonly metric: string;
+  readonly unit: BenchmarkMetric["unit"];
+  readonly baselineValue: number;
+  readonly currentValue: number;
+  readonly delta: number;
+  readonly deltaPercent: number;
+  readonly allowedValue: number;
+  readonly status: BenchmarkComparisonStatus;
+  readonly artifactPath: string;
 };
 
 class BenchmarkArtifactError extends Schema.TaggedErrorClass<BenchmarkArtifactError>()(
@@ -74,34 +92,42 @@ export function writeBenchmarkArtifact(
         artifactPath,
         compared: false,
         regressionCount: 0,
+        warningCount: 0,
       };
     }
 
     const baseline = yield* readBenchmarkArtifact(baselinePath);
     const tolerance = regressionTolerance();
-    const regressions = benchmarkRegressions(
+    const comparisons = benchmarkComparisons(
       baseline,
       artifact,
       tolerance,
+      regressionMinimumDeltaMs(),
       regressionMetricFilter(),
+      artifactPath,
     );
+    const summaryPath = yield* appendBenchmarkSummary(comparisons, artifactPath, baselinePath);
+    const regressions = comparisons.filter((comparison) => comparison.status === "fail");
+    const warningCount = comparisons.filter((comparison) => comparison.status === "warn").length;
     if (regressions.length > 0) {
-      return yield* Effect.die(
-        new Error(
-          [
-            `Benchmark regression exceeded ${(tolerance * 100).toFixed(1)}% tolerance`,
-            `artifact=${artifactPath}`,
-            `baseline=${baselinePath}`,
-            ...regressions,
-          ].join("\n"),
-        ),
-      );
+      const message = [
+        `Benchmark regression exceeded ${(tolerance * 100).toFixed(1)}% tolerance`,
+        `artifact=${artifactPath}`,
+        `baseline=${baselinePath}`,
+        ...regressions.map(regressionMessage),
+      ].join("\n");
+      if (!regressionReportOnly()) {
+        return yield* Effect.die(new Error(message));
+      }
+      yield* Effect.logWarning(message);
     }
 
     return {
       artifactPath,
       compared: true,
-      regressionCount: 0,
+      regressionCount: regressions.length,
+      warningCount,
+      ...(summaryPath === undefined ? {} : { summaryPath }),
     };
   })();
 }
@@ -221,16 +247,19 @@ function decodePrimitiveRecord(
   return decoded;
 }
 
-function benchmarkRegressions(
+function benchmarkComparisons(
   baseline: BenchmarkArtifact,
   current: BenchmarkArtifact,
   tolerance: number,
+  minimumDeltaMs: number,
   metricFilter: ReadonlySet<string> | undefined,
-): readonly string[] {
+  artifactPath: string,
+): readonly BenchmarkComparison[] {
   const baselineResults = new Map(baseline.results.map((result) => [caseKey(result.case), result]));
-  const regressions: string[] = [];
+  const comparisons: BenchmarkComparison[] = [];
   for (const result of current.results) {
-    const baselineResult = baselineResults.get(caseKey(result.case));
+    const resultCaseKey = caseKey(result.case);
+    const baselineResult = baselineResults.get(resultCaseKey);
     if (baselineResult === undefined) {
       continue;
     }
@@ -247,14 +276,106 @@ function benchmarkRegressions(
         continue;
       }
       const allowed = baselineMetric.value * (1 + tolerance);
-      if (metric.value > allowed) {
-        regressions.push(
-          `${current.benchmark} case=${caseKey(result.case)} metric=${metric.name} baseline=${baselineMetric.value.toFixed(2)} current=${metric.value.toFixed(2)} allowed=${allowed.toFixed(2)}`,
-        );
-      }
+      const delta = metric.value - baselineMetric.value;
+      const status = benchmarkComparisonStatus(metric, allowed, delta, minimumDeltaMs);
+      comparisons.push({
+        benchmark: current.benchmark,
+        caseKey: resultCaseKey,
+        metric: metric.name,
+        unit: metric.unit,
+        baselineValue: baselineMetric.value,
+        currentValue: metric.value,
+        delta,
+        deltaPercent: (delta / baselineMetric.value) * 100,
+        allowedValue: allowed,
+        status,
+        artifactPath,
+      });
     }
   }
-  return regressions;
+  return comparisons;
+}
+
+function benchmarkComparisonStatus(
+  metric: BenchmarkMetric,
+  allowed: number,
+  delta: number,
+  minimumDeltaMs: number,
+): BenchmarkComparisonStatus {
+  if (metric.value <= allowed) {
+    return "pass";
+  }
+  if (metric.unit === "ms" && Math.abs(delta) < minimumDeltaMs) {
+    return "warn";
+  }
+  return "fail";
+}
+
+function regressionMessage(comparison: BenchmarkComparison): string {
+  return [
+    `${comparison.benchmark}`,
+    `case=${comparison.caseKey}`,
+    `metric=${comparison.metric}`,
+    `baseline=${formatMetricValue(comparison.baselineValue, comparison.unit)}`,
+    `current=${formatMetricValue(comparison.currentValue, comparison.unit)}`,
+    `delta=${formatDelta(comparison)}`,
+    `allowed=${formatMetricValue(comparison.allowedValue, comparison.unit)}`,
+  ].join(" ");
+}
+
+function appendBenchmarkSummary(
+  comparisons: readonly BenchmarkComparison[],
+  artifactPath: string,
+  baselinePath: string,
+): Effect.Effect<string | undefined> {
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryPath === undefined || summaryPath.length === 0) {
+    return Effect.succeed(undefined);
+  }
+  return Effect.tryPromise({
+    try: () =>
+      appendFile(summaryPath, benchmarkSummaryMarkdown(comparisons, artifactPath, baselinePath)),
+    catch: (cause) =>
+      new BenchmarkArtifactError({
+        message: `Failed to append benchmark summary: ${String(cause)}`,
+        cause,
+      }),
+  }).pipe(Effect.as(summaryPath), Effect.orDie);
+}
+
+function benchmarkSummaryMarkdown(
+  comparisons: readonly BenchmarkComparison[],
+  artifactPath: string,
+  baselinePath: string,
+): string {
+  const title = comparisons[0]?.benchmark ?? "benchmark";
+  const lines = [
+    `### Benchmark: ${escapeMarkdown(title)}`,
+    "",
+    `Artifact: \`${artifactPath}\``,
+    "",
+    `Baseline: \`${baselinePath}\``,
+    "",
+    "| status | metric | case | current | baseline | delta | artifact |",
+    "| --- | --- | --- | ---: | ---: | ---: | --- |",
+  ];
+  for (const comparison of comparisons) {
+    lines.push(
+      `| ${[
+        comparison.status,
+        `\`${escapeMarkdown(comparison.metric)}\``,
+        `\`${escapeMarkdown(comparison.caseKey)}\``,
+        formatMetricValue(comparison.currentValue, comparison.unit),
+        formatMetricValue(comparison.baselineValue, comparison.unit),
+        formatDelta(comparison),
+        `\`${artifactPath}\``,
+      ].join(" | ")} |`,
+    );
+  }
+  if (comparisons.length === 0) {
+    lines.push("| pass | no matching metrics | n/a | n/a | n/a | n/a | `" + artifactPath + "` |");
+  }
+  return `${lines.join("\n")}\n\n`;
 }
 
 function regressionTolerance(): number {
@@ -264,6 +385,19 @@ function regressionTolerance(): number {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0.1;
+}
+
+function regressionMinimumDeltaMs(): number {
+  const value = process.env.VS_BENCH_REGRESSION_MIN_DELTA_MS;
+  if (value === undefined || value.length === 0) {
+    return 0;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function regressionReportOnly(): boolean {
+  return process.env.VS_BENCH_REGRESSION_REPORT_ONLY === "1";
 }
 
 function regressionMetricFilter(): ReadonlySet<string> | undefined {
@@ -283,6 +417,19 @@ function caseKey(value: Readonly<Record<string, BenchmarkPrimitive>>): string {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, entry]) => `${key}=${String(entry)}`)
     .join(",");
+}
+
+function formatMetricValue(value: number, unit: BenchmarkMetric["unit"]): string {
+  const formatted = unit === "count" || unit === "bytes" ? value.toFixed(0) : value.toFixed(2);
+  return unit === "ratio" ? formatted : `${formatted}${unit}`;
+}
+
+function formatDelta(comparison: BenchmarkComparison): string {
+  return `${comparison.deltaPercent.toFixed(1)}% (${formatMetricValue(comparison.delta, comparison.unit)})`;
+}
+
+function escapeMarkdown(value: string): string {
+  return value.replaceAll("|", "\\|").replaceAll("`", "\\`");
 }
 
 function isMetricUnit(value: unknown): value is BenchmarkMetric["unit"] {
