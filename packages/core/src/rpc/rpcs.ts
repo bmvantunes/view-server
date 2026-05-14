@@ -153,6 +153,11 @@ export const RpcDeltaPublishPayload = Schema.Struct({
   patch: RpcRow,
 });
 
+export const RpcDeleteByIdPayload = Schema.Struct({
+  topic: Schema.String,
+  id: Schema.Union([Schema.String, Schema.Number]),
+});
+
 export const RpcHealthPayload = Schema.Struct({
   includeTopics: Schema.optional(Schema.Boolean),
 });
@@ -286,6 +291,11 @@ export const ViewServerRpcs = RpcGroup.make(
     success: Schema.Void,
     error: ViewServerError,
   }),
+  Rpc.make("DeleteById", {
+    payload: RpcDeleteByIdPayload,
+    success: Schema.Void,
+    error: ViewServerError,
+  }),
   Rpc.make("Health", {
     payload: RpcHealthPayload,
     success: RpcHealthResponse,
@@ -298,6 +308,7 @@ export type RpcUnsubscribePayload = typeof RpcUnsubscribePayload.Type;
 export type RpcQueryPayload = typeof RpcQueryPayload.Type;
 export type RpcPublishPayload = typeof RpcPublishPayload.Type;
 export type RpcDeltaPublishPayload = typeof RpcDeltaPublishPayload.Type;
+export type RpcDeleteByIdPayload = typeof RpcDeleteByIdPayload.Type;
 export type RpcSubscriptionEvent = typeof RpcSubscriptionEvent.Type;
 export type RpcQueryResponse = typeof RpcQueryResponse.Type;
 export type RpcHealthPayload = typeof RpcHealthPayload.Type;

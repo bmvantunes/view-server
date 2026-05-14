@@ -144,7 +144,7 @@ describe("useLiveQuery browser mode", () => {
           const initialHealth = yield* Effect.promise(() => server.health());
           expect(initialHealth.topics.orders.rows).toBe(2);
           const firstEvent = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
-          yield* server.client.subscribe("orders", query, (event) =>
+          yield* server.subscribe("orders", query, (event) =>
             Deferred.succeed(firstEvent, event).pipe(Effect.asVoid),
           );
           const snapshot = yield* Deferred.await(firstEvent).pipe(Effect.timeout("1 second"));
@@ -171,6 +171,18 @@ describe("useLiveQuery browser mode", () => {
           expect(document.body.textContent).not.toContain("o-0:50");
           expect(rowRenderCounts.get("o-3")).toBe(renderCountsBeforeTotalOnly.get("o-3"));
           expect(rowRenderCounts.get("o-2")).toBe(renderCountsBeforeTotalOnly.get("o-2"));
+
+          yield* Effect.promise(() => server.deleteById("orders", "o-3"));
+          yield* Effect.promise(() =>
+            waitForCondition(
+              () =>
+                document.body.textContent?.includes("rows=3") === true &&
+                document.body.textContent?.includes("o-3:300") === false,
+              "deleted row to leave the visible window",
+            ),
+          );
+          expect(document.body.textContent).toContain("o-2:200");
+          expect(document.body.textContent).toContain("o-1:100");
         }),
       ),
     );

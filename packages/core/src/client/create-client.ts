@@ -4,6 +4,7 @@ import type * as RpcClient from "effect/unstable/rpc/RpcClient";
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError";
 import type {
   ReadableTopicName,
+  TopicIdFromConfig,
   TopicName,
   TopicPatchFromConfig,
   TopicRowFromConfig,
@@ -19,6 +20,7 @@ import {
 } from "../protocol/index.ts";
 import type {
   RpcDeltaPublishPayload,
+  RpcDeleteByIdPayload,
   RpcHealthPayload,
   RpcHealthResponse,
   RpcPublishPayload,
@@ -62,6 +64,9 @@ export type ViewServerRpcTransport = {
   ) => Effect.Effect<void, ViewServerError | RpcClientError>;
   readonly DeltaPublish: (
     payload: RpcDeltaPublishPayload,
+  ) => Effect.Effect<void, ViewServerError | RpcClientError>;
+  readonly DeleteById: (
+    payload: RpcDeleteByIdPayload,
   ) => Effect.Effect<void, ViewServerError | RpcClientError>;
   readonly Health: (
     payload: RpcHealthPayload,
@@ -115,6 +120,10 @@ export type ViewServerClient<TConfig extends ViewServerConfig> = {
   readonly deltaPublish: <TTopic extends TopicName<TConfig>>(
     topic: TTopic,
     patch: TopicPatchFromConfig<TConfig, TTopic>,
+  ) => Effect.Effect<void, ViewServerError>;
+  readonly deleteById: <TTopic extends TopicName<TConfig>>(
+    topic: TTopic,
+    id: TopicIdFromConfig<TConfig, TTopic>,
   ) => Effect.Effect<void, ViewServerError>;
   readonly health: () => Effect.Effect<HealthResponse, ViewServerError>;
   readonly createStore: <
@@ -288,6 +297,17 @@ export function createViewServerClient<TConfig extends ViewServerConfig>(
         });
         const payload = yield* rpcDeltaPublishPayload<TConfig, typeof topic>(config, topic, patch);
         yield* rpcClient.DeltaPublish(payload);
+      })().pipe(Effect.mapError(toViewServerError)),
+
+    deleteById: (topic, id) =>
+      Effect.fn("view-server.client.delete_by_id")(function* () {
+        yield* Effect.annotateCurrentSpan({
+          "view_server.topic": String(topic),
+        });
+        yield* rpcClient.DeleteById({
+          topic,
+          id,
+        });
       })().pipe(Effect.mapError(toViewServerError)),
 
     health: () =>

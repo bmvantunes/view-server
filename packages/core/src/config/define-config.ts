@@ -194,6 +194,10 @@ export type TopicIdFieldFromConfig<
   TConfig extends ViewServerConfig,
   TTopic extends TopicName<TConfig>,
 > = TopicConfigByName<TConfig, TTopic>["id"];
+export type TopicIdFromConfig<
+  TConfig extends ViewServerConfig,
+  TTopic extends TopicName<TConfig>,
+> = Extract<TopicRowFromConfig<TConfig, TTopic>[TopicIdFieldFromConfig<TConfig, TTopic>], IdValue>;
 export type TopicPatchFromConfig<
   TConfig extends ViewServerConfig,
   TTopic extends TopicName<TConfig>,

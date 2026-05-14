@@ -70,6 +70,7 @@ function nodeWebsocketTransport(url: string): ViewServerRpcTransport {
     Unsubscribe: (payload) => runRpc((rpcClient) => rpcClient.Unsubscribe(payload)),
     Publish: (payload) => runRpc((rpcClient) => rpcClient.Publish(payload)),
     DeltaPublish: (payload) => runRpc((rpcClient) => rpcClient.DeltaPublish(payload)),
+    DeleteById: (payload) => runRpc((rpcClient) => rpcClient.DeleteById(payload)),
     Health: (payload) => runRpc((rpcClient) => rpcClient.Health(payload)),
   };
 }

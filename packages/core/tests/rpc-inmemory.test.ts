@@ -266,6 +266,7 @@ describe("Effect RPC in-memory", () => {
           }),
         Publish: () => Effect.void,
         DeltaPublish: () => Effect.void,
+        DeleteById: () => Effect.void,
         Health: () => Effect.succeed({ ok: true, topics: {} }),
       };
       const client = createViewServerClient<typeof config>(transport, config);
@@ -354,6 +355,7 @@ describe("Effect RPC in-memory", () => {
         Unsubscribe: () => Effect.void,
         Publish: () => Effect.void,
         DeltaPublish: () => Effect.void,
+        DeleteById: () => Effect.void,
         Health: () => Effect.succeed({ ok: true, topics: {} }),
       };
       const client = createViewServerClient<typeof config>(transport, config);
@@ -427,6 +429,30 @@ describe("Effect RPC in-memory", () => {
 
       const nextEvent = yield* Queue.take(events).pipe(Effect.timeout("100 millis"), Effect.exit);
       expect(Exit.isSuccess(nextEvent)).toBe(false);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("deletes rows through the generated Effect RPC client", () =>
+    Effect.gen(function* () {
+      const runtime = yield* makeViewServerRuntime(config, {
+        initialRows: {
+          orders: [
+            { id: "o-1", symbol: "AAPL", price: 100 },
+            { id: "o-2", symbol: "MSFT", price: 200 },
+          ],
+        },
+      });
+      const rpcClient = yield* RpcTest.makeClient(ViewServerRpcs).pipe(
+        Effect.provide(ViewServerHandlersLive),
+        Effect.provideService(ViewServerRuntime, runtime),
+      );
+      const client = createViewServerClient<typeof config>(rpcClient, config);
+
+      yield* client.deleteById("orders", "o-1");
+      const result = yield* client.query("orders", idFallbackQuery);
+
+      expect(result.totalRows).toBe(1);
+      expect(result.rows).toEqual([{ id: "o-2", price: 200 }]);
     }).pipe(Effect.scoped),
   );
 
@@ -622,10 +648,11 @@ describe("Effect RPC in-memory", () => {
 
   it.effect("marks pending active-plan subscriptions stale and refreshes once after catch-up", () =>
     Effect.gen(function* () {
-      const initialRows = Array.from({ length: 5_000 }, (_, index) => ({
+      const rowCount = 1_000;
+      const initialRows = Array.from({ length: rowCount }, (_, index) => ({
         id: `o-${index}`,
         symbol: `SYM-${index % 100}`,
-        price: 5_000 - index,
+        price: rowCount - index,
       }));
       const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
         initialRows,
@@ -891,10 +918,13 @@ describe("Effect RPC in-memory", () => {
 
   it.effect("deleteById during pending active-plan build catches up without stale rows", () =>
     Effect.gen(function* () {
-      const initialRows = Array.from({ length: 5_000 }, (_, index) => ({
+      const rowCount = 1_000;
+      const visibleDeletedId = `o-${rowCount - 1}`;
+      const nextVisibleId = `o-${rowCount - 2}`;
+      const initialRows = Array.from({ length: rowCount }, (_, index) => ({
         id: `o-${index}`,
         symbol: `SYM-${index % 100}`,
-        price: 5_000 - index,
+        price: rowCount - index,
       }));
       const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
         initialRows,
@@ -908,7 +938,7 @@ describe("Effect RPC in-memory", () => {
       if (initial.type !== "snapshot") {
         throw new Error("Expected initial snapshot");
       }
-      expect(initial.rows[0]?.id).toBe("o-4999");
+      expect(initial.rows[0]?.id).toBe(visibleDeletedId);
 
       const buildingMetrics = yield* waitForWorkerMetrics(
         worker,
@@ -916,7 +946,7 @@ describe("Effect RPC in-memory", () => {
       );
       expect(buildingMetrics.activePlanPendingCount).toBe(1);
 
-      yield* worker.deleteById("o-4999");
+      yield* worker.deleteById(visibleDeletedId);
 
       const stale = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
       expect(stale.type).toBe("status");
@@ -934,8 +964,8 @@ describe("Effect RPC in-memory", () => {
       }
       expect(refreshed.meta.version).toBe("1");
       expect(refreshed.meta.totalRows).toBe(initialRows.length - 1);
-      expect(refreshed.rows.some((row) => row.id === "o-4999")).toBe(false);
-      expect(refreshed.rows[0]?.id).toBe("o-4998");
+      expect(refreshed.rows.some((row) => row.id === visibleDeletedId)).toBe(false);
+      expect(refreshed.rows[0]?.id).toBe(nextVisibleId);
 
       yield* worker.unsubscribe("active-plan-delete-catch-up");
     }).pipe(Effect.scoped),

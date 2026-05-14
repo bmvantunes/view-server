@@ -350,6 +350,7 @@ function scriptedLiveQueryClient(): ViewServerClient<typeof config> {
       }),
     publish: () => Effect.void,
     deltaPublish: () => Effect.void,
+    deleteById: () => Effect.void,
     health: () => Effect.die(new Error("scripted client health is not used")),
     createStore: () => Effect.die(new Error("scripted client createStore is not used")),
   };

@@ -55,6 +55,13 @@ export const ViewServerHandlersLive = ViewServerRpcs.toLayer(
           });
           yield* runtime.deltaPublish(payload.topic, payload.patch);
         })(),
+      DeleteById: (payload) =>
+        Effect.fn("view-server.rpc.delete_by_id")(function* () {
+          yield* Effect.annotateCurrentSpan({
+            "view_server.topic": payload.topic,
+          });
+          yield* runtime.deleteById(payload.topic, payload.id);
+        })(),
       Health: () =>
         Effect.fn("view-server.rpc.health")(function* () {
           return yield* runtime.health;

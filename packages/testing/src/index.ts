@@ -2,6 +2,7 @@ import { Effect } from "effect";
 import * as RpcTest from "effect/unstable/rpc/RpcTest";
 import {
   createViewServerClient,
+  type ActiveSubscription,
   makeViewServerRuntime,
   type HealthResponse,
   type InferReadableQueryResult,
@@ -9,6 +10,8 @@ import {
   type QueryForReadableTopic,
   type ReadableTopicName,
   type RuntimeRow,
+  type SubscriptionEvent,
+  type TopicIdFromConfig,
   type TopicName,
   type TopicPatchFromConfig,
   type TopicRowFromConfig,
@@ -32,6 +35,10 @@ export type InMemoryViewServer<TConfig extends ViewServerConfig> = {
     topic: TTopic,
     patch: TopicPatchFromConfig<TConfig, TTopic>,
   ) => Promise<void>;
+  readonly deleteById: <TTopic extends TopicName<TConfig>>(
+    topic: TTopic,
+    id: TopicIdFromConfig<TConfig, TTopic>,
+  ) => Promise<void>;
   readonly query: <
     TTopic extends ReadableTopicName<TConfig>,
     TQuery extends QueryForReadableTopic<TConfig, TTopic>,
@@ -39,6 +46,14 @@ export type InMemoryViewServer<TConfig extends ViewServerConfig> = {
     topic: TTopic,
     query: TQuery,
   ) => Promise<LiveQueryInitialData<InferReadableQueryResult<TConfig, TTopic, TQuery>[number]>>;
+  readonly subscribe: <
+    TTopic extends ReadableTopicName<TConfig>,
+    TQuery extends QueryForReadableTopic<TConfig, TTopic>,
+  >(
+    topic: TTopic,
+    query: TQuery,
+    onEvent: (event: SubscriptionEvent<readonly RuntimeRow[]>) => Effect.Effect<void>,
+  ) => Effect.Effect<ActiveSubscription, ViewServerError, import("effect/Scope").Scope>;
   readonly health: () => Promise<HealthResponse>;
   readonly close: () => Promise<void>;
 };
@@ -77,7 +92,9 @@ export function inMemoryViewServer<const TConfig extends ViewServerConfig>(
         }
       },
       deltaPublish: (topic, patch) => Effect.runPromise(client.deltaPublish(topic, patch)),
+      deleteById: (topic, id) => Effect.runPromise(client.deleteById(topic, id)),
       query: (topic, query) => Effect.runPromise(client.query(topic, query)),
+      subscribe: (topic, query, onEvent) => client.subscribe(topic, query, onEvent),
       health: () => Effect.runPromise(client.health()),
       close: () => Effect.runPromise(runtime.close),
     };

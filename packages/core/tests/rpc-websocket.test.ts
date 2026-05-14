@@ -465,6 +465,46 @@ describe("Effect RPC websocket", () => {
     );
   });
 
+  it("makeNodeWebsocketClient deletes rows over websocket NDJSON", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
+          Layer.provide(
+            layerViewServerRuntime(config, {
+              initialRows: {
+                orders: [
+                  { id: "o-1", symbol: "AAPL", price: 100 },
+                  { id: "o-2", symbol: "MSFT", price: 200 },
+                ],
+              },
+            }),
+          ),
+        );
+        const testServerLayer = serverLayer.pipe(Layer.provideMerge(NodeHttpServer.layerTest));
+
+        yield* Effect.gen(function* () {
+          const server = yield* HttpServer.HttpServer;
+          const address = server.address;
+          if (address._tag !== "TcpAddress") {
+            return yield* Effect.die(new Error("Expected test server to listen on TCP"));
+          }
+          const client = yield* makeNodeWebsocketClient<typeof config>(
+            `ws://127.0.0.1:${address.port}/rpc`,
+            config,
+          );
+
+          yield* client.deleteById("orders", "o-1").pipe(Effect.timeout("1 second"));
+          const result = yield* client.query("orders", query).pipe(Effect.timeout("1 second"));
+
+          expect(result).toEqual({
+            rows: [{ id: "o-2", price: 200 }],
+            totalRows: 1,
+          });
+        }).pipe(Effect.provide(testServerLayer));
+      }).pipe(Effect.scoped),
+    );
+  });
+
   it("makeNodeWebsocketClient subscribes over websocket NDJSON", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
