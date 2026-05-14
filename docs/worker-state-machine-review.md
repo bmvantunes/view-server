@@ -43,6 +43,7 @@ VS_WORKER_SOAK_RAW_SUBSCRIPTIONS=250 \
 VS_WORKER_SOAK_GROUPED_SUBSCRIPTIONS=20 \
 VS_WORKER_SOAK_MUTATIONS=10000 \
 VS_WORKER_SOAK_TIMEOUT_MS=900000 \
+VS_WORKER_SOAK_SUMMARY_PATH=/private/tmp/view-server-worker-soak-1m-summary.json \
 pnpm exec vitest run --config vitest.config.ts tests/worker-soak.test.ts
 ```
 

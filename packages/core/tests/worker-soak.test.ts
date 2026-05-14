@@ -3,9 +3,16 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { defineConfig } from "../src/config/index.ts";
 import type { ViewServerError } from "../src/errors.ts";
-import type { GroupedQuery, RawQuery } from "../src/protocol/index.ts";
+import type {
+  GroupedQuery,
+  RawQuery,
+  RuntimeRow,
+  SubscriptionEvent,
+} from "../src/protocol/index.ts";
 import { makeTopicWorkerCore, type TopicWorkerMetrics } from "../src/worker/topic-worker-core.ts";
 
 const Order = Schema.Struct({
@@ -69,28 +76,34 @@ describe("topic worker soak", () => {
     () =>
       Effect.gen(function* () {
         const shape = soakShape();
+        const startedAt = performance.now();
         const initialRows = Array.from({ length: shape.rows }, (_, index) => orderRow(index));
         const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
           initialRows,
           groupedRefreshDebounceMs: shape.groupedRefreshDebounceMs,
         });
         const subscriptionFibers: Fiber.Fiber<void, ViewServerError>[] = [];
+        const events = eventCounts();
 
         for (let index = 0; index < shape.rawSubscriptions; index++) {
           const query = {
             ...rawQuery,
             offset: (index % shape.rawPageCycle) * rawQuery.limit,
           } satisfies RawQuery<OrderRow, { readonly id: true; readonly price: true }>;
-          const fiber = yield* worker
-            .subscribe(`soak-raw-${index}`, query)
-            .pipe(Stream.runDrain, Effect.forkScoped);
+          const fiber = yield* worker.subscribe(`soak-raw-${index}`, query).pipe(
+            Stream.tap((event) => Effect.sync(() => recordEvent(events, event))),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
           subscriptionFibers.push(fiber);
         }
 
         for (let index = 0; index < shape.groupedSubscriptions; index++) {
-          const fiber = yield* worker
-            .subscribe(`soak-grouped-${index}`, groupedQuery)
-            .pipe(Stream.runDrain, Effect.forkScoped);
+          const fiber = yield* worker.subscribe(`soak-grouped-${index}`, groupedQuery).pipe(
+            Stream.tap((event) => Effect.sync(() => recordEvent(events, event))),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
           subscriptionFibers.push(fiber);
         }
 
@@ -146,7 +159,9 @@ describe("topic worker soak", () => {
         );
         expect(settled.subscribers).toBe(shape.rawSubscriptions + shape.groupedSubscriptions);
         expect(settled.queueDepth).toBe(0);
+        const settledAt = performance.now();
         const loadedHeap = process.memoryUsage().heapUsed;
+        const loadedRss = process.memoryUsage().rss;
 
         for (let index = 0; index < shape.rawSubscriptions; index++) {
           yield* worker.unsubscribe(`soak-raw-${index}`);
@@ -174,12 +189,50 @@ describe("topic worker soak", () => {
         expect(released.activePlanFallbackCount).toBe(0);
 
         const releasedHeap = process.memoryUsage().heapUsed;
+        const releasedRss = process.memoryUsage().rss;
         if (globalThis.gc !== undefined) {
           expect(releasedHeap).toBeLessThanOrEqual(Math.ceil(loadedHeap * 1.1));
         }
 
+        yield* writeSoakSummary({
+          shape,
+          durationMs: Math.round(performance.now() - startedAt),
+          mutationAndSettleMs: Math.round(settledAt - startedAt),
+          finalRows: settled.rows,
+          finalVersion: settled.version.toString(),
+          subscribersBeforeCleanup: settled.subscribers,
+          subscribersAfterCleanup: released.subscribers,
+          activePlanCountBeforeCleanup: settled.activePlanCount,
+          activeViewCountBeforeCleanup: settled.activeViewCount,
+          activePlanFallbackCountBeforeCleanup: settled.activePlanFallbackCount,
+          activePlanCountAfterCleanup: released.activePlanCount,
+          activeViewCountAfterCleanup: released.activeViewCount,
+          activePlanFallbackCountAfterCleanup: released.activePlanFallbackCount,
+          activePlanBuildQueueDepthAfterCleanup: released.activePlanBuildQueueDepth,
+          activePlanBuildingCountAfterCleanup: released.activePlanBuildingCount,
+          activePlanPendingCountAfterCleanup: released.activePlanPendingCount,
+          activePlanIndexEstimatedBytesAfterCleanup: released.activePlanIndexEstimatedBytes,
+          maxSubscriptionLagVersionsAfterSettle: settled.maxSubscriptionLagVersions,
+          totalSubscriptionLagVersionsAfterSettle: settled.totalSubscriptionLagVersions,
+          maxSubscriptionLagVersionsAfterCleanup: released.maxSubscriptionLagVersions,
+          totalSubscriptionLagVersionsAfterCleanup: released.totalSubscriptionLagVersions,
+          queueDepthAfterSettle: settled.queueDepth,
+          queueDepthAfterCleanup: released.queueDepth,
+          groupedRefreshCountsExposed: false,
+          heapSubscribedBytes: subscribedHeap,
+          heapLoadedBytes: loadedHeap,
+          heapReleasedBytes: releasedHeap,
+          rssLoadedBytes: loadedRss,
+          rssReleasedBytes: releasedRss,
+          gcAvailable: globalThis.gc !== undefined,
+          events,
+          retries: 0,
+          backpressureErrors: 0,
+          reconnects: 0,
+        });
+
         yield* Effect.logInfo(
-          `worker soak rows=${shape.rows} raw=${shape.rawSubscriptions} grouped=${shape.groupedSubscriptions} mutations=${shape.mutations} heapSubscribed=${subscribedHeap} heapLoaded=${loadedHeap} heapReleased=${releasedHeap}`,
+          `worker soak rows=${shape.rows} raw=${shape.rawSubscriptions} grouped=${shape.groupedSubscriptions} mutations=${shape.mutations} snapshots=${events.snapshots} deltas=${events.deltas} status=${events.status} heapSubscribed=${subscribedHeap} heapLoaded=${loadedHeap} heapReleased=${releasedHeap}`,
         );
       }).pipe(Effect.scoped),
     envNumber("VS_WORKER_SOAK_TIMEOUT_MS", 60_000),
@@ -194,6 +247,83 @@ type SoakShape = {
   readonly rawPageCycle: number;
   readonly groupedRefreshDebounceMs: number;
 };
+
+type SoakEventCounts = {
+  snapshots: number;
+  deltas: number;
+  status: number;
+};
+
+type SoakSummary = {
+  readonly shape: SoakShape;
+  readonly durationMs: number;
+  readonly mutationAndSettleMs: number;
+  readonly finalRows: number;
+  readonly finalVersion: string;
+  readonly subscribersBeforeCleanup: number;
+  readonly subscribersAfterCleanup: number;
+  readonly activePlanCountBeforeCleanup: number;
+  readonly activeViewCountBeforeCleanup: number;
+  readonly activePlanFallbackCountBeforeCleanup: number;
+  readonly activePlanCountAfterCleanup: number;
+  readonly activeViewCountAfterCleanup: number;
+  readonly activePlanFallbackCountAfterCleanup: number;
+  readonly activePlanBuildQueueDepthAfterCleanup: number;
+  readonly activePlanBuildingCountAfterCleanup: number;
+  readonly activePlanPendingCountAfterCleanup: number;
+  readonly activePlanIndexEstimatedBytesAfterCleanup: number;
+  readonly maxSubscriptionLagVersionsAfterSettle: number;
+  readonly totalSubscriptionLagVersionsAfterSettle: number;
+  readonly maxSubscriptionLagVersionsAfterCleanup: number;
+  readonly totalSubscriptionLagVersionsAfterCleanup: number;
+  readonly queueDepthAfterSettle: number;
+  readonly queueDepthAfterCleanup: number;
+  readonly groupedRefreshCountsExposed: boolean;
+  readonly heapSubscribedBytes: number;
+  readonly heapLoadedBytes: number;
+  readonly heapReleasedBytes: number;
+  readonly rssLoadedBytes: number;
+  readonly rssReleasedBytes: number;
+  readonly gcAvailable: boolean;
+  readonly events: SoakEventCounts;
+  readonly retries: number;
+  readonly backpressureErrors: number;
+  readonly reconnects: number;
+};
+
+function eventCounts(): SoakEventCounts {
+  return {
+    snapshots: 0,
+    deltas: 0,
+    status: 0,
+  };
+}
+
+function recordEvent(
+  counts: SoakEventCounts,
+  event: SubscriptionEvent<readonly RuntimeRow[]>,
+): void {
+  if (event.type === "snapshot") {
+    counts.snapshots += 1;
+    return;
+  }
+  if (event.type === "delta") {
+    counts.deltas += 1;
+    return;
+  }
+  counts.status += 1;
+}
+
+function writeSoakSummary(summary: SoakSummary): Effect.Effect<void> {
+  const summaryPath = process.env.VS_WORKER_SOAK_SUMMARY_PATH;
+  if (summaryPath === undefined || summaryPath.length === 0) {
+    return Effect.void;
+  }
+  return Effect.promise(async () => {
+    await mkdir(dirname(summaryPath), { recursive: true });
+    await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+  });
+}
 
 function soakShape(): SoakShape {
   return {
