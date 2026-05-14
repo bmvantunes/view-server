@@ -4,6 +4,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { performance } from "node:perf_hooks";
+import { writeBenchmarkArtifact, type BenchmarkResult } from "./benchmark-artifacts.ts";
 import type { RuntimeRawQuery, RuntimeRow, SubscriptionEvent } from "../src/protocol/index.ts";
 import { makeTopicWorkerCore, type TopicWorkerCore } from "../src/worker/topic-worker-core.ts";
 
@@ -117,50 +118,79 @@ void Effect.runPromise(
 
     const finalMetrics = yield* worker.metrics;
     yield* worker.unsubscribe("active-plan-responsiveness");
+    const operationP50Ms = percentile(
+      samples.map((sample) => sample.operationMs),
+      0.5,
+    );
+    const operationP95Ms = percentile(
+      samples.map((sample) => sample.operationMs),
+      0.95,
+    );
+    const operationP99Ms = percentile(
+      samples.map((sample) => sample.operationMs),
+      0.99,
+    );
+    const operationMaxMs = max(samples.map((sample) => sample.operationMs));
+    const metricsP50Ms = percentile(
+      samples.map((sample) => sample.metricsMs),
+      0.5,
+    );
+    const metricsP95Ms = percentile(
+      samples.map((sample) => sample.metricsMs),
+      0.95,
+    );
+    const metricsP99Ms = percentile(
+      samples.map((sample) => sample.metricsMs),
+      0.99,
+    );
+    const metricsMaxMs = max(samples.map((sample) => sample.metricsMs));
+    const benchmarkResult: BenchmarkResult = {
+      case: {
+        operation: config.operation,
+        rows: config.rows,
+        operations: config.operations,
+        pageSize: config.pageSize,
+        chunkSize: config.chunkSize ?? "default",
+      },
+      metrics: [
+        { name: "operationP50Ms", value: operationP50Ms, unit: "ms" },
+        { name: "operationP95Ms", value: operationP95Ms, unit: "ms" },
+        { name: "operationP99Ms", value: operationP99Ms, unit: "ms" },
+        { name: "operationMaxMs", value: operationMaxMs, unit: "ms" },
+        { name: "metricsP50Ms", value: metricsP50Ms, unit: "ms" },
+        { name: "metricsP95Ms", value: metricsP95Ms, unit: "ms" },
+        { name: "metricsP99Ms", value: metricsP99Ms, unit: "ms" },
+        { name: "metricsMaxMs", value: metricsMaxMs, unit: "ms" },
+        { name: "staleStatusCount", value: eventStats.staleStatusCount, unit: "count" },
+        { name: "snapshotCount", value: eventStats.snapshotCount, unit: "count" },
+        { name: "deltaCount", value: eventStats.deltaCount, unit: "count" },
+      ],
+    };
+    const artifact = yield* writeBenchmarkArtifact(
+      "active-plan-responsiveness",
+      {
+        rows: config.rows,
+        operations: config.operations,
+        operation: config.operation,
+        pageSize: config.pageSize,
+        chunkSize: config.chunkSize ?? "default",
+      },
+      [benchmarkResult],
+    );
     yield* Effect.logInfo(
       [
         "active-plan responsiveness result",
         `operation=${config.operation}`,
         `samples=${samples.length}`,
         `buildPendingSamples=${samples.filter((sample) => sample.activeBuildPending).length}`,
-        `operationP50Ms=${formatMs(
-          percentile(
-            samples.map((sample) => sample.operationMs),
-            0.5,
-          ),
-        )}`,
-        `operationP95Ms=${formatMs(
-          percentile(
-            samples.map((sample) => sample.operationMs),
-            0.95,
-          ),
-        )}`,
-        `operationP99Ms=${formatMs(
-          percentile(
-            samples.map((sample) => sample.operationMs),
-            0.99,
-          ),
-        )}`,
-        `operationMaxMs=${formatMs(max(samples.map((sample) => sample.operationMs)))}`,
-        `metricsP50Ms=${formatMs(
-          percentile(
-            samples.map((sample) => sample.metricsMs),
-            0.5,
-          ),
-        )}`,
-        `metricsP95Ms=${formatMs(
-          percentile(
-            samples.map((sample) => sample.metricsMs),
-            0.95,
-          ),
-        )}`,
-        `metricsP99Ms=${formatMs(
-          percentile(
-            samples.map((sample) => sample.metricsMs),
-            0.99,
-          ),
-        )}`,
-        `metricsMaxMs=${formatMs(max(samples.map((sample) => sample.metricsMs)))}`,
+        `operationP50Ms=${formatMs(operationP50Ms)}`,
+        `operationP95Ms=${formatMs(operationP95Ms)}`,
+        `operationP99Ms=${formatMs(operationP99Ms)}`,
+        `operationMaxMs=${formatMs(operationMaxMs)}`,
+        `metricsP50Ms=${formatMs(metricsP50Ms)}`,
+        `metricsP95Ms=${formatMs(metricsP95Ms)}`,
+        `metricsP99Ms=${formatMs(metricsP99Ms)}`,
+        `metricsMaxMs=${formatMs(metricsMaxMs)}`,
         `staleStatusCount=${eventStats.staleStatusCount}`,
         `snapshotCount=${eventStats.snapshotCount}`,
         `deltaCount=${eventStats.deltaCount}`,
@@ -169,6 +199,8 @@ void Effect.runPromise(
         `version=${finalMetrics.version.toString()}`,
         `activePlanCount=${finalMetrics.activePlanCount}`,
         `activePlanBuildingCount=${finalMetrics.activePlanBuildingCount}`,
+        `artifact=${artifact.artifactPath}`,
+        `baselineCompared=${artifact.compared}`,
       ].join(" "),
     );
   }).pipe(Effect.scoped),

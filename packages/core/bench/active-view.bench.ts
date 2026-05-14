@@ -1,5 +1,10 @@
 import * as Effect from "effect/Effect";
 import { performance } from "node:perf_hooks";
+import {
+  writeBenchmarkArtifact,
+  type BenchmarkMetric,
+  type BenchmarkResult,
+} from "./benchmark-artifacts.ts";
 import type { RuntimeRawQuery, RuntimeRow } from "../src/protocol/index.ts";
 import type { ActiveSortedIndexKind } from "../src/worker/active-sorted-index.ts";
 import type { ActiveRawViewChange } from "../src/worker/active-view.ts";
@@ -124,6 +129,7 @@ void Effect.runPromise(
     const scenarios = makeScenarios(baseRows, config.mutations).filter((scenario) =>
       config.scenarios.includes(scenario.name),
     );
+    const benchmarkResults: BenchmarkResult[] = [];
 
     for (const pageSize of config.pageSizes) {
       const queries = makeQueries(config.subscriptions, pageSize, config.queryShape);
@@ -148,6 +154,16 @@ void Effect.runPromise(
                 : active.update.ms === 0
                   ? "inf"
                   : (recompute.ms / active.update.ms).toFixed(2);
+            benchmarkResults.push(
+              activeViewBenchmarkResult({
+                scenario,
+                pageSize,
+                sortedIndex,
+                sharing,
+                recompute,
+                active,
+              }),
+            );
             yield* Effect.logInfo(
               [
                 `scenario=${scenario.name}`,
@@ -176,8 +192,78 @@ void Effect.runPromise(
         }
       }
     }
+    const artifact = yield* writeBenchmarkArtifact(
+      "active-view",
+      {
+        rows: config.rows,
+        subscriptions: config.subscriptions,
+        mutations: config.mutations,
+        pageSizes: config.pageSizes.join(","),
+        scenarios: config.scenarios.join(","),
+        indexes: config.indexes.join(","),
+        sharing: config.sharing.join(","),
+        queryShape: config.queryShape,
+        blockSize: config.blockSize,
+        maxActivePlans: config.maxActivePlans ?? null,
+        maxActivePlanEstimatedBytes: config.maxActivePlanEstimatedBytes ?? null,
+        memory: config.memory,
+        baseline: config.baseline,
+        validate: config.validate,
+      },
+      benchmarkResults,
+    );
+    yield* Effect.logInfo(
+      `active-view benchmark artifact=${artifact.artifactPath} baselineCompared=${artifact.compared} results=${benchmarkResults.length}`,
+    );
   }),
 );
+
+function activeViewBenchmarkResult(args: {
+  readonly scenario: BenchScenario;
+  readonly pageSize: number;
+  readonly sortedIndex: ActiveSortedIndexKind;
+  readonly sharing: ActiveViewSharing;
+  readonly recompute: TimedResult | undefined;
+  readonly active: ActiveTimedResult;
+}): BenchmarkResult {
+  const metrics: BenchmarkMetric[] = [
+    { name: "activeBuildMs", value: args.active.buildMs, unit: "ms" },
+    { name: "activeUpdateMs", value: args.active.update.ms, unit: "ms" },
+    { name: "activeValidationMs", value: args.active.validationMs, unit: "ms" },
+    { name: "activePlanCount", value: args.active.planCount, unit: "count" },
+    { name: "activeFallbackCount", value: args.active.fallbackCount, unit: "count" },
+    { name: "activeFallbackBuildMs", value: args.active.fallbackBuildMs, unit: "ms" },
+    { name: "activeFallbackEstimateMs", value: args.active.fallbackEstimateMs, unit: "ms" },
+  ];
+  if (args.recompute !== undefined) {
+    metrics.push({ name: "recomputeMs", value: args.recompute.ms, unit: "ms" });
+  }
+  if (args.active.estimatedIndexBytes !== undefined) {
+    metrics.push({
+      name: "activeIndexBytes",
+      value: args.active.estimatedIndexBytes,
+      unit: "bytes",
+    });
+  }
+  if (args.active.memory !== undefined) {
+    metrics.push(
+      { name: "activeHeapDelta", value: args.active.memory.heapUsedDelta, unit: "bytes" },
+      { name: "activeRssDelta", value: args.active.memory.rssDelta, unit: "bytes" },
+      { name: "activeHeapAfter", value: args.active.memory.after.heapUsed, unit: "bytes" },
+      { name: "activeRssAfter", value: args.active.memory.after.rss, unit: "bytes" },
+    );
+  }
+  return {
+    case: {
+      scenario: args.scenario.name,
+      index: args.sortedIndex,
+      sharing: args.sharing,
+      queryShape: config.queryShape,
+      pageSize: args.pageSize,
+    },
+    metrics,
+  };
+}
 
 function runFullRecompute(
   baseRows: readonly RuntimeRow[],

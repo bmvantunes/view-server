@@ -4,6 +4,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { performance } from "node:perf_hooks";
+import { writeBenchmarkArtifact, type BenchmarkResult } from "./benchmark-artifacts.ts";
 import type {
   RuntimeAggregateMap,
   RuntimeGroupedQuery,
@@ -168,6 +169,78 @@ void Effect.runPromise(
     const settleMs = performance.now() - settleStarted;
     const finalMetrics = yield* worker.metrics;
     yield* worker.unsubscribe("grouped-refresh-overlap");
+    const operationP50Ms = percentile(
+      samples.map((sample) => sample.operationMs),
+      0.5,
+    );
+    const operationP95Ms = percentile(
+      samples.map((sample) => sample.operationMs),
+      0.95,
+    );
+    const operationP99Ms = percentile(
+      samples.map((sample) => sample.operationMs),
+      0.99,
+    );
+    const operationMaxMs = max(samples.map((sample) => sample.operationMs));
+    const startGapP95Ms = percentile(
+      samples.map((sample) => sample.startGapMs),
+      0.95,
+    );
+    const startGapP99Ms = percentile(
+      samples.map((sample) => sample.startGapMs),
+      0.99,
+    );
+    const startGapMaxMs = max(samples.map((sample) => sample.startGapMs));
+    const metricsP99Ms = percentile(
+      samples.map((sample) => sample.metricsMs),
+      0.99,
+    );
+    const metricsMaxMs = max(samples.map((sample) => sample.metricsMs));
+    const benchmarkResult: BenchmarkResult = {
+      case: {
+        backend: config.backend,
+        rows: config.rows,
+        operations: config.operations,
+        aggregateCount: config.aggregateCount,
+        groupedRefreshDebounceMs: config.groupedRefreshDebounceMs,
+        operationPauseMs: config.operationPauseMs,
+        limit: config.limit,
+      },
+      metrics: [
+        { name: "operationP50Ms", value: operationP50Ms, unit: "ms" },
+        { name: "operationP95Ms", value: operationP95Ms, unit: "ms" },
+        { name: "operationP99Ms", value: operationP99Ms, unit: "ms" },
+        { name: "operationMaxMs", value: operationMaxMs, unit: "ms" },
+        { name: "startGapP95Ms", value: startGapP95Ms, unit: "ms" },
+        { name: "startGapP99Ms", value: startGapP99Ms, unit: "ms" },
+        { name: "startGapMaxMs", value: startGapMaxMs, unit: "ms" },
+        { name: "metricsP99Ms", value: metricsP99Ms, unit: "ms" },
+        { name: "metricsMaxMs", value: metricsMaxMs, unit: "ms" },
+        { name: "settleMs", value: settleMs, unit: "ms" },
+        { name: "staleStatusCount", value: eventStats.staleStatusCount, unit: "count" },
+        { name: "snapshotCount", value: eventStats.snapshotCount, unit: "count" },
+        { name: "deltaCount", value: eventStats.deltaCount, unit: "count" },
+        {
+          name: "maxSubscriptionLagVersions",
+          value: finalMetrics.maxSubscriptionLagVersions,
+          unit: "count",
+        },
+      ],
+    };
+    const artifact = yield* writeBenchmarkArtifact(
+      "grouped-refresh-overlap",
+      {
+        backend: config.backend,
+        rows: config.rows,
+        operations: config.operations,
+        aggregateCount: config.aggregateCount,
+        groupedRefreshDebounceMs: config.groupedRefreshDebounceMs,
+        operationPauseMs: config.operationPauseMs,
+        settleTimeoutMs: config.settleTimeoutMs,
+        limit: config.limit,
+      },
+      [benchmarkResult],
+    );
 
     yield* Effect.logInfo(
       [
@@ -175,45 +248,15 @@ void Effect.runPromise(
         `backend=${config.backend}`,
         `samples=${samples.length}`,
         `dirtySamples=${samples.filter((sample) => sample.dirtyBeforeOperation).length}`,
-        `operationP50Ms=${formatMs(
-          percentile(
-            samples.map((sample) => sample.operationMs),
-            0.5,
-          ),
-        )}`,
-        `operationP95Ms=${formatMs(
-          percentile(
-            samples.map((sample) => sample.operationMs),
-            0.95,
-          ),
-        )}`,
-        `operationP99Ms=${formatMs(
-          percentile(
-            samples.map((sample) => sample.operationMs),
-            0.99,
-          ),
-        )}`,
-        `operationMaxMs=${formatMs(max(samples.map((sample) => sample.operationMs)))}`,
-        `startGapP95Ms=${formatMs(
-          percentile(
-            samples.map((sample) => sample.startGapMs),
-            0.95,
-          ),
-        )}`,
-        `startGapP99Ms=${formatMs(
-          percentile(
-            samples.map((sample) => sample.startGapMs),
-            0.99,
-          ),
-        )}`,
-        `startGapMaxMs=${formatMs(max(samples.map((sample) => sample.startGapMs)))}`,
-        `metricsP99Ms=${formatMs(
-          percentile(
-            samples.map((sample) => sample.metricsMs),
-            0.99,
-          ),
-        )}`,
-        `metricsMaxMs=${formatMs(max(samples.map((sample) => sample.metricsMs)))}`,
+        `operationP50Ms=${formatMs(operationP50Ms)}`,
+        `operationP95Ms=${formatMs(operationP95Ms)}`,
+        `operationP99Ms=${formatMs(operationP99Ms)}`,
+        `operationMaxMs=${formatMs(operationMaxMs)}`,
+        `startGapP95Ms=${formatMs(startGapP95Ms)}`,
+        `startGapP99Ms=${formatMs(startGapP99Ms)}`,
+        `startGapMaxMs=${formatMs(startGapMaxMs)}`,
+        `metricsP99Ms=${formatMs(metricsP99Ms)}`,
+        `metricsMaxMs=${formatMs(metricsMaxMs)}`,
         `staleStatusCount=${eventStats.staleStatusCount}`,
         `snapshotCount=${eventStats.snapshotCount}`,
         `deltaCount=${eventStats.deltaCount}`,
@@ -223,6 +266,8 @@ void Effect.runPromise(
         `rows=${finalMetrics.rows}`,
         `version=${finalMetrics.version.toString()}`,
         `maxSubscriptionLagVersions=${finalMetrics.maxSubscriptionLagVersions}`,
+        `artifact=${artifact.artifactPath}`,
+        `baselineCompared=${artifact.compared}`,
       ].join(" "),
     );
   }).pipe(Effect.scoped),
