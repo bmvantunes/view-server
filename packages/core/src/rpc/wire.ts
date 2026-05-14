@@ -1,4 +1,4 @@
-import { BigDecimal } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
 import { stableStringify, type RuntimeRow, type SubscriptionEvent } from "../protocol/index.ts";
 import type { RpcWireValue } from "./rpcs.ts";
 

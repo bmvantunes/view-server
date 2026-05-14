@@ -1,4 +1,7 @@
-import { Effect, Fiber, Queue, Stream } from "effect";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
 import type * as Scope from "effect/Scope";
 import type * as RpcClient from "effect/unstable/rpc/RpcClient";
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError";
@@ -211,7 +214,7 @@ export function createViewServerClient<TConfig extends ViewServerConfig>(
               ),
             );
           const events = yield* stream.pipe(Stream.toQueue({ capacity: 16 }));
-          yield* Effect.whileLoop({
+          return yield* Effect.whileLoop({
             while: () => !closed,
             body: () =>
               Queue.take(events).pipe(

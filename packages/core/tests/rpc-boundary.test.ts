@@ -1,5 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
-import { BigDecimal, Effect, Schema } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { defineConfig } from "../src/config/index.ts";
 import type { RawQuery } from "../src/protocol/index.ts";

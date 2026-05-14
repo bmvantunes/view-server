@@ -1,5 +1,6 @@
 import { Session } from "chdb";
-import { BigDecimal, Effect } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
 import type { TopicConfig } from "../config/index.ts";
 import { snapshotBackendFailed, type ViewServerError } from "../errors.ts";
 import type {

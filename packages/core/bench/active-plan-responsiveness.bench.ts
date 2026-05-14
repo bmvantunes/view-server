@@ -1,4 +1,8 @@
-import { Effect, Option, Queue, Schema, Stream } from "effect";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { performance } from "node:perf_hooks";
 import type { RuntimeRawQuery, RuntimeRow, SubscriptionEvent } from "../src/protocol/index.ts";
 import { makeTopicWorkerCore, type TopicWorkerCore } from "../src/worker/topic-worker-core.ts";

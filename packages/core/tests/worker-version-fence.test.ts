@@ -1,5 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Queue, Schema, Stream } from "effect";
+import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { snapshotBackendFailed } from "../src/errors.ts";
 import {
   createMemorySnapshotBackend,

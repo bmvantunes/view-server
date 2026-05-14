@@ -1,4 +1,6 @@
-import { Deferred, Effect, Schema } from "effect";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { AsyncResult } from "effect/unstable/reactivity";
 import React from "react";
 import { flushSync } from "react-dom";

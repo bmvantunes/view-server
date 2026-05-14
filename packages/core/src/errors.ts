@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 export class MissingTopic extends Schema.TaggedErrorClass<MissingTopic>()("MissingTopic", {
   topic: Schema.String,

@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 import type { ViewServerError } from "../errors.ts";
 import type { RuntimeQuery, RuntimeRow } from "../protocol/index.ts";
 import type { MutationLogEntry, WorkerVersion } from "../worker/mutation-log.ts";

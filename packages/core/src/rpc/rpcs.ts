@@ -1,4 +1,6 @@
-import { BigDecimal, Schema, SchemaGetter } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Schema from "effect/Schema";
+import * as SchemaGetter from "effect/SchemaGetter";
 import { Rpc, RpcGroup } from "effect/unstable/rpc";
 import { ViewServerError } from "../errors.ts";
 

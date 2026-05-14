@@ -1,4 +1,4 @@
-import { BigDecimal } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
 import type {
   ReadableTopicName,
   ReadableTopicRowFromConfig,

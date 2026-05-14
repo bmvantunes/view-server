@@ -1,5 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
-import { BigDecimal, Deferred, Effect, Queue, Schema, Stream } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { defineConfig } from "../src/config/index.ts";
 import type { ViewServerError } from "../src/errors.ts";
 import type { RuntimeQuery, RuntimeRow } from "../src/protocol/index.ts";

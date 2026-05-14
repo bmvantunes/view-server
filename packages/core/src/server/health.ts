@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 import { HttpRouter, HttpServerResponse } from "effect/unstable/http";
 import type { ViewServerError } from "../errors.ts";
 import { ViewServerRuntime, type HealthResponse, type ViewServerRuntimeShape } from "./runtime.ts";

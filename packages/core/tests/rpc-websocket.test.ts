@@ -1,6 +1,14 @@
 import { NodeHttpServer, NodeSocket } from "@effect/platform-node";
 import { describe, expect, it } from "@effect/vitest";
-import { BigDecimal, Deferred, Effect, Exit, Layer, Option, Queue, Schema, Stream } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import type * as Cause from "effect/Cause";
 import { HttpServer } from "effect/unstable/http";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
@@ -317,7 +325,7 @@ describe("Effect RPC websocket", () => {
       );
       const testServerLayer = serverLayer.pipe(Layer.provideMerge(NodeHttpServer.layerTest));
 
-      yield* Effect.gen(function* () {
+      return yield* Effect.gen(function* () {
         const server = yield* HttpServer.HttpServer;
         const address = server.address;
         if (address._tag !== "TcpAddress") {
@@ -441,7 +449,7 @@ describe("Effect RPC websocket", () => {
         );
         const testServerLayer = serverLayer.pipe(Layer.provideMerge(NodeHttpServer.layerTest));
 
-        yield* Effect.gen(function* () {
+        return yield* Effect.gen(function* () {
           const server = yield* HttpServer.HttpServer;
           const address = server.address;
           if (address._tag !== "TcpAddress") {
@@ -482,7 +490,7 @@ describe("Effect RPC websocket", () => {
         );
         const testServerLayer = serverLayer.pipe(Layer.provideMerge(NodeHttpServer.layerTest));
 
-        yield* Effect.gen(function* () {
+        return yield* Effect.gen(function* () {
           const server = yield* HttpServer.HttpServer;
           const address = server.address;
           if (address._tag !== "TcpAddress") {
@@ -519,7 +527,7 @@ describe("Effect RPC websocket", () => {
         );
         const testServerLayer = serverLayer.pipe(Layer.provideMerge(NodeHttpServer.layerTest));
 
-        yield* Effect.gen(function* () {
+        return yield* Effect.gen(function* () {
           const server = yield* HttpServer.HttpServer;
           const address = server.address;
           if (address._tag !== "TcpAddress") {
@@ -777,7 +785,7 @@ describe("Effect RPC websocket", () => {
         );
         const testServerLayer = serverLayer.pipe(Layer.provideMerge(NodeHttpServer.layerTest));
 
-        yield* Effect.gen(function* () {
+        return yield* Effect.gen(function* () {
           const server = yield* HttpServer.HttpServer;
           const address = server.address;
           if (address._tag !== "TcpAddress") {

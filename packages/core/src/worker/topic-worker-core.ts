@@ -1,4 +1,9 @@
-import { Effect, Option, Queue, Schema, Semaphore, Stream } from "effect";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
+import * as Stream from "effect/Stream";
 import type * as Cause from "effect/Cause";
 import type * as Scope from "effect/Scope";
 import type { TopicConfig } from "../config/index.ts";

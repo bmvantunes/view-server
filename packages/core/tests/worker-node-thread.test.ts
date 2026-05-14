@@ -1,5 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Queue, Stream } from "effect";
+import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
 import type { RawQuery } from "../src/protocol/index.ts";
 import { makeNodeThreadTopicWorkerHostFactory } from "../src/worker/topic-worker-node-host.ts";
 import config from "./fixtures/node-worker-config.ts";

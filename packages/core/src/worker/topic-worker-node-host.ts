@@ -1,5 +1,7 @@
 import * as NodeWorker from "@effect/platform-node/NodeWorker";
-import { Effect, Layer, Stream } from "effect";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError";
 import { isAbsolute, resolve } from "node:path";

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Deferred, Effect, Exit, Fiber, Option, Queue, Schema, Stream } from "effect";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 import * as RpcTest from "effect/unstable/rpc/RpcTest";
 import { createViewServerClient, type ViewServerRpcTransport } from "../src/client/index.ts";
@@ -9,7 +16,7 @@ import {
   VIEW_SERVER_HEALTH_TOPIC,
   type ViewServerHealthRow,
 } from "../src/config/index.ts";
-import { transportError } from "../src/errors.ts";
+import { transportError, type ViewServerError } from "../src/errors.ts";
 import type {
   GroupedQuery,
   RawQuery,
@@ -2084,7 +2091,7 @@ function waitForHealthRow<TRow extends Readonly<Record<string, unknown>>, E>(
 function waitForWorkerMetrics(
   worker: TopicWorkerCore,
   predicate: (metrics: TopicWorkerMetrics) => boolean,
-): Effect.Effect<TopicWorkerMetrics, unknown> {
+): Effect.Effect<TopicWorkerMetrics, ViewServerError> {
   return Effect.gen(function* () {
     for (let attempt = 0; attempt < 200; attempt++) {
       const metrics = yield* worker.metrics;
@@ -2094,8 +2101,10 @@ function waitForWorkerMetrics(
       yield* yieldToHost;
     }
     const metrics = yield* worker.metrics;
-    throw new Error(
-      `Timed out waiting for worker metrics: version=${metrics.version.toString()} activePlanBuildingCount=${metrics.activePlanBuildingCount} activePlanPendingCount=${metrics.activePlanPendingCount}`,
+    return yield* Effect.die(
+      new Error(
+        `Timed out waiting for worker metrics: version=${metrics.version.toString()} activePlanBuildingCount=${metrics.activePlanBuildingCount} activePlanPendingCount=${metrics.activePlanPendingCount}`,
+      ),
     );
   });
 }

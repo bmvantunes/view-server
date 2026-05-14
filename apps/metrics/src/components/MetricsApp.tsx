@@ -1,4 +1,6 @@
-import { Effect, Exit, Scope } from "effect";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Scope from "effect/Scope";
 import { useEffect, useMemo, useState } from "react";
 import {
   ViewServerMetricsDashboard,

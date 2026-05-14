@@ -1,5 +1,10 @@
 import { NodeHttpServer } from "@effect/platform-node";
-import { Context, Effect, Exit, Layer, Schema, Scope } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import { HttpServer } from "effect/unstable/http";
 import { defineConfig, layerViewServerRuntime, type RawQuery } from "@view-server/core";
 import {

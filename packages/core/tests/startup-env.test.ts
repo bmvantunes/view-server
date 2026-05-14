@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 import { decodeViewServerStartupEnv } from "../src/server/index.ts";
 
 describe("startup env validation", () => {

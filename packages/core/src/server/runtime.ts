@@ -1,4 +1,7 @@
-import { Context, Effect, Layer, Stream } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import {
   type AuthorizationContext,
   type EffectSourceContext,
@@ -275,7 +278,7 @@ export function makeViewServerRuntime(
             yield* Effect.annotateCurrentSpan({
               "view_server.topic": topic,
             });
-            yield* publishWithTransportUntraced(topic, row, transport);
+            return yield* publishWithTransportUntraced(topic, row, transport);
           })();
 
     const deltaPublishWithTransportUntraced = Effect.fnUntraced(function* (
@@ -305,7 +308,7 @@ export function makeViewServerRuntime(
             yield* Effect.annotateCurrentSpan({
               "view_server.topic": topic,
             });
-            yield* deltaPublishWithTransportUntraced(topic, patch, transport);
+            return yield* deltaPublishWithTransportUntraced(topic, patch, transport);
           })();
 
     const deleteByIdWithTransportUntraced = Effect.fnUntraced(function* (
@@ -335,7 +338,7 @@ export function makeViewServerRuntime(
             yield* Effect.annotateCurrentSpan({
               "view_server.topic": topic,
             });
-            yield* deleteByIdWithTransportUntraced(topic, id, transport);
+            return yield* deleteByIdWithTransportUntraced(topic, id, transport);
           })();
 
     const queryRuntime = Effect.fn("view-server.runtime.query")(function* (

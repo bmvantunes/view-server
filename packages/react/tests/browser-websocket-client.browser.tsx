@@ -1,4 +1,6 @@
-import { Deferred, Effect, Schema } from "effect";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { describe, expect, inject, test } from "vite-plus/test";
 import {
   defineConfig,

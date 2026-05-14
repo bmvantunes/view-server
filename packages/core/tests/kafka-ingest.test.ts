@@ -1,6 +1,11 @@
 import { NodeHttpServer, NodeSocket } from "@effect/platform-node";
 import { describe, expect, it } from "@effect/vitest";
-import { BigDecimal, Effect, Layer, Queue, Schema, Stream } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { HttpServer } from "effect/unstable/http";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";

@@ -1,5 +1,8 @@
 import { BrowserSocket } from "@effect/platform-browser";
-import { Effect, Exit, Layer, Scope } from "effect";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as Scope from "effect/Scope";
 import { AsyncResult } from "effect/unstable/reactivity";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";

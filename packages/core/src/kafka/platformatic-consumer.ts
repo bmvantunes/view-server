@@ -1,5 +1,5 @@
 import { Admin, Consumer, type Message, type Offsets } from "@platformatic/kafka";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 import type { KafkaSourceConfig, RowObject } from "../config/index.ts";
 import { kafkaIngestFailed, isViewServerError, type ViewServerError } from "../errors.ts";
 import type { KafkaBatchMetrics, KafkaTopicConsumer, KafkaTopicVerifier } from "./types.ts";

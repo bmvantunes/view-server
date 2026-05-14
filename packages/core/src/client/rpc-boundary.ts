@@ -1,4 +1,6 @@
-import { BigDecimal, Effect, Schema } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import type {
   ReadableTopicName,
   TopicName,

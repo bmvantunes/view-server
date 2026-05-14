@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 import { parentPort } from "node:worker_threads";
 import type { ViewServerError } from "../errors.ts";
 import { createChdbSnapshotBackend } from "./chdb-backend.ts";

@@ -1,4 +1,5 @@
-import { Effect, Schema } from "effect";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import type { ViewServerError } from "../errors.ts";
 
 export const VIEW_SERVER_HEALTH_TOPIC = "__view_server_health";

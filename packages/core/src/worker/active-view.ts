@@ -1,4 +1,5 @@
-import { BigDecimal, Effect } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
 import type { RuntimeRawQuery, RuntimeRow, RuntimeRowKey } from "../protocol/index.ts";
 import {
   estimateActiveSortedIndexBytes,

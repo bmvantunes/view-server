@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { defineConfig } from "../../src/config/index.ts";
 
 export const Order = Schema.Struct({

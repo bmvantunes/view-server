@@ -1,4 +1,6 @@
-import { BigDecimal, Effect, Option } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import {
   rowKeyForQuery,
   type DeltaOperation,

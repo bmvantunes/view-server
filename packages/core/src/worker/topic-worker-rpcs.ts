@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { Rpc, RpcGroup } from "effect/unstable/rpc";
 import { ViewServerError } from "../errors.ts";
 import { RpcQuery, RpcQueryResponse, RpcRow, RpcRows, RpcSubscriptionEvent } from "../rpc/index.ts";

@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 import { performance } from "node:perf_hooks";
 import type { RuntimeRawQuery, RuntimeRow } from "../src/protocol/index.ts";
 import type { ActiveSortedIndexKind } from "../src/worker/active-sorted-index.ts";

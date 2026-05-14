@@ -1,6 +1,9 @@
 import * as NodeWorkerRunner from "@effect/platform-node/NodeWorkerRunner";
 import * as Cause from "effect/Cause";
-import { Effect, Layer, Schema, Stream } from "effect";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as RpcServer from "effect/unstable/rpc/RpcServer";
 import { workerData } from "node:worker_threads";
 import {
