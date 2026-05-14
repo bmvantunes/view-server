@@ -21,6 +21,7 @@ import type {
   GroupedQuery,
   RawQuery,
   RuntimeRow,
+  SnapshotEvent,
   SubscriptionEvent,
 } from "../src/protocol/index.ts";
 import { ViewServerHandlersLive, ViewServerRpcs } from "../src/rpc/index.ts";
@@ -439,6 +440,47 @@ describe("Effect RPC in-memory", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("duplicate subscription request ids replace old streams without leaks", () =>
+    Effect.gen(function* () {
+      const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
+        initialRows: [
+          { id: "o-1", symbol: "AAPL", price: 100 },
+          { id: "o-2", symbol: "MSFT", price: 200 },
+        ],
+        maxActivePlans: 0,
+      });
+      const firstEvents = yield* worker
+        .subscribe("duplicate-request-id", query)
+        .pipe(Stream.toQueue({ capacity: 16 }));
+      const firstSnapshot = yield* Queue.take(firstEvents);
+      expect(firstSnapshot.type).toBe("snapshot");
+
+      const secondEvents = yield* worker
+        .subscribe("duplicate-request-id", query)
+        .pipe(Stream.toQueue({ capacity: 16 }));
+      const secondSnapshot = yield* Queue.take(secondEvents);
+      expect(secondSnapshot.type).toBe("snapshot");
+
+      const subscribed = yield* worker.metrics;
+      expect(subscribed.subscribers).toBe(1);
+
+      yield* worker.publish({ id: "o-3", symbol: "NVDA", price: 300 });
+
+      const firstExit = yield* Queue.take(firstEvents).pipe(Effect.exit);
+      expect(Exit.isFailure(firstExit)).toBe(true);
+
+      const secondDelta = yield* Queue.take(secondEvents).pipe(Effect.timeout("1 second"));
+      expect(secondDelta.type).toBe("delta");
+      expect(secondDelta.requestId).toBe("duplicate-request-id");
+
+      yield* worker.unsubscribe("duplicate-request-id");
+      const released = yield* worker.metrics;
+      expect(released.subscribers).toBe(0);
+      expect(released.activePlanCount).toBe(0);
+      expect(released.activeViewCount).toBe(0);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("deletes rows through the generated Effect RPC client", () =>
     Effect.gen(function* () {
       const runtime = yield* makeViewServerRuntime(config, {
@@ -716,6 +758,161 @@ describe("Effect RPC in-memory", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("unsubscribes cleanly while an active plan build is in flight", () =>
+    Effect.gen(function* () {
+      const initialRows = Array.from({ length: 5_000 }, (_, index) => ({
+        id: `o-${index}`,
+        symbol: `SYM-${index % 100}`,
+        price: 5_000 - index,
+      }));
+      const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
+        initialRows,
+        activePlanBuildChunkSize: 1,
+      });
+      const events = yield* worker
+        .subscribe("active-plan-unsubscribe-in-flight", coalesceQuery)
+        .pipe(Stream.toQueue({ capacity: 16 }));
+      expect((yield* Queue.take(events)).type).toBe("snapshot");
+
+      const buildingMetrics = yield* waitForWorkerMetrics(
+        worker,
+        (metrics) => metrics.activePlanBuildingCount === 1,
+      );
+      expect(buildingMetrics.activePlanPendingCount).toBe(1);
+
+      yield* worker.unsubscribe("active-plan-unsubscribe-in-flight");
+      const closed = yield* Queue.take(events).pipe(Effect.exit);
+      expect(Exit.isFailure(closed)).toBe(true);
+
+      const released = yield* waitForWorkerMetrics(
+        worker,
+        (metrics) =>
+          metrics.subscribers === 0 &&
+          metrics.activePlanPendingCount === 0 &&
+          metrics.activePlanBuildingCount === 0 &&
+          metrics.activePlanCount === 0,
+      );
+      expect(released.activeViewCount).toBe(0);
+      expect(released.maxSubscriptionLagVersions).toBe(0);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "falls back to memory when mutation-log catch-up is uncovered during active build",
+    () =>
+      Effect.gen(function* () {
+        const rowCount = 1_000;
+        const initialRows = Array.from({ length: rowCount }, (_, index) => ({
+          id: `o-${index}`,
+          symbol: `SYM-${index % 100}`,
+          price: rowCount - index,
+        }));
+        const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
+          initialRows,
+          activePlanBuildChunkSize: 1,
+          mutationLogSize: 1,
+        });
+        const events = yield* worker
+          .subscribe("active-plan-log-gap", coalesceQuery)
+          .pipe(Stream.toQueue({ capacity: 16 }));
+        expect((yield* Queue.take(events)).type).toBe("snapshot");
+
+        const buildingMetrics = yield* waitForWorkerMetrics(
+          worker,
+          (metrics) => metrics.activePlanBuildingCount === 1,
+        );
+        expect(buildingMetrics.activePlanPendingCount).toBe(1);
+
+        yield* worker.publish({ id: "live-1", symbol: "LIVE", price: -3 });
+        yield* worker.publish({ id: "live-2", symbol: "LIVE", price: -2 });
+        yield* worker.publish({ id: "live-3", symbol: "LIVE", price: -1 });
+
+        const stale = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+        expect(stale.type).toBe("status");
+        if (stale.type !== "status") {
+          throw new Error("Expected stale status");
+        }
+        expect(stale.meta.version).toBe("3");
+
+        const refreshed = yield* Queue.take(events).pipe(Effect.timeout("5 seconds"));
+        expect(refreshed.type).toBe("snapshot");
+        if (refreshed.type !== "snapshot") {
+          throw new Error("Expected fallback snapshot");
+        }
+        expect(refreshed.meta.version).toBe("3");
+        expect(refreshed.rows.map((row) => row.id).slice(0, 3)).toEqual([
+          "live-1",
+          "live-2",
+          "live-3",
+        ]);
+
+        const fallbackMetrics = yield* waitForWorkerMetrics(
+          worker,
+          (metrics) =>
+            metrics.activePlanCount === 0 &&
+            metrics.activePlanPendingCount === 0 &&
+            metrics.activePlanFallbackCount === 1 &&
+            metrics.maxSubscriptionLagVersions === 0,
+        );
+        expect(fallbackMetrics.status).toBe("degraded");
+        yield* worker.unsubscribe("active-plan-log-gap");
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("coalesces stale status and catch-up snapshots under a queue depth of one", () =>
+    Effect.gen(function* () {
+      const rowCount = 1_000;
+      const initialRows = Array.from({ length: rowCount }, (_, index) => ({
+        id: `o-${index}`,
+        symbol: `SYM-${index % 100}`,
+        price: rowCount - index,
+      }));
+      const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
+        initialRows,
+        activePlanBuildChunkSize: 1,
+        maxQueueDepth: 1,
+      });
+      const events = yield* worker
+        .subscribe("active-plan-stale-backpressure", coalesceQuery)
+        .pipe(Stream.toQueue({ capacity: 16 }));
+      expect((yield* Queue.take(events)).type).toBe("snapshot");
+
+      const buildingMetrics = yield* waitForWorkerMetrics(
+        worker,
+        (metrics) => metrics.activePlanBuildingCount === 1,
+      );
+      expect(buildingMetrics.activePlanPendingCount).toBe(1);
+
+      yield* worker.publish({ id: "live-1", symbol: "LIVE", price: -4 });
+      yield* worker.publish({ id: "live-2", symbol: "LIVE", price: -3 });
+      yield* worker.publish({ id: "live-3", symbol: "LIVE", price: -2 });
+      yield* worker.publish({ id: "live-4", symbol: "LIVE", price: -1 });
+
+      const stale = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+      expect(stale.type).toBe("status");
+      if (stale.type !== "status") {
+        throw new Error("Expected stale status");
+      }
+      expect(stale.meta.version).toBe("4");
+      expect(stale.meta.totalRows).toBe(rowCount + 4);
+
+      const refreshed = yield* Queue.take(events).pipe(Effect.timeout("5 seconds"));
+      expect(refreshed.type).toBe("snapshot");
+      if (refreshed.type !== "snapshot") {
+        throw new Error("Expected catch-up snapshot");
+      }
+      expect(refreshed.meta.version).toBe("4");
+      expect(refreshed.meta.totalRows).toBe(rowCount + 4);
+
+      const healthy = yield* waitForWorkerMetrics(
+        worker,
+        (metrics) => metrics.subscribers === 1 && metrics.maxSubscriptionLagVersions === 0,
+      );
+      expect(healthy.queueDepth).toBe(0);
+      yield* worker.unsubscribe("active-plan-stale-backpressure");
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("marks grouped subscriptions stale and refreshes grouped snapshots on debounce", () =>
     Effect.gen(function* () {
       const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
@@ -873,6 +1070,88 @@ describe("Effect RPC in-memory", () => {
         { symbol: "MSFT", orders: 1, totalPrice: 50 },
       ]);
       yield* worker.unsubscribe("grouped-behind-backend-refresh");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("unsubscribes cleanly while a grouped refresh is in flight", () =>
+    Effect.gen(function* () {
+      const refreshStarted = yield* Deferred.make<void>();
+      const releaseRefresh = yield* Deferred.make<void>();
+      const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
+        initialRows: [
+          { id: "o-1", symbol: "AAPL", price: 100 },
+          { id: "o-2", symbol: "MSFT", price: 50 },
+        ],
+        snapshotBackend: blockingGroupedRefreshBackend(refreshStarted, releaseRefresh),
+        groupedRefreshDebounceMs: 0,
+      });
+      const events = yield* worker
+        .subscribe("grouped-unsubscribe-in-flight", groupedOrdersQuery)
+        .pipe(Stream.toQueue({ capacity: 16 }));
+      expect((yield* Queue.take(events)).type).toBe("snapshot");
+
+      yield* worker.publish({ id: "o-3", symbol: "NVDA", price: 500 });
+      const stale = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+      expect(stale.type).toBe("status");
+      yield* Deferred.await(refreshStarted).pipe(Effect.timeout("1 second"));
+
+      yield* worker.unsubscribe("grouped-unsubscribe-in-flight");
+      yield* Deferred.succeed(releaseRefresh, undefined);
+
+      const closed = yield* Queue.take(events).pipe(Effect.exit);
+      expect(Exit.isFailure(closed)).toBe(true);
+      const released = yield* waitForWorkerMetrics(
+        worker,
+        (metrics) =>
+          metrics.subscribers === 0 &&
+          metrics.queueDepth === 0 &&
+          metrics.maxSubscriptionLagVersions === 0,
+      );
+      expect(released.activePlanCount).toBe(0);
+      expect(released.activeViewCount).toBe(0);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("discards stale grouped refresh results and reschedules at the latest version", () =>
+    Effect.gen(function* () {
+      const firstRefreshStarted = yield* Deferred.make<void>();
+      const releaseFirstRefresh = yield* Deferred.make<void>();
+      const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
+        initialRows: [
+          { id: "o-1", symbol: "AAPL", price: 100 },
+          { id: "o-2", symbol: "MSFT", price: 50 },
+        ],
+        snapshotBackend: reschedulingGroupedRefreshBackend(
+          firstRefreshStarted,
+          releaseFirstRefresh,
+        ),
+        groupedRefreshDebounceMs: 0,
+      });
+      const events = yield* worker
+        .subscribe("grouped-stale-refresh-discard", groupedOrdersQuery)
+        .pipe(Stream.toQueue({ capacity: 16 }));
+      expect((yield* Queue.take(events)).type).toBe("snapshot");
+
+      yield* worker.publish({ id: "o-3", symbol: "NVDA", price: 500 });
+      const firstStale = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+      expect(firstStale.type).toBe("status");
+      yield* Deferred.await(firstRefreshStarted).pipe(Effect.timeout("1 second"));
+
+      yield* worker.publish({ id: "o-4", symbol: "AMZN", price: 600 });
+      const secondStale = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+      expect(secondStale.type).toBe("status");
+      yield* Deferred.succeed(releaseFirstRefresh, undefined);
+
+      const refreshed = yield* takeSnapshot(events);
+      expect(refreshed.meta.version).toBe("2");
+      expect(refreshed.rows).toEqual([{ symbol: "BACKEND-2", orders: 2, totalPrice: 2 }]);
+
+      const caughtUp = yield* waitForWorkerMetrics(
+        worker,
+        (metrics) => metrics.maxSubscriptionLagVersions === 0,
+      );
+      expect(caughtUp.subscribers).toBe(1);
+      yield* worker.unsubscribe("grouped-stale-refresh-discard");
     }).pipe(Effect.scoped),
   );
 
@@ -2109,6 +2388,20 @@ function waitForWorkerMetrics(
   });
 }
 
+function takeSnapshot<E>(
+  events: Queue.Dequeue<SubscriptionEvent<readonly RuntimeRow[]>, E>,
+): Effect.Effect<SnapshotEvent<readonly RuntimeRow[]>> {
+  return Effect.gen(function* () {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const event = yield* Queue.take(events).pipe(Effect.timeout("5 seconds"), Effect.orDie);
+      if (event.type === "snapshot") {
+        return event;
+      }
+    }
+    return yield* Effect.die(new Error("Timed out waiting for snapshot event"));
+  });
+}
+
 const yieldToHost = Effect.promise<void>(() => new Promise((resolve) => setTimeout(resolve, 0)));
 
 function groupedRefreshBackend(mode: "exact" | "behind"): SnapshotBackend {
@@ -2147,6 +2440,78 @@ function groupedRefreshBackend(mode: "exact" | "behind"): SnapshotBackend {
         return {
           backendVersion: resultVersion,
           rows: [{ symbol: "BACKEND", orders: 999, totalPrice: 999 }],
+          totalRows: 1,
+        };
+      }),
+    close: () => Effect.void,
+  };
+}
+
+function blockingGroupedRefreshBackend(
+  refreshStarted: Deferred.Deferred<void>,
+  releaseRefresh: Deferred.Deferred<void>,
+): SnapshotBackend {
+  return {
+    supportsGroupedRefreshSnapshots: true,
+    init: () => Effect.void,
+    applyBatch: () => Effect.void,
+    snapshot: (args): Effect.Effect<SnapshotBackendResult> =>
+      Effect.succeed({
+        backendVersion: args.targetVersion,
+        rows: [
+          { symbol: "AAPL", orders: 1, totalPrice: 100 },
+          { symbol: "MSFT", orders: 1, totalPrice: 50 },
+        ],
+        totalRows: 2,
+      }),
+    groupedRefreshSnapshot: (args): Effect.Effect<SnapshotBackendResult> =>
+      Deferred.succeed(refreshStarted, undefined).pipe(
+        Effect.flatMap(() => Deferred.await(releaseRefresh)),
+        Effect.as({
+          backendVersion: args.targetVersion,
+          rows: [{ symbol: "BLOCKED", orders: 1, totalPrice: 1 }],
+          totalRows: 1,
+        }),
+      ),
+    close: () => Effect.void,
+  };
+}
+
+function reschedulingGroupedRefreshBackend(
+  firstRefreshStarted: Deferred.Deferred<void>,
+  releaseFirstRefresh: Deferred.Deferred<void>,
+): SnapshotBackend {
+  let refreshCalls = 0;
+  return {
+    supportsGroupedRefreshSnapshots: true,
+    init: () => Effect.void,
+    applyBatch: () => Effect.void,
+    snapshot: (args): Effect.Effect<SnapshotBackendResult> =>
+      Effect.succeed({
+        backendVersion: args.targetVersion,
+        rows: [
+          { symbol: "AAPL", orders: 1, totalPrice: 100 },
+          { symbol: "MSFT", orders: 1, totalPrice: 50 },
+        ],
+        totalRows: 2,
+      }),
+    groupedRefreshSnapshot: (args): Effect.Effect<SnapshotBackendResult> =>
+      Effect.gen(function* () {
+        refreshCalls += 1;
+        if (refreshCalls === 1) {
+          yield* Deferred.succeed(firstRefreshStarted, undefined);
+          yield* Deferred.await(releaseFirstRefresh);
+        }
+        const version = Number(args.targetVersion);
+        return {
+          backendVersion: args.targetVersion,
+          rows: [
+            {
+              symbol: `BACKEND-${args.targetVersion.toString()}`,
+              orders: version,
+              totalPrice: version,
+            },
+          ],
           totalRows: 1,
         };
       }),

@@ -15,7 +15,7 @@ import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import { createViewServerClient } from "../src/client/index.ts";
 import { defineConfig } from "../src/config/index.ts";
-import { backpressureExceeded, type ViewServerError } from "../src/errors.ts";
+import { backpressureExceeded, transportError, type ViewServerError } from "../src/errors.ts";
 import type { RawQuery, RuntimeRow, SubscriptionEvent } from "../src/protocol/index.ts";
 import { ViewServerRpcs } from "../src/rpc/index.ts";
 import { layerViewServerWebsocketServer, makeNodeWebsocketClient } from "../src/rpc/websocket.ts";
@@ -295,6 +295,114 @@ function makeRetryWorker(topic: string, idField: string): Effect.Effect<TopicWor
           rows = rows.filter((row) => row[idField] !== id);
           version += 1n;
         }),
+      getRowsForTest: Effect.sync(() => rows.map((row) => ({ ...row }))),
+      shutdown: Effect.sync(() => {
+        active = undefined;
+      }),
+    };
+    return worker;
+  });
+}
+
+function makeStaleReconnectWorker(topic: string, idField: string): Effect.Effect<TopicWorkerHost> {
+  return Effect.sync(() => {
+    let rows: RuntimeRow[] = [{ id: "o-1", symbol: "AAPL", price: 100 }];
+    let version = 0n;
+    let attempts = 0;
+    let active:
+      | {
+          readonly requestId: string;
+          readonly queue: Queue.Queue<
+            SubscriptionEvent<readonly RuntimeRow[]>,
+            ViewServerError | Cause.Done
+          >;
+        }
+      | undefined;
+
+    const snapshot = (requestId: string): SubscriptionEvent<readonly RuntimeRow[]> => ({
+      type: "snapshot",
+      requestId,
+      rows: rows.map((row) => ({ id: row.id, price: row.price })),
+      meta: {
+        version: version.toString(),
+        totalRows: rows.length,
+        serverTime: Date.now(),
+      },
+    });
+
+    const worker: TopicWorkerHost = {
+      topic,
+      idField,
+      version: Effect.sync(() => version),
+      metrics: Effect.sync(() => ({
+        rows: rows.length,
+        subscribers: active === undefined ? 0 : 1,
+        version,
+        queueDepth: 0,
+        maxSubscriptionLagVersions: 0,
+        totalSubscriptionLagVersions: 0,
+        activePlanCount: 0,
+        activeViewCount: 0,
+        activePlanRows: 0,
+        activePlanIndexEstimatedBytes: 0,
+        activePlanBuildQueueDepth: 0,
+        activePlanBuildingCount: 0,
+        activePlanPendingCount: 0,
+        activePlanBuildMs: 0,
+        activePlanBuildMsTotal: 0,
+        activePlanBuildMsMax: 0,
+        activePlanFallbackCount: 0,
+        status: "ready" as const,
+      })),
+      query: () =>
+        Effect.succeed({
+          rows: rows.map((row) => ({ id: row.id, price: row.price })),
+          totalRows: rows.length,
+          version: version.toString(),
+        }),
+      subscribe: (requestId) =>
+        Stream.callback<SubscriptionEvent<readonly RuntimeRow[]>, ViewServerError>((queue) =>
+          Effect.gen(function* () {
+            attempts += 1;
+            active = { requestId, queue };
+            yield* Queue.offer(queue, snapshot(requestId));
+            if (attempts === 1) {
+              version = 1n;
+              rows = [...rows, { id: "o-2", symbol: "MSFT", price: 200 }];
+              yield* Queue.offer(queue, {
+                type: "status",
+                requestId,
+                status: "stale",
+                meta: {
+                  version: version.toString(),
+                  totalRows: rows.length,
+                  serverTime: Date.now(),
+                },
+              });
+              active = undefined;
+              yield* Queue.fail(queue, transportError("socket closed during stale refresh"));
+              return;
+            }
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                if (active?.requestId === requestId) {
+                  active = undefined;
+                }
+              }),
+            );
+          }),
+        ),
+      unsubscribe: (requestId) =>
+        Effect.gen(function* () {
+          if (active?.requestId === requestId) {
+            const queue = active.queue;
+            active = undefined;
+            yield* Queue.end(queue);
+          }
+        }),
+      publish: () => Effect.void,
+      deltaPublish: () => Effect.void,
+      deleteById: () => Effect.void,
       getRowsForTest: Effect.sync(() => rows.map((row) => ({ ...row }))),
       shutdown: Effect.sync(() => {
         active = undefined;
@@ -867,6 +975,88 @@ describe("Effect RPC websocket", () => {
                 ),
               ).toBe(true);
             }
+
+            yield* subscription.close;
+          }).pipe(Effect.provide(clientLayer));
+        }).pipe(Effect.provide(testServerLayer));
+      }).pipe(Effect.scoped),
+    );
+  });
+
+  it("generated clients resubscribe over websocket after disconnecting while stale", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
+          Layer.provide(
+            layerViewServerRuntime(config, {
+              topicWorkerFactory: (topic, topicConfig, options) =>
+                topic === "orders"
+                  ? makeStaleReconnectWorker(topic, topicConfig.id)
+                  : makeInProcessTopicWorkerHost(topic, topicConfig, options),
+            }),
+          ),
+        );
+        const testServerLayer = serverLayer.pipe(Layer.provideMerge(NodeHttpServer.layerTest));
+
+        return yield* Effect.gen(function* () {
+          const server = yield* HttpServer.HttpServer;
+          const address = server.address;
+          if (address._tag !== "TcpAddress") {
+            return yield* Effect.die(new Error("Expected test server to listen on TCP"));
+          }
+          const websocketUrl = `ws://127.0.0.1:${address.port}/rpc`;
+          const clientLayer = RpcClient.layerProtocolSocket().pipe(
+            Layer.provide(NodeSocket.layerWebSocket(websocketUrl)),
+            Layer.provide(RpcSerialization.layerNdjson),
+          );
+
+          yield* Effect.gen(function* () {
+            const rpcClient = yield* RpcClient.make(ViewServerRpcs);
+            const client = createViewServerClient<typeof config>(rpcClient, config);
+            const firstSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+            const staleStatus = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+            const resubscribedSnapshot =
+              yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+            let snapshots = 0;
+
+            const subscription = yield* client.subscribe("orders", query, (event) => {
+              if (event.type === "snapshot") {
+                snapshots += 1;
+                return snapshots === 1
+                  ? Deferred.succeed(firstSnapshot, event).pipe(Effect.asVoid)
+                  : Deferred.succeed(resubscribedSnapshot, event).pipe(Effect.asVoid);
+              }
+              if (event.type === "status") {
+                return Deferred.succeed(staleStatus, event).pipe(Effect.asVoid);
+              }
+              return Effect.void;
+            });
+
+            const snapshot = yield* Deferred.await(firstSnapshot).pipe(Effect.timeout("1 second"));
+            expect(snapshot.type).toBe("snapshot");
+            const firstRequestId = snapshot.requestId;
+
+            const stale = yield* Deferred.await(staleStatus).pipe(Effect.timeout("1 second"));
+            expect(stale.type).toBe("status");
+            expect(stale.requestId).toBe(firstRequestId);
+            if (stale.type === "status") {
+              expect(stale.status).toBe("stale");
+              expect(stale.meta.totalRows).toBe(2);
+            }
+
+            const nextSnapshot = yield* Deferred.await(resubscribedSnapshot).pipe(
+              Effect.timeout("2 seconds"),
+            );
+            expect(nextSnapshot.type).toBe("snapshot");
+            expect(nextSnapshot.requestId).not.toBe(firstRequestId);
+            expect(nextSnapshot.requestId).toBe(subscription.requestId);
+            expect(nextSnapshot.meta.totalRows).toBe(2);
+
+            const health = yield* client.health().pipe(Effect.timeout("1 second"));
+            expect(health.topics.orders).toMatchObject({
+              subscribers: 1,
+              queueDepth: 0,
+            });
 
             yield* subscription.close;
           }).pipe(Effect.provide(clientLayer));

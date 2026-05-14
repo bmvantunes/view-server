@@ -255,6 +255,36 @@ describe("topic worker version fence", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("uses the fenced backend again after a transient snapshot failure recovers", () =>
+    Effect.gen(function* () {
+      const worker = yield* makeTopicWorkerCore(
+        "orders",
+        {
+          id: "id",
+          schema: Order,
+        },
+        {
+          initialRows: [{ id: "o-1", symbol: "AAPL", price: 100 }],
+          snapshotBackend: transientSnapshotFailureBackend(),
+        },
+      );
+
+      const first = yield* worker.query(query);
+      expect(first).toEqual({
+        rows: [{ id: "o-1", price: 100 }],
+        totalRows: 1,
+        version: "0",
+      });
+
+      const second = yield* worker.query(query);
+      expect(second).toEqual({
+        rows: [{ id: "backend-recovered", price: 999 }],
+        totalRows: 1,
+        version: "0",
+      });
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("does not leak stale deleted rows when replaying a backend snapshot", () =>
     Effect.gen(function* () {
       const worker = yield* makeTopicWorkerCore(
@@ -494,6 +524,26 @@ function failingSnapshotBackend(): SnapshotBackend {
     init: () => Effect.void,
     applyBatch: () => Effect.void,
     snapshot: () => Effect.fail(snapshotBackendFailed("orders", new Error("boom"))),
+    close: () => Effect.void,
+  };
+}
+
+function transientSnapshotFailureBackend(): SnapshotBackend {
+  let failed = false;
+  return {
+    init: () => Effect.void,
+    applyBatch: () => Effect.void,
+    snapshot: (): ReturnType<SnapshotBackend["snapshot"]> => {
+      if (!failed) {
+        failed = true;
+        return Effect.fail(snapshotBackendFailed("orders", new Error("transient")));
+      }
+      return Effect.succeed({
+        rows: [{ id: "backend-recovered", price: 999 }],
+        totalRows: 1,
+        backendVersion: 0n,
+      });
+    },
     close: () => Effect.void,
   };
 }

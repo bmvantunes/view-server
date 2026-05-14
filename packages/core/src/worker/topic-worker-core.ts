@@ -35,6 +35,7 @@ import {
   estimateActiveRawPlanIndexBytesEffect,
   makeActiveRawPlanEffect,
   makeActiveRawViewFromPlan,
+  stableStringify,
   type ActiveRawPlan,
   type ActiveRawView,
   type ActiveRawViewChange,
@@ -143,10 +144,20 @@ type ActivePlanBuildSnapshot = {
 };
 
 type GroupedRefreshSnapshot = {
+  readonly key: string;
   readonly requestId: string;
+  readonly requestIds: readonly string[];
   readonly query: RuntimeGroupedQuery;
   readonly rows: readonly RuntimeRow[];
   readonly version: WorkerVersion;
+};
+
+type GroupedRefreshEntry = {
+  readonly key: string;
+  readonly query: RuntimeGroupedQuery;
+  readonly requestIds: Set<string>;
+  readonly pendingRequestIds: Set<string>;
+  state: "queued" | "running";
 };
 
 export type TopicWorkerCoreOptions = {
@@ -191,6 +202,7 @@ export function makeTopicWorkerCore(
     const subscriptions = new Map<string, ActiveSubscription>();
     const activePlans = new Map<string, ActiveRawPlanEntry>();
     const activePlanBuilds = new Map<string, ActivePlanBuildEntry>();
+    const groupedRefreshes = new Map<string, GroupedRefreshEntry>();
     let rows: RuntimeRow[] = [];
     let idIndex = new Map<string | number, number>();
     let version: WorkerVersion = 0n;
@@ -500,21 +512,37 @@ export function makeTopicWorkerCore(
       }
     });
 
-    function scheduleGroupedSubscriptionRefresh(
-      requestId: string,
-    ): Effect.Effect<void, ViewServerError> {
+    function scheduleGroupedSubscriptionRefresh(requestId: string): Effect.Effect<void> {
       return Effect.gen(function* () {
         const subscription = subscriptions.get(requestId);
         if (
           subscription === undefined ||
           subscription.groupedRefreshScheduled === true ||
-          subscription.groupedRefreshInFlight === true
+          subscription.groupedRefreshInFlight === true ||
+          !isGroupedQuery(subscription.query)
         ) {
           return;
         }
+        const key = groupedRefreshKey(subscription.query);
         subscription.groupedRefreshScheduled = true;
-        yield* runGroupedRefresh(requestId).pipe(
-          Effect.catchCause(() => gate.withPermit(resetGroupedRefresh(requestId))),
+        const existing = groupedRefreshes.get(key);
+        if (existing !== undefined) {
+          if (existing.state === "queued") {
+            existing.requestIds.add(requestId);
+          } else {
+            existing.pendingRequestIds.add(requestId);
+          }
+          return;
+        }
+        groupedRefreshes.set(key, {
+          key,
+          query: subscription.query,
+          requestIds: new Set([requestId]),
+          pendingRequestIds: new Set(),
+          state: "queued",
+        });
+        yield* runGroupedRefresh(key).pipe(
+          Effect.catchCause(() => gate.withPermit(resetGroupedRefresh(key))),
           Effect.forkIn(scope),
           Effect.asVoid,
         );
@@ -522,20 +550,19 @@ export function makeTopicWorkerCore(
     }
 
     const runGroupedRefresh = Effect.fn("view-server.worker.grouped.refresh")(function* (
-      requestId: string,
+      key: string,
     ) {
       if (groupedRefreshDebounceMs > 0) {
         yield* Effect.sleep(`${groupedRefreshDebounceMs} millis`);
       }
-      const snapshot = yield* gate.withPermit(Effect.sync(() => beginGroupedRefresh(requestId)));
+      const snapshot = yield* gate.withPermit(Effect.sync(() => beginGroupedRefresh(key)));
       if (snapshot === undefined) {
         return;
       }
       yield* Effect.annotateCurrentSpan({
-        "view_server.request_id": requestId,
-        "view_server.subscription_id": requestId,
         "view_server.topic": topic,
         "view_server.worker_version": snapshot.version.toString(),
+        "view_server.batch_size": snapshot.requestIds.length,
         "view_server.rows": snapshot.rows.length,
       });
       const result = yield* groupedRefreshQuery(snapshot);
@@ -584,19 +611,37 @@ export function makeTopicWorkerCore(
       });
     });
 
-    function beginGroupedRefresh(requestId: string): GroupedRefreshSnapshot | undefined {
-      const subscription = subscriptions.get(requestId);
-      if (subscription === undefined) {
+    function beginGroupedRefresh(key: string): GroupedRefreshSnapshot | undefined {
+      const entry = groupedRefreshes.get(key);
+      if (entry === undefined || entry.state === "running") {
         return undefined;
       }
-      subscription.groupedRefreshScheduled = false;
-      if (!isGroupedQuery(subscription.query) || subscription.dirtyTargetVersion === undefined) {
+      const requestIds = Array.from(entry.requestIds).filter((requestId) => {
+        const subscription = subscriptions.get(requestId);
+        return (
+          subscription !== undefined &&
+          isGroupedQuery(subscription.query) &&
+          subscription.dirtyTargetVersion !== undefined
+        );
+      });
+      entry.requestIds.clear();
+      if (requestIds.length === 0) {
+        groupedRefreshes.delete(key);
         return undefined;
       }
-      subscription.groupedRefreshInFlight = true;
+      entry.state = "running";
+      for (const requestId of requestIds) {
+        const subscription = subscriptions.get(requestId);
+        if (subscription !== undefined) {
+          subscription.groupedRefreshScheduled = false;
+          subscription.groupedRefreshInFlight = true;
+        }
+      }
       return {
-        requestId,
-        query: subscription.query,
+        key,
+        requestId: requestIds[0] ?? key,
+        requestIds,
+        query: entry.query,
         rows: rows.slice(),
         version,
       };
@@ -607,35 +652,63 @@ export function makeTopicWorkerCore(
       result: QueryExecutionResult,
     ): Effect.Effect<void, ViewServerError> {
       return Effect.gen(function* () {
-        const subscription = subscriptions.get(snapshot.requestId);
-        if (subscription === undefined) {
-          return;
+        const entry = groupedRefreshes.get(snapshot.key);
+        groupedRefreshes.delete(snapshot.key);
+        const reschedule = new Set(entry?.pendingRequestIds ?? []);
+        for (const requestId of snapshot.requestIds) {
+          const subscription = subscriptions.get(requestId);
+          if (subscription === undefined) {
+            continue;
+          }
+          subscription.groupedRefreshInFlight = false;
+          if (!isGroupedQuery(subscription.query)) {
+            continue;
+          }
+          if (
+            subscription.dirtyTargetVersion !== undefined &&
+            subscription.dirtyTargetVersion > snapshot.version
+          ) {
+            reschedule.add(subscription.requestId);
+            continue;
+          }
+          yield* refreshSubscriptionSnapshot(subscription, result, snapshot.version);
         }
-        subscription.groupedRefreshInFlight = false;
-        if (!isGroupedQuery(subscription.query)) {
-          return;
-        }
-        if (
-          subscription.dirtyTargetVersion !== undefined &&
-          subscription.dirtyTargetVersion > snapshot.version
-        ) {
-          yield* scheduleGroupedSubscriptionRefresh(subscription.requestId);
-          return;
-        }
-        yield* refreshSubscriptionSnapshot(subscription, result, snapshot.version);
+        yield* Effect.forEach(
+          reschedule,
+          (requestId) => {
+            const subscription = subscriptions.get(requestId);
+            if (subscription === undefined) {
+              return Effect.void;
+            }
+            subscription.groupedRefreshScheduled = false;
+            subscription.groupedRefreshInFlight = false;
+            return subscription.dirtyTargetVersion === undefined
+              ? Effect.void
+              : scheduleGroupedSubscriptionRefresh(requestId);
+          },
+          { discard: true },
+        );
       });
     }
 
-    function resetGroupedRefresh(requestId: string): Effect.Effect<void, ViewServerError> {
+    function resetGroupedRefresh(key: string): Effect.Effect<void> {
       return Effect.gen(function* () {
-        const subscription = subscriptions.get(requestId);
-        if (subscription === undefined) {
-          return;
-        }
-        subscription.groupedRefreshScheduled = false;
-        subscription.groupedRefreshInFlight = false;
-        if (subscription.dirtyTargetVersion !== undefined) {
-          yield* scheduleGroupedSubscriptionRefresh(requestId);
+        const entry = groupedRefreshes.get(key);
+        groupedRefreshes.delete(key);
+        const requestIds = new Set([
+          ...(entry?.requestIds ?? []),
+          ...(entry?.pendingRequestIds ?? []),
+        ]);
+        for (const requestId of requestIds) {
+          const subscription = subscriptions.get(requestId);
+          if (subscription === undefined) {
+            continue;
+          }
+          subscription.groupedRefreshScheduled = false;
+          subscription.groupedRefreshInFlight = false;
+          if (subscription.dirtyTargetVersion !== undefined) {
+            yield* scheduleGroupedSubscriptionRefresh(requestId);
+          }
         }
       });
     }
@@ -1182,6 +1255,20 @@ export function makeTopicWorkerCore(
       }
     };
 
+    const releaseGroupedRefresh = (requestId: string): void => {
+      for (const [key, entry] of groupedRefreshes) {
+        entry.requestIds.delete(requestId);
+        entry.pendingRequestIds.delete(requestId);
+        if (
+          entry.state === "queued" &&
+          entry.requestIds.size === 0 &&
+          entry.pendingRequestIds.size === 0
+        ) {
+          groupedRefreshes.delete(key);
+        }
+      }
+    };
+
     const removeSubscription = (requestId: string): ActiveSubscription | undefined => {
       const subscription = subscriptions.get(requestId);
       if (subscription === undefined) {
@@ -1190,11 +1277,20 @@ export function makeTopicWorkerCore(
       subscriptions.delete(requestId);
       releaseActivePlan(subscription.activePlanKey);
       releaseActivePlanBuild(subscription.activePlanBuildKey, requestId);
+      releaseGroupedRefresh(requestId);
       subscription.pendingLagVersions = 0n;
       subscription.dirtyTargetVersion = undefined;
       subscription.groupedRefreshScheduled = false;
       subscription.groupedRefreshInFlight = false;
       return subscription;
+    };
+
+    const removeSubscriptionForQueue = (
+      requestId: string,
+      queue: ActiveSubscription["queue"],
+    ): ActiveSubscription | undefined => {
+      const subscription = subscriptions.get(requestId);
+      return subscription?.queue === queue ? removeSubscription(requestId) : undefined;
     };
 
     const appendMutation = Effect.fnUntraced(function* (
@@ -1326,6 +1422,10 @@ export function makeTopicWorkerCore(
                 lastVersion: targetVersion,
                 pendingLagVersions: 0n,
               };
+              const previous = removeSubscription(requestId);
+              if (previous !== undefined) {
+                yield* Queue.end(previous.queue);
+              }
               subscriptions.set(requestId, active);
               yield* Queue.offer(queue, snapshot);
               yield* prepareActivePlan(active);
@@ -1336,7 +1436,7 @@ export function makeTopicWorkerCore(
                     "view_server.subscription_id": requestId,
                     "view_server.topic": topic,
                   });
-                  removeSubscription(requestId);
+                  removeSubscriptionForQueue(requestId, queue);
                 })(),
               );
             })(),
@@ -1441,6 +1541,7 @@ export function makeTopicWorkerCore(
           subscriptions.clear();
           activePlans.clear();
           activePlanBuilds.clear();
+          groupedRefreshes.clear();
         })(),
       ),
     };
@@ -1479,6 +1580,10 @@ function hasDependency(
     }
   }
   return false;
+}
+
+function groupedRefreshKey(query: RuntimeGroupedQuery): string {
+  return stableStringify(query);
 }
 
 function coalescedQueueEvents(

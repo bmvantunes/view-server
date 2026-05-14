@@ -630,7 +630,7 @@ function normalizedBuildChunkSize(chunkSize: number | undefined): number {
   return Math.max(1, Math.trunc(chunkSize ?? 8_192));
 }
 
-function stableStringify(value: unknown): string {
+export function stableStringify(value: unknown): string {
   if (typeof value === "bigint") {
     return `{"$bigint":${JSON.stringify(value.toString())}}`;
   }

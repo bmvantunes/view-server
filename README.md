@@ -29,3 +29,4 @@ vp run dev
 ```
 
 - Benchmark smoke CI and baseline refresh notes live in `docs/benchmarks.md`.
+- Topic worker state-machine review notes live in `docs/worker-state-machine-review.md`.
