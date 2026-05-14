@@ -24,6 +24,7 @@ export default {
     include: [
       "@effect/platform-browser",
       "effect/unstable/http",
+      "effect/unstable/reactivity",
       "effect/unstable/rpc",
       "effect/unstable/rpc/RpcClient",
       "effect/unstable/rpc/RpcSerialization",

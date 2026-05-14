@@ -1,14 +1,17 @@
 import { BrowserSocket } from "@effect/platform-browser";
 import { Effect, Exit, Layer, Scope } from "effect";
+import { AsyncResult } from "effect/unstable/reactivity";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import {
   createViewServerClient,
+  LiveQueryStore,
   queryResultToRuntimeRows,
   rowKeyForTypedQuery,
   runtimeRowsToQueryResult,
-  SubscriptionStore,
   type InferReadableQueryResult,
+  type LiveQueryInitialData,
+  type LiveQueryResult,
   type QueryForReadableTopic,
   type ReadableTopicName,
   transportError,
@@ -29,19 +32,14 @@ import {
 } from "react";
 
 export type ViewServerHooks<TConfig extends ViewServerConfig> = {
-  readonly useSubscription: <
+  readonly useLiveQuery: <
     TTopic extends ReadableTopicName<TConfig>,
     TQuery extends QueryForReadableTopic<TConfig, TTopic>,
   >(
     topic: TTopic,
     query: TQuery,
-    initialData?: InferReadableQueryResult<TConfig, TTopic, TQuery>,
-  ) => {
-    readonly data: InferReadableQueryResult<TConfig, TTopic, TQuery>;
-    readonly totalRows: number;
-    readonly status: "connecting" | "snapshot_loading" | "live" | "error" | "closed";
-    readonly error?: unknown;
-  };
+    initialData?: LiveQueryInitialData<InferReadableQueryResult<TConfig, TTopic, TQuery>[number]>,
+  ) => LiveQueryResult<InferReadableQueryResult<TConfig, TTopic, TQuery>[number]>;
 };
 
 export const layerBrowserWebsocketRpcClient = (url: string) =>
@@ -67,8 +65,8 @@ export function createViewServerHooks<TConfig extends ViewServerConfig>(
   config: TConfig,
 ): ViewServerHooks<TConfig> {
   return {
-    useSubscription(topic, query, initialData) {
-      return useSubscriptionWithClient(client, config, topic, query, initialData);
+    useLiveQuery(topic, query, initialData) {
+      return useLiveQueryWithClient(client, config, topic, query, initialData);
     },
   };
 }
@@ -160,8 +158,8 @@ export function createViewServerReact<const TConfig extends ViewServerConfig>(co
     const context = useViewServerContext();
     return useMemo(
       () => ({
-        useSubscription(topic, query, initialData) {
-          return useSubscriptionWithClient(
+        useLiveQuery(topic, query, initialData) {
+          return useLiveQueryWithClient(
             context.client,
             config,
             topic,
@@ -176,12 +174,16 @@ export function createViewServerReact<const TConfig extends ViewServerConfig>(co
     );
   }
 
-  function useSubscription<
+  function useLiveQuery<
     TTopic extends ReadableTopicName<TConfig>,
     TQuery extends QueryForReadableTopic<TConfig, TTopic>,
-  >(topic: TTopic, query: TQuery, initialData?: InferReadableQueryResult<TConfig, TTopic, TQuery>) {
+  >(
+    topic: TTopic,
+    query: TQuery,
+    initialData?: LiveQueryInitialData<InferReadableQueryResult<TConfig, TTopic, TQuery>[number]>,
+  ) {
     const context = useViewServerContext();
-    return useSubscriptionWithClient(
+    return useLiveQueryWithClient(
       context.client,
       config,
       topic,
@@ -197,12 +199,12 @@ export function createViewServerReact<const TConfig extends ViewServerConfig>(co
     ViewServerClientProvider,
     useViewServerClient,
     useViewServerHooks,
-    useSubscription,
+    useLiveQuery,
     createHooks: (client: ViewServerClient<TConfig>) => createViewServerHooks(client, config),
   };
 }
 
-function useSubscriptionWithClient<
+function useLiveQueryWithClient<
   TConfig extends ViewServerConfig,
   TTopic extends ReadableTopicName<TConfig>,
   TQuery extends QueryForReadableTopic<TConfig, TTopic>,
@@ -211,21 +213,30 @@ function useSubscriptionWithClient<
   config: TConfig,
   topic: TTopic,
   query: TQuery,
-  initialData?: InferReadableQueryResult<TConfig, TTopic, TQuery>,
+  initialData?: LiveQueryInitialData<InferReadableQueryResult<TConfig, TTopic, TQuery>[number]>,
   connectionStatus: "connecting" | "ready" | "error" = "ready",
   connectionError?: unknown,
-) {
+): LiveQueryResult<InferReadableQueryResult<TConfig, TTopic, TQuery>[number]> {
   if (query === undefined) {
-    throw new Error(`useSubscription query is missing for topic ${String(topic)}`);
+    throw new Error(`useLiveQuery query is missing for topic ${String(topic)}`);
   }
   const rowKey = useMemo(
     () => rowKeyForTypedQuery<TConfig, TTopic, TQuery>(query, idFieldForTopic(config, topic)),
     [config, query, topic],
   );
-  const initialRows = useMemo(() => queryResultToRuntimeRows(initialData), [initialData]);
-  const storeRef = useRef<SubscriptionStore | undefined>(undefined);
+  const initialValue = useMemo(
+    () =>
+      initialData === undefined
+        ? undefined
+        : {
+            rows: queryResultToRuntimeRows(initialData.rows),
+            totalRows: initialData.totalRows,
+          },
+    [initialData],
+  );
+  const storeRef = useRef<LiveQueryStore | undefined>(undefined);
   if (storeRef.current === undefined) {
-    storeRef.current = new SubscriptionStore(initialRows, rowKey);
+    storeRef.current = new LiveQueryStore(initialValue, rowKey);
   }
   const store = storeRef.current;
 
@@ -246,7 +257,7 @@ function useSubscriptionWithClient<
       };
     }
 
-    store.setStatus("snapshot_loading");
+    store.setStatus("syncing");
     Effect.runPromise(
       Effect.fn("view-server.react.subscription.start")(function* () {
         yield* Effect.annotateCurrentSpan({
@@ -254,7 +265,19 @@ function useSubscriptionWithClient<
         });
         scope = yield* Scope.make();
         yield* Scope.provide(scope)(
-          client.subscribe(topic, query, (event) => Effect.sync(() => store.apply(event))),
+          client.subscribe(
+            topic,
+            query,
+            (event) => Effect.sync(() => store.apply(event)),
+            (event) =>
+              Effect.sync(() => {
+                if (event.type === "attempt") {
+                  store.beginAttempt(event.attempt);
+                } else {
+                  store.retryAttempt(event.attempt);
+                }
+              }),
+          ),
         );
       })(),
     ).catch((error) => {
@@ -278,12 +301,12 @@ function useSubscriptionWithClient<
     () => store.snapshot,
   );
 
-  return {
-    data: runtimeRowsToQueryResult(state.data, query, config, topic),
-    totalRows: state.totalRows,
-    status: state.status,
-    ...(state.error === undefined ? {} : { error: state.error }),
-  };
+  return AsyncResult.map(state, (value) => ({
+    rows: runtimeRowsToQueryResult(value.rows, query, config, topic),
+    totalRows: value.totalRows,
+    status: value.status,
+    connection: value.connection,
+  }));
 }
 
 function idFieldForTopic<TConfig extends ViewServerConfig>(

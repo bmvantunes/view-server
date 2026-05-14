@@ -1,4 +1,4 @@
-import { BigDecimal, Option } from "effect";
+import { BigDecimal, Effect, Option } from "effect";
 import {
   rowKeyForQuery,
   type DeltaOperation,
@@ -22,6 +22,11 @@ export type QueryExecutionOptions = {
   readonly literalStringFields?: ReadonlySet<string> | undefined;
 };
 
+export type GroupedQueryExecutionEffectOptions = QueryExecutionOptions & {
+  readonly chunkSize?: number | undefined;
+  readonly aggregateYieldInterval?: number | undefined;
+};
+
 export const DEFAULT_QUERY_LIMIT = 50;
 export const DEFAULT_QUERY_OFFSET = 0;
 
@@ -43,17 +48,14 @@ export function executeRawQuery(
   options: QueryExecutionOptions = {},
 ): QueryExecutionResult {
   const filtered = rows.filter((row) => matchesFilter(row, query.where, options));
-  const sorted = stableSortRows(filtered, [
-    ...(query.orderBy ?? []),
-    ...(query.orderBy?.some((order) => order.field === idField)
-      ? []
-      : [{ field: idField, direction: "asc" as const }]),
-  ]);
+  const sorted = stableSortRows(filtered, rawQueryOrderBy(query, idField));
   const totalRows = sorted.length;
   const offset = normalizeOffset(query.offset);
   const limit = normalizeLimit(query.limit);
   return {
-    rows: sorted.slice(offset, offset + limit).map((row) => projectRow(row, query.fields, idField)),
+    rows: sorted
+      .slice(offset, offset + limit)
+      .map((row) => projectRawRow(row, query.fields, idField)),
     totalRows,
   };
 }
@@ -65,12 +67,7 @@ export function executeGroupedQuery(
 ): QueryExecutionResult {
   const filtered = rows.filter((row) => matchesFilter(row, query.where, options));
   const groups = buildGroups(filtered, query.groupBy, query.aggregates);
-  const sorted = stableSortRows(groups, [
-    ...(query.orderBy ?? []),
-    ...query.groupBy
-      .filter((field) => !query.orderBy?.some((order) => order.field === field))
-      .map((field) => ({ field, direction: "asc" as const })),
-  ]);
+  const sorted = stableSortRows(groups, groupedQueryOrderBy(query));
   const totalRows = sorted.length;
   const offset = normalizeOffset(query.offset);
   const limit = normalizeLimit(query.limit);
@@ -78,6 +75,48 @@ export function executeGroupedQuery(
     rows: sorted.slice(offset, offset + limit),
     totalRows,
   };
+}
+
+export function executeGroupedQueryEffect(
+  rows: readonly RuntimeRow[],
+  query: RuntimeGroupedQuery,
+  options: GroupedQueryExecutionEffectOptions = {},
+): Effect.Effect<QueryExecutionResult> {
+  return Effect.gen(function* () {
+    const chunkSize = normalizePositiveInteger(options.chunkSize, 10_000);
+    const aggregateYieldInterval = normalizePositiveInteger(options.aggregateYieldInterval, 50);
+    const groups = new Map<string, RuntimeRow[]>();
+    for (let index = 0; index < rows.length; index++) {
+      const row = rows[index];
+      if (row !== undefined && matchesFilter(row, query.where, options)) {
+        addGroupedRow(groups, row, query.groupBy);
+      }
+      if ((index + 1) % chunkSize === 0) {
+        yield* Effect.yieldNow;
+      }
+    }
+
+    const result: RuntimeRow[] = [];
+    let aggregateCount = 0;
+    for (const groupRows of groups.values()) {
+      result.push(
+        yield* groupedResultRow(groupRows, query, aggregateYieldInterval, aggregateCount),
+      );
+      aggregateCount += Object.keys(query.aggregates).length;
+      if (aggregateCount % aggregateYieldInterval === 0) {
+        yield* Effect.yieldNow;
+      }
+    }
+
+    const sorted = stableSortRows(result, groupedQueryOrderBy(query));
+    const totalRows = sorted.length;
+    const offset = normalizeOffset(query.offset);
+    const limit = normalizeLimit(query.limit);
+    return {
+      rows: sorted.slice(offset, offset + limit),
+      totalRows,
+    };
+  });
 }
 
 export function matchesFilter(
@@ -221,7 +260,7 @@ export function isGroupedQuery(query: RuntimeQuery): query is RuntimeGroupedQuer
 
 export const rowKeyForMemoryQuery = rowKeyForQuery;
 
-function projectRow(
+export function projectRawRow(
   row: RuntimeRow,
   fields: RuntimeRawQuery["fields"],
   idField: string,
@@ -236,22 +275,46 @@ function projectRow(
   return projected;
 }
 
-function stableSortRows(rows: readonly RuntimeRow[], orderBy: OrderBy<RuntimeRow>): RuntimeRow[] {
+export function rawQueryOrderBy(query: RuntimeRawQuery, idField: string): OrderBy<RuntimeRow> {
+  return [
+    ...(query.orderBy ?? []),
+    ...(query.orderBy?.some((order) => order.field === idField)
+      ? []
+      : [{ field: idField, direction: "asc" as const }]),
+  ];
+}
+
+export function compareRowsForOrder(
+  left: RuntimeRow,
+  right: RuntimeRow,
+  orderBy: OrderBy<RuntimeRow>,
+): number {
+  for (const order of orderBy) {
+    const compared = compareSortValue(left[order.field], right[order.field]);
+    if (compared !== 0) {
+      return order.direction === "asc" ? compared : -compared;
+    }
+  }
+  return 0;
+}
+
+export function stableSortRows(
+  rows: readonly RuntimeRow[],
+  orderBy: OrderBy<RuntimeRow>,
+): RuntimeRow[] {
   return rows
     .map((row, index) => ({ row, index }))
     .sort((left, right) => {
-      for (const order of orderBy) {
-        const compared = compareSortValue(left.row[order.field], right.row[order.field]);
-        if (compared !== 0) {
-          return order.direction === "asc" ? compared : -compared;
-        }
+      const compared = compareRowsForOrder(left.row, right.row, orderBy);
+      if (compared !== 0) {
+        return compared;
       }
       return left.index - right.index;
     })
     .map((entry) => entry.row);
 }
 
-function compareSortValue(left: unknown, right: unknown): number {
+export function compareSortValue(left: unknown, right: unknown): number {
   if (left == null && right == null) {
     return 0;
   }
@@ -304,7 +367,7 @@ function compareEquality(left: unknown, right: unknown, strictStringEquality = f
   return Object.is(left, right);
 }
 
-function rowsEqual(left: RuntimeRow | undefined, right: RuntimeRow): boolean {
+export function rowsEqual(left: RuntimeRow | undefined, right: RuntimeRow): boolean {
   if (left === undefined) {
     return false;
   }
@@ -335,26 +398,85 @@ function buildGroups(
   groupBy: readonly string[],
   aggregates: RuntimeAggregateMap,
 ): RuntimeRow[] {
-  const groups = new Map<string, readonly RuntimeRow[]>();
+  const groups = new Map<string, RuntimeRow[]>();
   for (const row of rows) {
-    const key = JSON.stringify(groupBy.map((field) => encodeGroupKey(row[field])));
-    const existing = groups.get(key) ?? [];
-    groups.set(key, [...existing, row]);
+    addGroupedRow(groups, row, groupBy);
   }
 
   const result: RuntimeRow[] = [];
   for (const groupRows of groups.values()) {
-    const [first] = groupRows;
-    const row: RuntimeRow = {};
-    for (const field of groupBy) {
-      row[field] = first?.[field];
-    }
-    for (const [alias, aggregate] of Object.entries(aggregates)) {
-      row[alias] = aggregateRows(groupRows, aggregate);
-    }
-    result.push(row);
+    result.push(groupedResultRowSync(groupRows, groupBy, aggregates));
   }
   return result;
+}
+
+function groupedQueryOrderBy(query: RuntimeGroupedQuery): OrderBy<RuntimeRow> {
+  return [
+    ...(query.orderBy ?? []),
+    ...query.groupBy
+      .filter((field) => !query.orderBy?.some((order) => order.field === field))
+      .map((field) => ({ field, direction: "asc" as const })),
+  ];
+}
+
+function addGroupedRow(
+  groups: Map<string, RuntimeRow[]>,
+  row: RuntimeRow,
+  groupBy: readonly string[],
+): void {
+  const key = JSON.stringify(groupBy.map((field) => encodeGroupKey(row[field])));
+  const existing = groups.get(key);
+  if (existing === undefined) {
+    groups.set(key, [row]);
+  } else {
+    existing.push(row);
+  }
+}
+
+function groupedResultRowSync(
+  groupRows: readonly RuntimeRow[],
+  groupBy: readonly string[],
+  aggregates: RuntimeAggregateMap,
+): RuntimeRow {
+  const [first] = groupRows;
+  const row: RuntimeRow = {};
+  for (const field of groupBy) {
+    row[field] = first?.[field];
+  }
+  for (const [alias, aggregate] of Object.entries(aggregates)) {
+    row[alias] = aggregateRows(groupRows, aggregate);
+  }
+  return row;
+}
+
+function groupedResultRow(
+  groupRows: readonly RuntimeRow[],
+  query: RuntimeGroupedQuery,
+  aggregateYieldInterval: number,
+  startAggregateCount: number,
+): Effect.Effect<RuntimeRow> {
+  return Effect.gen(function* () {
+    const [first] = groupRows;
+    const row: RuntimeRow = {};
+    for (const field of query.groupBy) {
+      row[field] = first?.[field];
+    }
+    let aggregateCount = startAggregateCount;
+    for (const [alias, aggregate] of Object.entries(query.aggregates)) {
+      row[alias] = aggregateRows(groupRows, aggregate);
+      aggregateCount++;
+      if (aggregateCount % aggregateYieldInterval === 0) {
+        yield* Effect.yieldNow;
+      }
+    }
+    return row;
+  });
+}
+
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+  return value === undefined || !Number.isFinite(value) || value <= 0
+    ? fallback
+    : Math.trunc(value);
 }
 
 function encodeGroupKey(value: unknown): unknown {

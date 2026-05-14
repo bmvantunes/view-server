@@ -120,6 +120,11 @@ export type ViewServerConfig<TTopics extends TopicConfigMap = TopicConfigMap> = 
     | {
         readonly maxQueueDepth?: number | undefined;
         readonly mutationLogSize?: number | undefined;
+        readonly deltaCoalescing?: boolean | undefined;
+        readonly maxActivePlans?: number | undefined;
+        readonly maxActivePlanEstimatedBytes?: number | undefined;
+        readonly activePlanBuildConcurrency?: number | undefined;
+        readonly groupedRefreshDebounceMs?: number | undefined;
       }
     | undefined;
   readonly health?:
@@ -152,6 +157,11 @@ export type NormalizedViewServerConfig = {
   readonly worker: {
     readonly maxQueueDepth: number;
     readonly mutationLogSize: number;
+    readonly deltaCoalescing: boolean;
+    readonly maxActivePlans?: number | undefined;
+    readonly maxActivePlanEstimatedBytes?: number | undefined;
+    readonly activePlanBuildConcurrency: number;
+    readonly groupedRefreshDebounceMs: number;
   };
   readonly health: {
     readonly path: HttpPath;
@@ -215,6 +225,19 @@ export const ViewServerHealthRowSchema = Schema.Struct({
   rows: Schema.Number,
   subscribers: Schema.Number,
   queueDepth: Schema.Number,
+  maxSubscriptionLagVersions: Schema.Number,
+  totalSubscriptionLagVersions: Schema.Number,
+  activePlanCount: Schema.Number,
+  activeViewCount: Schema.Number,
+  activePlanRows: Schema.Number,
+  activePlanIndexEstimatedBytes: Schema.Number,
+  activePlanBuildQueueDepth: Schema.Number,
+  activePlanBuildingCount: Schema.Number,
+  activePlanPendingCount: Schema.Number,
+  activePlanBuildMs: Schema.Number,
+  activePlanBuildMsTotal: Schema.Number,
+  activePlanBuildMsMax: Schema.Number,
+  activePlanFallbackCount: Schema.Number,
   workerLagP95Ms: Schema.Number,
   deltaFanoutP95Ms: Schema.Number,
   publishLatencyP95Ms: Schema.Number,
@@ -264,6 +287,15 @@ export function normalizeConfig(config: ViewServerConfig): NormalizedViewServerC
     worker: {
       maxQueueDepth: config.worker?.maxQueueDepth ?? 100_000,
       mutationLogSize: config.worker?.mutationLogSize ?? 10_000,
+      deltaCoalescing: config.worker?.deltaCoalescing ?? true,
+      activePlanBuildConcurrency: config.worker?.activePlanBuildConcurrency ?? 1,
+      groupedRefreshDebounceMs: config.worker?.groupedRefreshDebounceMs ?? 50,
+      ...(config.worker?.maxActivePlans === undefined
+        ? {}
+        : { maxActivePlans: config.worker.maxActivePlans }),
+      ...(config.worker?.maxActivePlanEstimatedBytes === undefined
+        ? {}
+        : { maxActivePlanEstimatedBytes: config.worker.maxActivePlanEstimatedBytes }),
     },
     health: {
       path: config.health?.path ?? "/health",

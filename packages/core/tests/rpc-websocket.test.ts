@@ -1,27 +1,19 @@
 import { NodeHttpServer, NodeSocket } from "@effect/platform-node";
 import { describe, expect, it } from "@effect/vitest";
-import {
-  BigDecimal,
-  Deferred,
-  Effect,
-  Exit,
-  Fiber,
-  Layer,
-  Option,
-  Queue,
-  Schema,
-  Stream,
-} from "effect";
+import { BigDecimal, Deferred, Effect, Exit, Layer, Option, Queue, Schema, Stream } from "effect";
+import type * as Cause from "effect/Cause";
 import { HttpServer } from "effect/unstable/http";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import { createViewServerClient } from "../src/client/index.ts";
 import { defineConfig } from "../src/config/index.ts";
+import { backpressureExceeded, type ViewServerError } from "../src/errors.ts";
 import type { RawQuery, RuntimeRow, SubscriptionEvent } from "../src/protocol/index.ts";
 import { ViewServerRpcs } from "../src/rpc/index.ts";
 import { layerViewServerWebsocketServer, makeNodeWebsocketClient } from "../src/rpc/websocket.ts";
 import { layerViewServerRuntime } from "../src/server/index.ts";
 import { createChdbSnapshotBackendFactory } from "../src/snapshot/chdb-backend.ts";
+import { makeInProcessTopicWorkerHost, type TopicWorkerHost } from "../src/worker/index.ts";
 
 const Order = Schema.Struct({
   id: Schema.String,
@@ -47,6 +39,7 @@ const config = defineConfig({
 const backpressureConfig = defineConfig({
   worker: {
     maxQueueDepth: 1,
+    deltaCoalescing: false,
   },
   topics: {
     orders: {
@@ -153,6 +146,159 @@ const topOneQuery = {
   orderBy: [{ field: "price", direction: "desc" }],
   limit: 1,
 } satisfies RawQuery<OrderRow, { readonly id: true; readonly price: true }>;
+
+function makeRetryWorker(topic: string, idField: string): Effect.Effect<TopicWorkerHost> {
+  return Effect.sync(() => {
+    let rows: RuntimeRow[] = [{ id: "o-1", symbol: "AAPL", price: 100 }];
+    let version = 0n;
+    let attempts = 0;
+    let active:
+      | {
+          readonly requestId: string;
+          readonly queue: Queue.Queue<
+            SubscriptionEvent<readonly RuntimeRow[]>,
+            ViewServerError | Cause.Done
+          >;
+        }
+      | undefined;
+
+    const snapshot = (requestId: string): SubscriptionEvent<readonly RuntimeRow[]> => ({
+      type: "snapshot",
+      requestId,
+      rows: rows.map((row) => ({ id: row.id, price: row.price })),
+      meta: {
+        version: version.toString(),
+        totalRows: rows.length,
+        serverTime: Date.now(),
+      },
+    });
+
+    const publish = (input: unknown): Effect.Effect<void, ViewServerError> =>
+      Effect.gen(function* () {
+        if (!isRuntimeRow(input)) {
+          return yield* Effect.die(new Error("Expected runtime row"));
+        }
+        const row = input;
+        const id = row[idField];
+        if (typeof id !== "string" && typeof id !== "number") {
+          return yield* Effect.die(new Error(`Expected ${idField} to be a row key`));
+        }
+        const index = rows.findIndex((existing) => existing[idField] === id);
+        const beforeVersion = version;
+        version += 1n;
+        if (index >= 0) {
+          rows = rows.map((existing, existingIndex) => (existingIndex === index ? row : existing));
+        } else {
+          rows = [...rows, row];
+        }
+        const subscriber = active;
+        if (subscriber !== undefined) {
+          yield* Queue.offer(subscriber.queue, {
+            type: "delta",
+            requestId: subscriber.requestId,
+            ops: [
+              {
+                type: "upsert",
+                key: id,
+                row: { id: row.id, price: row.price },
+                index: rows.length - 1,
+              },
+            ],
+            meta: {
+              fromVersion: beforeVersion.toString(),
+              toVersion: version.toString(),
+              totalRows: rows.length,
+              serverTime: Date.now(),
+            },
+          });
+        }
+      });
+
+    const worker: TopicWorkerHost = {
+      topic,
+      idField,
+      version: Effect.sync(() => version),
+      metrics: Effect.sync(() => ({
+        rows: rows.length,
+        subscribers: active === undefined ? 0 : 1,
+        version,
+        queueDepth: 0,
+        maxSubscriptionLagVersions: 0,
+        totalSubscriptionLagVersions: 0,
+        activePlanCount: 0,
+        activeViewCount: 0,
+        activePlanRows: 0,
+        activePlanIndexEstimatedBytes: 0,
+        activePlanBuildQueueDepth: 0,
+        activePlanBuildingCount: 0,
+        activePlanPendingCount: 0,
+        activePlanBuildMs: 0,
+        activePlanBuildMsTotal: 0,
+        activePlanBuildMsMax: 0,
+        activePlanFallbackCount: 0,
+        status: "ready" as const,
+      })),
+      query: () =>
+        Effect.succeed({
+          rows: rows.map((row) => ({ id: row.id, price: row.price })),
+          totalRows: rows.length,
+          version: version.toString(),
+        }),
+      subscribe: (requestId) =>
+        Stream.callback<SubscriptionEvent<readonly RuntimeRow[]>, ViewServerError>((queue) =>
+          Effect.gen(function* () {
+            attempts += 1;
+            active = { requestId, queue };
+            yield* Queue.offer(queue, snapshot(requestId));
+            if (attempts === 1) {
+              yield* publish({ id: "o-2", symbol: "MSFT", price: 200 });
+              active = undefined;
+              yield* Queue.fail(
+                queue,
+                backpressureExceeded(requestId, "synthetic websocket retry backpressure"),
+              );
+              return;
+            }
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                if (active?.requestId === requestId) {
+                  active = undefined;
+                }
+              }),
+            );
+          }),
+        ),
+      unsubscribe: (requestId) =>
+        Effect.gen(function* () {
+          if (active?.requestId === requestId) {
+            const queue = active.queue;
+            active = undefined;
+            yield* Queue.end(queue);
+          }
+        }),
+      publish,
+      deltaPublish: (patch) =>
+        Effect.gen(function* () {
+          const current = rows.find((row) => row[idField] === patch[idField]);
+          yield* publish({ ...current, ...patch });
+        }),
+      deleteById: (id) =>
+        Effect.sync(() => {
+          rows = rows.filter((row) => row[idField] !== id);
+          version += 1n;
+        }),
+      getRowsForTest: Effect.sync(() => rows.map((row) => ({ ...row }))),
+      shutdown: Effect.sync(() => {
+        active = undefined;
+      }),
+    };
+    return worker;
+  });
+}
+
+function isRuntimeRow(value: unknown): value is RuntimeRow {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 describe("Effect RPC websocket", () => {
   it.effect("serves health and readiness probes beside the websocket route", () =>
@@ -306,11 +452,14 @@ describe("Effect RPC websocket", () => {
             config,
           );
 
-          const rows = yield* client.query("orders", query).pipe(Effect.timeout("1 second"));
-          expect(rows).toEqual([
-            { id: "o-2", price: 200 },
-            { id: "o-1", price: 100 },
-          ]);
+          const result = yield* client.query("orders", query).pipe(Effect.timeout("1 second"));
+          expect(result).toEqual({
+            rows: [
+              { id: "o-2", price: 200 },
+              { id: "o-1", price: 100 },
+            ],
+            totalRows: 2,
+          });
         }).pipe(Effect.provide(testServerLayer));
       }).pipe(Effect.scoped),
     );
@@ -578,10 +727,11 @@ describe("Effect RPC websocket", () => {
       Effect.gen(function* () {
         const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
           Layer.provide(
-            layerViewServerRuntime(backpressureConfig, {
-              initialRows: {
-                orders: [{ id: "o-1", symbol: "AAPL", price: 100 }],
-              },
+            layerViewServerRuntime(config, {
+              topicWorkerFactory: (topic, topicConfig, options) =>
+                topic === "orders"
+                  ? makeRetryWorker(topic, topicConfig.id)
+                  : makeInProcessTopicWorkerHost(topic, topicConfig, options),
             }),
           ),
         );
@@ -593,17 +743,15 @@ describe("Effect RPC websocket", () => {
           if (address._tag !== "TcpAddress") {
             return yield* Effect.die(new Error("Expected test server to listen on TCP"));
           }
+          const websocketUrl = `ws://127.0.0.1:${address.port}/rpc`;
           const clientLayer = RpcClient.layerProtocolSocket().pipe(
-            Layer.provide(NodeSocket.layerWebSocket(`ws://127.0.0.1:${address.port}/rpc`)),
+            Layer.provide(NodeSocket.layerWebSocket(websocketUrl)),
             Layer.provide(RpcSerialization.layerNdjson),
           );
 
           yield* Effect.gen(function* () {
             const rpcClient = yield* RpcClient.make(ViewServerRpcs);
-            const client = createViewServerClient<typeof backpressureConfig>(
-              rpcClient,
-              backpressureConfig,
-            );
+            const client = createViewServerClient<typeof config>(rpcClient, config);
             const firstSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
             const firstDelta = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
             const resubscribedSnapshot =
@@ -637,35 +785,19 @@ describe("Effect RPC websocket", () => {
             const firstRequestId = snapshot.requestId;
             expect(firstRequestId).toBe(subscription.requestId);
 
-            yield* client
-              .publish("orders", { id: "o-2", symbol: "MSFT", price: 200 })
-              .pipe(Effect.timeout("1 second"));
             const delta = yield* Deferred.await(firstDelta).pipe(Effect.timeout("1 second"));
             expect(delta.type).toBe("delta");
             expect(delta.requestId).toBe(firstRequestId);
 
-            const overflowPublish = yield* Effect.forEach(
-              Array.from({ length: 160 }, (_, index) => index + 3),
-              (index) =>
-                client.publish("orders", {
-                  id: `o-${index}`,
-                  symbol: `SYM-${index}`,
-                  price: index * 100,
-                }),
-              { discard: true },
-            ).pipe(Effect.forkScoped);
-            yield* Effect.sleep("100 millis");
             yield* Deferred.succeed(releaseDelta, undefined);
-            yield* Effect.sleep("350 millis");
 
             const nextSnapshot = yield* Deferred.await(resubscribedSnapshot).pipe(
               Effect.timeout("2 seconds"),
             );
-            yield* Fiber.interrupt(overflowPublish).pipe(Effect.ignore);
             expect(nextSnapshot.type).toBe("snapshot");
             expect(nextSnapshot.requestId).not.toBe(firstRequestId);
             expect(nextSnapshot.requestId).toBe(subscription.requestId);
-            expect(nextSnapshot.meta.totalRows).toBeGreaterThanOrEqual(3);
+            expect(nextSnapshot.meta.totalRows).toBe(2);
 
             const health = yield* client.health().pipe(Effect.timeout("1 second"));
             expect(health.topics.orders).toMatchObject({
@@ -680,7 +812,7 @@ describe("Effect RPC websocket", () => {
             expect(nextDelta.type).toBe("delta");
             expect(nextDelta.requestId).toBe(nextSnapshot.requestId);
             if (nextDelta.type === "delta") {
-              expect(nextDelta.meta.totalRows).toBeGreaterThanOrEqual(4);
+              expect(nextDelta.meta.totalRows).toBe(3);
               expect(
                 nextDelta.ops.some(
                   (operation) => operation.type === "upsert" && operation.row.id === "o-200",

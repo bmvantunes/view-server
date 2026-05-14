@@ -1,7 +1,9 @@
 import { describe, expect, it } from "@effect/vitest";
 import { BigDecimal, Effect, Schema } from "effect";
+import { AsyncResult } from "effect/unstable/reactivity";
 import { defineConfig } from "../src/config/index.ts";
 import type { RawQuery } from "../src/protocol/index.ts";
+import { LiveQueryStore } from "../src/client/live-query-store.ts";
 import {
   queryResultToRuntimeRows,
   rowKeyForTypedQuery,
@@ -10,6 +12,7 @@ import {
   rpcQueryPayload,
   rpcQueryRows,
   rpcSubscribePayload,
+  rpcSubscriptionEvent,
   runtimeRowsToQueryResult,
 } from "../src/client/rpc-boundary.ts";
 
@@ -108,7 +111,7 @@ describe("client RPC boundary helpers", () => {
         "orders",
       );
 
-      expect(queryResultToRuntimeRows<typeof config, "orders", typeof query>(rows)).toEqual([
+      expect(queryResultToRuntimeRows(rows)).toEqual([
         { id: "o-1", price: BigDecimal.fromStringUnsafe("20") },
       ]);
       expect(
@@ -124,4 +127,66 @@ describe("client RPC boundary helpers", () => {
       );
     }),
   );
+
+  it.effect("passes typed subscription status events through the RPC boundary", () =>
+    Effect.gen(function* () {
+      const event = yield* rpcSubscriptionEvent<typeof config, "orders", typeof query>(
+        {
+          type: "status",
+          requestId: "request-1",
+          status: "stale",
+          meta: {
+            version: "2",
+            totalRows: 10,
+            serverTime: 123,
+          },
+        },
+        query,
+        config,
+        "orders",
+      );
+
+      expect(event).toEqual({
+        type: "status",
+        requestId: "request-1",
+        status: "stale",
+        meta: {
+          version: "2",
+          totalRows: 10,
+          serverTime: 123,
+        },
+      });
+    }),
+  );
+
+  it("represents subscription status events as stale AsyncResult waiting state", () => {
+    const store = new LiveQueryStore({
+      rows: [{ id: "o-1", price: BigDecimal.fromStringUnsafe("20") }],
+      totalRows: 1,
+    });
+
+    store.apply({
+      type: "status",
+      requestId: "request-1",
+      status: "stale",
+      meta: {
+        version: "2",
+        totalRows: 2,
+        serverTime: 123,
+      },
+    });
+
+    const matched = AsyncResult.match(store.snapshot, {
+      onInitial: () => "initial",
+      onFailure: () => "failure",
+      onSuccess: ({ value }) => {
+        expect(value.status).toBe("stale");
+        expect(value.totalRows).toBe(2);
+        expect(value.rows).toEqual([{ id: "o-1", price: BigDecimal.fromStringUnsafe("20") }]);
+        return "success";
+      },
+    });
+    expect(matched).toBe("success");
+    expect(store.snapshot.waiting).toBe(true);
+  });
 });

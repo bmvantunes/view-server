@@ -1,7 +1,6 @@
 import { NodeHttpServer } from "@effect/platform-node";
 import { Context, Effect, Exit, Layer, Schema, Scope } from "effect";
 import { HttpServer } from "effect/unstable/http";
-import type { TestProject } from "vitest/node";
 import { defineConfig, layerViewServerRuntime, type RawQuery } from "@view-server/core";
 import {
   layerViewServerWebsocketServer,
@@ -50,7 +49,11 @@ const websocketLayer = layerViewServerWebsocketServer("/rpc").pipe(
 const httpLayer = NodeHttpServer.layerTest;
 const serverLayer = websocketLayer.pipe(Layer.provideMerge(httpLayer));
 
-export default async function setup(project: TestProject) {
+type BrowserRpcProject = {
+  readonly provide: (key: "viewServerWsUrl", value: string) => void;
+};
+
+export default async function setup(project: BrowserRpcProject) {
   const scope = await Effect.runPromise(Scope.make());
   const context = await Effect.runPromise(Layer.buildWithScope(serverLayer, scope));
   const server = Context.get(context, HttpServer.HttpServer);
@@ -64,8 +67,8 @@ export default async function setup(project: TestProject) {
     Effect.scoped(
       Effect.gen(function* () {
         const client = yield* makeNodeWebsocketClient<typeof config>(url, config);
-        const rows = yield* client.query("orders", smokeQuery).pipe(Effect.timeout("1 second"));
-        if (rows[0]?.id !== "o-2") {
+        const result = yield* client.query("orders", smokeQuery).pipe(Effect.timeout("1 second"));
+        if (result.rows[0]?.id !== "o-2") {
           return yield* Effect.die(new Error("Websocket smoke query returned unexpected rows"));
         }
       }),

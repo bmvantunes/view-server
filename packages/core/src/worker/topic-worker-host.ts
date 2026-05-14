@@ -12,6 +12,11 @@ export type TopicWorkerHostOptions = {
   readonly snapshotBackend?: SnapshotBackend | undefined;
   readonly maxQueueDepth?: number | undefined;
   readonly mutationLogSize?: number | undefined;
+  readonly deltaCoalescing?: boolean | undefined;
+  readonly maxActivePlans?: number | undefined;
+  readonly maxActivePlanEstimatedBytes?: number | undefined;
+  readonly activePlanBuildConcurrency?: number | undefined;
+  readonly groupedRefreshDebounceMs?: number | undefined;
 };
 
 export type TopicWorkerHostFactory = (

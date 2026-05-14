@@ -8,7 +8,6 @@ import type {
 } from "../config/index.ts";
 
 export type SortDirection = "asc" | "desc";
-export type SubscriptionStatus = "connecting" | "snapshot_loading" | "live" | "error" | "closed";
 
 export interface TopicMap {
   readonly [topicName: string]: object;
@@ -406,13 +405,18 @@ export type DeltaEvent<TRow extends readonly unknown[]> = {
   };
 };
 
+export type LiveQueryStatusEvent = {
+  readonly type: "status";
+  readonly requestId: string;
+  readonly status: "stale";
+  readonly meta: {
+    readonly version: string;
+    readonly totalRows: number;
+    readonly serverTime: number;
+  };
+};
+
 export type SubscriptionEvent<TRow extends readonly unknown[]> =
   | SnapshotEvent<TRow>
-  | DeltaEvent<TRow>;
-
-export type UseSubscriptionResult<TData extends readonly unknown[]> = {
-  readonly data: TData;
-  readonly totalRows: number;
-  readonly status: SubscriptionStatus;
-  readonly error?: unknown;
-};
+  | DeltaEvent<TRow>
+  | LiveQueryStatusEvent;

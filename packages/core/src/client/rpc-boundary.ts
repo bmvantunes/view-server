@@ -132,10 +132,18 @@ export function rpcSubscriptionEvent<
       Effect.map((rows) => ({
         type: "snapshot",
         requestId: event.requestId,
-        rows: queryResultToRuntimeRows<TConfig, TTopic, TQuery>(rows),
+        rows: queryResultToRuntimeRows(rows),
         meta: event.meta,
       })),
     );
+  }
+  if (event.type === "status") {
+    return Effect.succeed({
+      type: "status",
+      requestId: event.requestId,
+      status: event.status,
+      meta: event.meta,
+    });
   }
 
   return Effect.forEach(event.ops, (operation) =>
@@ -189,7 +197,7 @@ function decodeDeltaOperation<
     topic,
   ).pipe(
     Effect.flatMap((rows) => {
-      const [row] = queryResultToRuntimeRows<TConfig, TTopic, TQuery>(rows);
+      const [row] = queryResultToRuntimeRows(rows);
       return row === undefined
         ? Effect.fail(schemaDecodeFailed(String(topic), "Delta upsert did not contain a row"))
         : Effect.succeed({
@@ -202,11 +210,9 @@ function decodeDeltaOperation<
   );
 }
 
-export function queryResultToRuntimeRows<
-  TConfig extends ViewServerConfig,
-  TTopic extends ReadableTopicName<TConfig>,
-  TQuery extends QueryForReadableTopic<TConfig, TTopic>,
->(data: InferReadableQueryResult<TConfig, TTopic, TQuery> | undefined): readonly RuntimeRow[] {
+export function queryResultToRuntimeRows(
+  data: readonly object[] | undefined,
+): readonly RuntimeRow[] {
   if (data === undefined) {
     return [];
   }

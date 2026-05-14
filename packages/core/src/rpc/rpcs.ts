@@ -205,7 +205,22 @@ export const RpcDeltaEvent = Schema.Struct({
   meta: RpcDeltaMeta,
 });
 
-export const RpcSubscriptionEvent = Schema.Union([RpcSnapshotEvent, RpcDeltaEvent]);
+export const RpcLiveQueryStatusEvent = Schema.Struct({
+  type: Schema.Literal("status"),
+  requestId: Schema.String,
+  status: Schema.Literal("stale"),
+  meta: Schema.Struct({
+    version: Schema.String,
+    totalRows: Schema.Number,
+    serverTime: Schema.Number,
+  }),
+});
+
+export const RpcSubscriptionEvent = Schema.Union([
+  RpcSnapshotEvent,
+  RpcDeltaEvent,
+  RpcLiveQueryStatusEvent,
+]);
 
 export const RpcQueryResponse = Schema.Struct({
   rows: RpcRows,
@@ -217,6 +232,19 @@ export const RpcHealthTopic = Schema.Struct({
   rows: Schema.Number,
   subscribers: Schema.Number,
   queueDepth: Schema.Number,
+  maxSubscriptionLagVersions: Schema.Number,
+  totalSubscriptionLagVersions: Schema.Number,
+  activePlanCount: Schema.Number,
+  activeViewCount: Schema.Number,
+  activePlanRows: Schema.Number,
+  activePlanIndexEstimatedBytes: Schema.Number,
+  activePlanBuildQueueDepth: Schema.Number,
+  activePlanBuildingCount: Schema.Number,
+  activePlanPendingCount: Schema.Number,
+  activePlanBuildMs: Schema.Number,
+  activePlanBuildMsTotal: Schema.Number,
+  activePlanBuildMsMax: Schema.Number,
+  activePlanFallbackCount: Schema.Number,
   version: Schema.String,
   kafkaLagTotal: Schema.Number,
   kafkaLagMax: Schema.Number,

@@ -1,6 +1,7 @@
 import React from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
+import { AsyncResult } from "effect/unstable/reactivity";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { VIEW_SERVER_HEALTH_TOPIC, type ViewServerHealthRow } from "@view-server/core";
 import {
@@ -22,14 +23,18 @@ describe("ViewServerMetricsDashboard", () => {
   test("renders live health topic rows through the public subscription hook", () => {
     const calls: { topic?: unknown; query?: unknown } = {};
     const hooks: ViewServerMetricsHooks = {
-      useSubscription(topic, query) {
+      useLiveQuery(topic, query) {
         calls.topic = topic;
         calls.query = query;
-        return {
-          data: healthRows,
+        return AsyncResult.success({
+          rows: healthRows,
           totalRows: healthRows.length,
           status: "live",
-        };
+          connection: {
+            connected: true,
+            attempt: 1,
+          },
+        });
       },
     };
 
@@ -41,6 +46,7 @@ describe("ViewServerMetricsDashboard", () => {
     expect(document.body.textContent).toContain("ready");
     expect(document.body.textContent).toContain("orders");
     expect(document.body.textContent).toContain("1,024");
+    expect(document.body.textContent).toContain("6");
     expect(document.body.textContent).toContain("12ms");
   });
 });
@@ -62,6 +68,19 @@ const healthRows: readonly ViewServerHealthRow[] = [
     rows: 1_024,
     subscribers: 3,
     queueDepth: 0,
+    maxSubscriptionLagVersions: 6,
+    totalSubscriptionLagVersions: 8,
+    activePlanCount: 2,
+    activeViewCount: 3,
+    activePlanRows: 2_048,
+    activePlanIndexEstimatedBytes: 48_000,
+    activePlanBuildQueueDepth: 0,
+    activePlanBuildingCount: 0,
+    activePlanPendingCount: 0,
+    activePlanBuildMs: 12,
+    activePlanBuildMsTotal: 22,
+    activePlanBuildMsMax: 12,
+    activePlanFallbackCount: 0,
     workerLagP95Ms: 2,
     deltaFanoutP95Ms: 4,
     publishLatencyP95Ms: 12,
@@ -83,6 +102,19 @@ const healthRows: readonly ViewServerHealthRow[] = [
     rows: 1_024,
     subscribers: 3,
     queueDepth: 0,
+    maxSubscriptionLagVersions: 6,
+    totalSubscriptionLagVersions: 8,
+    activePlanCount: 2,
+    activeViewCount: 3,
+    activePlanRows: 2_048,
+    activePlanIndexEstimatedBytes: 48_000,
+    activePlanBuildQueueDepth: 0,
+    activePlanBuildingCount: 0,
+    activePlanPendingCount: 0,
+    activePlanBuildMs: 12,
+    activePlanBuildMsTotal: 22,
+    activePlanBuildMsMax: 12,
+    activePlanFallbackCount: 0,
     workerLagP95Ms: 2,
     deltaFanoutP95Ms: 4,
     publishLatencyP95Ms: 12,

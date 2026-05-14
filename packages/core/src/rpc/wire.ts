@@ -21,6 +21,9 @@ export function wireSubscriptionEvent(event: SubscriptionEvent<readonly RuntimeR
       rows: event.rows.map(toWireRow),
     };
   }
+  if (event.type === "status") {
+    return event;
+  }
   return {
     ...event,
     ops: event.ops.map((operation) => {

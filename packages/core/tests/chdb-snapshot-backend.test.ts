@@ -18,6 +18,12 @@ const Order = Schema.Struct({
   price: Schema.Number,
 });
 
+const DecimalOrder = Schema.Struct({
+  id: Schema.String,
+  symbol: Schema.String,
+  price: Schema.BigDecimal,
+});
+
 const pagedQuery = {
   fields: {
     id: true,
@@ -558,6 +564,78 @@ describe("chDB snapshot backend", () => {
           BigDecimal.fromStringUnsafe("2.2"),
         ),
       ).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("refreshes grouped BigDecimal subscriptions through the chDB worker", () =>
+    Effect.gen(function* () {
+      const worker = yield* makeTopicWorkerCore(
+        "orders",
+        {
+          id: "id",
+          schema: DecimalOrder,
+        },
+        {
+          initialRows: [
+            { id: "a", symbol: "AAPL", price: BigDecimal.fromStringUnsafe("1.1") },
+            { id: "b", symbol: "AAPL", price: BigDecimal.fromStringUnsafe("2.2") },
+          ],
+          snapshotBackend: createChdbSnapshotBackend(),
+          groupedRefreshDebounceMs: 0,
+        },
+      );
+      const events = yield* worker
+        .subscribe("chdb-decimal-grouped-refresh", decimalGroupedQuery)
+        .pipe(Stream.toQueue({ capacity: 16 }));
+
+      const initial = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+      expect(initial.type).toBe("snapshot");
+      if (initial.type !== "snapshot") {
+        throw new Error("Expected initial grouped snapshot");
+      }
+      expect(initial.rows[0]?.symbol).toBe("AAPL");
+      expect(
+        BigDecimal.equals(
+          expectBigDecimal(initial.rows[0]?.totalPrice),
+          BigDecimal.fromStringUnsafe("3.3"),
+        ),
+      ).toBe(true);
+
+      yield* worker.publish({
+        id: "c",
+        symbol: "AAPL",
+        price: BigDecimal.fromStringUnsafe("3.3"),
+      });
+
+      const stale = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+      expect(stale.type).toBe("status");
+      if (stale.type !== "status") {
+        throw new Error("Expected stale grouped status");
+      }
+      expect(stale.status).toBe("stale");
+
+      const refreshed = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+      expect(refreshed.type).toBe("snapshot");
+      if (refreshed.type !== "snapshot") {
+        throw new Error("Expected refreshed grouped snapshot");
+      }
+      expect(refreshed.meta.version).toBe("1");
+      expect(refreshed.meta.totalRows).toBe(1);
+      expect(refreshed.rows[0]?.symbol).toBe("AAPL");
+      expect(
+        BigDecimal.equals(
+          expectBigDecimal(refreshed.rows[0]?.totalPrice),
+          BigDecimal.fromStringUnsafe("6.6"),
+        ),
+      ).toBe(true);
+      expect(
+        BigDecimal.equals(
+          expectBigDecimal(refreshed.rows[0]?.maxPrice),
+          BigDecimal.fromStringUnsafe("3.3"),
+        ),
+      ).toBe(true);
+
+      yield* worker.unsubscribe("chdb-decimal-grouped-refresh");
     }).pipe(Effect.scoped),
   );
 

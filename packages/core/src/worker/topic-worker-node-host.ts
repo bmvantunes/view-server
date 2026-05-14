@@ -62,6 +62,21 @@ export const makeNodeThreadTopicWorkerHostFactory = (
         ...(hostOptions.mutationLogSize === undefined
           ? {}
           : { mutationLogSize: hostOptions.mutationLogSize }),
+        ...(hostOptions.deltaCoalescing === undefined
+          ? {}
+          : { deltaCoalescing: hostOptions.deltaCoalescing }),
+        ...(hostOptions.maxActivePlans === undefined
+          ? {}
+          : { maxActivePlans: hostOptions.maxActivePlans }),
+        ...(hostOptions.maxActivePlanEstimatedBytes === undefined
+          ? {}
+          : { maxActivePlanEstimatedBytes: hostOptions.maxActivePlanEstimatedBytes }),
+        ...(hostOptions.activePlanBuildConcurrency === undefined
+          ? {}
+          : { activePlanBuildConcurrency: hostOptions.activePlanBuildConcurrency }),
+        ...(hostOptions.groupedRefreshDebounceMs === undefined
+          ? {}
+          : { groupedRefreshDebounceMs: hostOptions.groupedRefreshDebounceMs }),
         snapshotBackend,
       };
       const layer = RpcClient.layerProtocolWorker({ size: 1, concurrency: rpcConcurrency }).pipe(
@@ -102,6 +117,19 @@ function topicWorkerHostFromClient(
         rows: metrics.rows,
         subscribers: metrics.subscribers,
         queueDepth: metrics.queueDepth,
+        maxSubscriptionLagVersions: metrics.maxSubscriptionLagVersions,
+        totalSubscriptionLagVersions: metrics.totalSubscriptionLagVersions,
+        activePlanCount: metrics.activePlanCount,
+        activeViewCount: metrics.activeViewCount,
+        activePlanRows: metrics.activePlanRows,
+        activePlanIndexEstimatedBytes: metrics.activePlanIndexEstimatedBytes,
+        activePlanBuildQueueDepth: metrics.activePlanBuildQueueDepth,
+        activePlanBuildingCount: metrics.activePlanBuildingCount,
+        activePlanPendingCount: metrics.activePlanPendingCount,
+        activePlanBuildMs: metrics.activePlanBuildMs,
+        activePlanBuildMsTotal: metrics.activePlanBuildMsTotal,
+        activePlanBuildMsMax: metrics.activePlanBuildMsMax,
+        activePlanFallbackCount: metrics.activePlanFallbackCount,
         version: BigInt(metrics.version),
         status: metrics.status,
       })),

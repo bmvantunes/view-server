@@ -52,8 +52,8 @@ describe("browser websocket client", () => {
             symbol: `${runId}-B`,
             price: 200,
           });
-          const rows = yield* client.query("orders", pageQuery).pipe(Effect.timeout("1 second"));
-          expect(rows[0]?.id).toBe(`${runId}-2`);
+          const result = yield* client.query("orders", pageQuery).pipe(Effect.timeout("1 second"));
+          expect(result.rows[0]?.id).toBe(`${runId}-2`);
 
           const pageSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
           const topSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();

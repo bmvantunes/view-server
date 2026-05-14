@@ -2,7 +2,11 @@ import { defineConfig } from "vite-plus";
 
 export default defineConfig({
   pack: {
-    entry: ["src/index.ts", "src/worker/topic-worker-node-entry.ts"],
+    entry: [
+      "src/index.ts",
+      "src/worker/topic-worker-node-entry.ts",
+      "src/snapshot/chdb-query-worker-entry.ts",
+    ],
     dts: {
       tsgo: true,
     },

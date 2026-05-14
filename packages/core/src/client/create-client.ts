@@ -40,7 +40,7 @@ import {
   rpcSubscribePayload,
   rpcSubscriptionEvent,
 } from "./rpc-boundary.ts";
-import { SubscriptionStore } from "./subscription-store.ts";
+import { LiveQueryStore, type LiveQueryInitialData } from "./live-query-store.ts";
 
 export type RpcClientForViewServer = RpcClient.RpcClient<
   import("effect/unstable/rpc/RpcGroup").Rpcs<typeof ViewServerRpcs>,
@@ -73,6 +73,21 @@ export type ActiveSubscription = {
   readonly close: Effect.Effect<void>;
 };
 
+export type LiveQueryLifecycleEvent =
+  | {
+      readonly type: "attempt";
+      readonly requestId: string;
+      readonly attempt: number;
+    }
+  | {
+      readonly type: "retry";
+      readonly requestId: string;
+      readonly attempt: number;
+      readonly error: ViewServerError;
+    };
+
+export type LiveQueryLifecycleHandler = (event: LiveQueryLifecycleEvent) => Effect.Effect<void>;
+
 export type ViewServerClient<TConfig extends ViewServerConfig> = {
   readonly query: <
     TTopic extends ReadableTopicName<TConfig>,
@@ -80,7 +95,10 @@ export type ViewServerClient<TConfig extends ViewServerConfig> = {
   >(
     topic: TTopic,
     query: TQuery,
-  ) => Effect.Effect<InferReadableQueryResult<TConfig, TTopic, TQuery>, ViewServerError>;
+  ) => Effect.Effect<
+    LiveQueryInitialData<InferReadableQueryResult<TConfig, TTopic, TQuery>[number]>,
+    ViewServerError
+  >;
   readonly subscribe: <
     TTopic extends ReadableTopicName<TConfig>,
     TQuery extends QueryForReadableTopic<TConfig, TTopic>,
@@ -88,6 +106,7 @@ export type ViewServerClient<TConfig extends ViewServerConfig> = {
     topic: TTopic,
     query: TQuery,
     onEvent: (event: SubscriptionEvent<readonly RuntimeRow[]>) => Effect.Effect<void>,
+    onLifecycle?: LiveQueryLifecycleHandler,
   ) => Effect.Effect<ActiveSubscription, ViewServerError, Scope.Scope>;
   readonly publish: <TTopic extends TopicName<TConfig>>(
     topic: TTopic,
@@ -104,8 +123,8 @@ export type ViewServerClient<TConfig extends ViewServerConfig> = {
   >(
     topic: TTopic,
     query: TQuery,
-    initialData?: InferReadableQueryResult<TConfig, TTopic, TQuery>,
-  ) => Effect.Effect<SubscriptionStore, ViewServerError, Scope.Scope>;
+    initialData?: LiveQueryInitialData<InferReadableQueryResult<TConfig, TTopic, TQuery>[number]>,
+  ) => Effect.Effect<LiveQueryStore, ViewServerError, Scope.Scope>;
 };
 
 export function createViewServerClient<TConfig extends ViewServerConfig>(
@@ -129,28 +148,41 @@ export function createViewServerClient<TConfig extends ViewServerConfig>(
           "view_server.total_rows": response.totalRows,
           "view_server.worker_version": response.version,
         });
-        return yield* rpcQueryRows<TConfig, typeof topic, typeof query>(
+        const rows = yield* rpcQueryRows<TConfig, typeof topic, typeof query>(
           response,
           query,
           config,
           topic,
         );
+        return {
+          rows,
+          totalRows: response.totalRows,
+        };
       })().pipe(Effect.mapError(toViewServerError)),
 
-    subscribe: (topic, query, onEvent) =>
+    subscribe: (topic, query, onEvent, onLifecycle) =>
       Effect.fn("view-server.client.subscribe")(function* () {
         yield* Effect.annotateCurrentSpan({
           "view_server.topic": String(topic),
         });
         let closed = false;
         let currentRequestId = crypto.randomUUID();
+        let attempt = 0;
         const runAttempt = Effect.fn("view-server.client.subscribe.attempt")(function* () {
           currentRequestId = crypto.randomUUID();
+          attempt += 1;
           yield* Effect.annotateCurrentSpan({
             "view_server.request_id": currentRequestId,
             "view_server.subscription_id": currentRequestId,
             "view_server.topic": String(topic),
           });
+          yield* (
+            onLifecycle?.({
+              type: "attempt",
+              requestId: currentRequestId,
+              attempt,
+            }) ?? Effect.void
+          );
           const stream = rpcClient
             .Subscribe(
               rpcSubscribePayload<TConfig, typeof topic, typeof query>(
@@ -190,10 +222,30 @@ export function createViewServerClient<TConfig extends ViewServerConfig>(
           body: () =>
             runAttempt().pipe(
               Effect.catchTags({
-                TransportError: () => (!closed ? Effect.sleep("250 millis") : Effect.void),
-                BackpressureExceeded: () =>
+                TransportError: (error) =>
                   !closed
-                    ? rpcClient.Unsubscribe({ requestId: currentRequestId }).pipe(
+                    ? (
+                        onLifecycle?.({
+                          type: "retry",
+                          requestId: currentRequestId,
+                          attempt,
+                          error,
+                        }) ?? Effect.void
+                      ).pipe(Effect.flatMap(() => Effect.sleep("250 millis")))
+                    : Effect.void,
+                BackpressureExceeded: (error) =>
+                  !closed
+                    ? (
+                        onLifecycle?.({
+                          type: "retry",
+                          requestId: currentRequestId,
+                          attempt,
+                          error,
+                        }) ?? Effect.void
+                      ).pipe(
+                        Effect.flatMap(() =>
+                          rpcClient.Unsubscribe({ requestId: currentRequestId }),
+                        ),
                         Effect.ignore,
                         Effect.flatMap(() => Effect.sleep("250 millis")),
                       )
@@ -248,15 +300,28 @@ export function createViewServerClient<TConfig extends ViewServerConfig>(
         yield* Effect.annotateCurrentSpan({
           "view_server.topic": String(topic),
         });
-        const store = new SubscriptionStore(
-          queryResultToRuntimeRows<TConfig, typeof topic, typeof query>(initialData),
+        const store = new LiveQueryStore(
+          initialData === undefined
+            ? undefined
+            : {
+                rows: queryResultToRuntimeRows(initialData.rows),
+                totalRows: initialData.totalRows,
+              },
           rowKeyForTypedQuery<TConfig, typeof topic, typeof query>(query, idFieldForTopic(topic)),
         );
-        store.setStatus("snapshot_loading");
+        store.setStatus("syncing");
         const subscription = yield* createViewServerClient<TConfig>(rpcClient, config).subscribe(
           topic,
           query,
           (event) => Effect.sync(() => store.apply(event)),
+          (event) =>
+            Effect.sync(() => {
+              if (event.type === "attempt") {
+                store.beginAttempt(event.attempt);
+              } else {
+                store.retryAttempt(event.attempt);
+              }
+            }),
         );
         yield* Effect.addFinalizer(() => subscription.close);
         return store;

@@ -1,4 +1,5 @@
 import { Deferred, Effect, Schema } from "effect";
+import { AsyncResult } from "effect/unstable/reactivity";
 import React from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -6,6 +7,7 @@ import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
   defineConfig,
   type InferQueryResult,
+  type LiveQueryInitialData,
   type RawQuery,
   type RuntimeRow,
   type SubscriptionEvent,
@@ -123,7 +125,7 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-describe("useSubscription browser mode", () => {
+describe("useLiveQuery browser mode", () => {
   test("renders initial snapshot and live deltas from inMemoryViewServer", async () => {
     await Effect.runPromise(
       Effect.scoped(
@@ -136,8 +138,9 @@ describe("useSubscription browser mode", () => {
               ],
             },
           });
-          const initialRows = yield* Effect.promise(() => server.query("orders", query));
-          expect(initialRows[0]?.id).toBe("o-2");
+          const initialResult = yield* Effect.promise(() => server.query("orders", query));
+          expect(initialResult.rows[0]?.id).toBe("o-2");
+          expect(initialResult.totalRows).toBe(2);
           const initialHealth = yield* Effect.promise(() => server.health());
           expect(initialHealth.topics.orders.rows).toBe(2);
           const firstEvent = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
@@ -183,13 +186,17 @@ describe("useSubscription browser mode", () => {
             },
           });
 
-          renderGrid(server, [{ id: "o-1", price: 100 }]);
+          renderGrid(server, { rows: [{ id: "o-1", price: 100 }], totalRows: 25 });
 
           expect(document.body.textContent).toContain("o-1:100");
-          expect(document.body.textContent).toContain("rows=1");
+          expect(document.body.textContent).toContain("rows=25");
+          expect(document.body.textContent).toContain("stale");
+          expect(document.body.textContent).toContain("waiting=true");
 
           yield* Effect.promise(() => waitForText("o-2:200"));
           expect(document.body.textContent).toContain("rows=1");
+          expect(document.body.textContent).toContain("live");
+          expect(document.body.textContent).toContain("waiting=false");
           expect(document.body.textContent).not.toContain("o-1:100");
         }),
       ),
@@ -264,7 +271,7 @@ describe("useSubscription browser mode", () => {
     );
   });
 
-  test("applies grouped aggregate deltas using groupBy fields as stable row keys", async () => {
+  test("refreshes grouped aggregate subscriptions using groupBy fields as stable row keys", async () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -300,7 +307,10 @@ describe("useSubscription browser mode", () => {
   });
 });
 
-function renderGrid(server: InMemoryViewServer<typeof config>, initialData?: OrdersGridRows) {
+function renderGrid(
+  server: InMemoryViewServer<typeof config>,
+  initialData?: LiveQueryInitialData<OrdersGridRows[number]>,
+) {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -334,18 +344,29 @@ function renderGroupedGrid(server: InMemoryViewServer<typeof config>) {
 
 function OrdersGrid(props: {
   readonly server: InMemoryViewServer<typeof config>;
-  readonly initialData?: OrdersGridRows | undefined;
+  readonly initialData?: LiveQueryInitialData<OrdersGridRows[number]> | undefined;
 }) {
-  const result = props.server.hooks.useSubscription("orders", query, props.initialData);
-  return (
-    <div>
-      <div>{result.status}</div>
-      <div>rows={result.totalRows}</div>
-      {result.data.map((row) => (
-        <OrderLine key={row.id} row={row} />
-      ))}
-    </div>
-  );
+  const result = props.server.hooks.useLiveQuery("orders", query, props.initialData);
+  return AsyncResult.match(result, {
+    onInitial: () => (
+      <div>
+        <div>connecting</div>
+        <div>waiting=true</div>
+        <div>rows=0</div>
+      </div>
+    ),
+    onFailure: () => <div>error</div>,
+    onSuccess: ({ value }) => (
+      <div>
+        <div>{value.status}</div>
+        <div>waiting={String(result.waiting)}</div>
+        <div>rows={value.totalRows}</div>
+        {value.rows.map((row) => (
+          <OrderLine key={row.id} row={row} />
+        ))}
+      </div>
+    ),
+  });
 }
 
 const OrderLine = React.memo(function OrderLine(props: { readonly row: OrdersGridRows[number] }) {
@@ -358,48 +379,75 @@ const OrderLine = React.memo(function OrderLine(props: { readonly row: OrdersGri
 });
 
 function PagedOrdersGrid(props: { readonly server: InMemoryViewServer<typeof config> }) {
-  const result = props.server.hooks.useSubscription("orders", pagedQuery);
-  return (
-    <div>
-      <div>{result.status}</div>
-      <div>rows={result.totalRows}</div>
-      {result.data.map((row) => (
-        <div key={row.id}>
-          {row.id}:{row.symbol}:{row.price}
-        </div>
-      ))}
-    </div>
-  );
+  const result = props.server.hooks.useLiveQuery("orders", pagedQuery);
+  return AsyncResult.match(result, {
+    onInitial: () => (
+      <div>
+        <div>connecting</div>
+        <div>rows=0</div>
+      </div>
+    ),
+    onFailure: () => <div>error</div>,
+    onSuccess: ({ value }) => (
+      <div>
+        <div>{value.status}</div>
+        <div>rows={value.totalRows}</div>
+        {value.rows.map((row) => (
+          <div key={row.id}>
+            {row.id}:{row.symbol}:{row.price}
+          </div>
+        ))}
+      </div>
+    ),
+  });
 }
 
 function StringOrdersGrid(props: { readonly server: InMemoryViewServer<typeof config> }) {
-  const result = props.server.hooks.useSubscription("orders", stringQuery);
-  return (
-    <div>
-      <div>{result.status}</div>
-      <div>rows={result.totalRows}</div>
-      {result.data.map((row) => (
-        <div key={row.id} data-string-row="">
-          {row.id}:{row.symbol}:{row.price}
-        </div>
-      ))}
-    </div>
-  );
+  const result = props.server.hooks.useLiveQuery("orders", stringQuery);
+  return AsyncResult.match(result, {
+    onInitial: () => (
+      <div>
+        <div>connecting</div>
+        <div>rows=0</div>
+      </div>
+    ),
+    onFailure: () => <div>error</div>,
+    onSuccess: ({ value }) => (
+      <div>
+        <div>{value.status}</div>
+        <div>rows={value.totalRows}</div>
+        {value.rows.map((row) => (
+          <div key={row.id} data-string-row="">
+            {row.id}:{row.symbol}:{row.price}
+          </div>
+        ))}
+      </div>
+    ),
+  });
 }
 
 function GroupedTradesGrid(props: { readonly server: InMemoryViewServer<typeof config> }) {
-  const result = props.server.hooks.useSubscription("trades", groupedQuery);
-  return (
-    <div>
-      <div>{result.status}</div>
-      <div>rows={result.totalRows}</div>
-      {result.data.map((row) => (
-        <div key={row.region} data-grouped-row="">
-          {row.region}:{row.trades}:{row.traders}:{row.totalQty}
-        </div>
-      ))}
-    </div>
-  );
+  const result = props.server.hooks.useLiveQuery("trades", groupedQuery);
+  return AsyncResult.match(result, {
+    onInitial: () => (
+      <div>
+        <div>connecting</div>
+        <div>rows=0</div>
+      </div>
+    ),
+    onFailure: () => <div>error</div>,
+    onSuccess: ({ value }) => (
+      <div>
+        <div>{value.status}</div>
+        <div>rows={value.totalRows}</div>
+        {value.rows.map((row) => (
+          <div key={row.region} data-grouped-row="">
+            {row.region}:{row.trades}:{row.traders}:{row.totalQty}
+          </div>
+        ))}
+      </div>
+    ),
+  });
 }
 
 function stringRows(): string[] {
@@ -414,12 +462,20 @@ function groupedRows(): string[] {
 }
 
 async function waitForText(text: string): Promise<void> {
+  await waitForCondition(() => Boolean(document.body.textContent?.includes(text)), text);
+}
+
+async function waitForCondition(
+  condition: () => boolean | Promise<boolean>,
+  label = "condition",
+  timeoutMs = 5_000,
+): Promise<void> {
   const startedAt = Date.now();
-  while (Date.now() - startedAt < 5_000) {
-    if (document.body.textContent?.includes(text)) {
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await condition()) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error(`Timed out waiting for text: ${text}`);
+  throw new Error(`Timed out waiting for ${label}`);
 }

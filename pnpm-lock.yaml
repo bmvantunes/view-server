@@ -6,6 +6,9 @@ settings:
 
 catalogs:
   default:
+    '@effect/language-service':
+      specifier: 0.86.1
+      version: 0.86.1
     '@effect/platform-browser':
       specifier: 4.0.0-beta.65
       version: 4.0.0-beta.65
@@ -69,6 +72,9 @@ importers:
 
   .:
     devDependencies:
+      '@effect/language-service':
+        specifier: 'catalog:'
+        version: 0.86.1
       vite-plus:
         specifier: 'catalog:'
         version: 0.1.20(@types/node@25.6.2)(@vitest/coverage-v8@4.1.5)(jiti@2.7.0)(typescript@6.0.3)(vite@8.0.11(@types/node@25.6.2)(jiti@2.7.0)(yaml@2.8.4))(yaml@2.8.4)
@@ -413,6 +419,10 @@ packages:
   '@clickhouse/client@1.18.4':
     resolution: {integrity: sha512-jjCrddI+e2OVXGh/MQY92K9r8Z/iwqaZtUXNI/MfZ/y9VGYwfbQsXRzp4Jv6w4Hgxvr4sLcz9YwIvkCBQ6X/mw==}
     engines: {node: '>=16'}
+
+  '@effect/language-service@0.86.1':
+    resolution: {integrity: sha512-jfUuFdtNPKRZ4ZSrgTnfMHPIVq8L9cM+YGEylQ1lhIgNY23ZvfdPg0cUlWESd4q9aGvOWSA8E79AS0qe3j4ROw==}
+    hasBin: true
 
   '@effect/platform-browser@4.0.0-beta.65':
     resolution: {integrity: sha512-w+79bFERZIJq2AmjCcnW8Uei1nv3S8q/4gEreUhW7VORuWuCsGZvUrQgjtNrftnzA3bPk78PBvGIJgYrz1IV0g==}
@@ -2451,6 +2461,8 @@ snapshots:
   '@clickhouse/client@1.18.4':
     dependencies:
       '@clickhouse/client-common': 1.18.4
+
+  '@effect/language-service@0.86.1': {}
 
   '@effect/platform-browser@4.0.0-beta.65(effect@4.0.0-beta.65)':
     dependencies:

@@ -17,6 +17,8 @@ export type SnapshotBackendResult = {
 };
 
 export interface SnapshotBackend {
+  readonly supportsGroupedRefreshSnapshots?: boolean | undefined;
+
   readonly init: (args: {
     readonly topic: string;
     readonly idField: string;
@@ -31,6 +33,11 @@ export interface SnapshotBackend {
   }) => Effect.Effect<void, ViewServerError>;
 
   readonly snapshot: (args: {
+    readonly query: RuntimeQuery;
+    readonly targetVersion: WorkerVersion;
+  }) => Effect.Effect<SnapshotBackendResult, ViewServerError>;
+
+  readonly groupedRefreshSnapshot?: (args: {
     readonly query: RuntimeQuery;
     readonly targetVersion: WorkerVersion;
   }) => Effect.Effect<SnapshotBackendResult, ViewServerError>;

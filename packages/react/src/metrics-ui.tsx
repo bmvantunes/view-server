@@ -1,6 +1,10 @@
+import { Option } from "effect";
+import { AsyncResult } from "effect/unstable/reactivity";
 import {
-  type SubscriptionStatus,
   VIEW_SERVER_HEALTH_TOPIC,
+  type InferReadableQueryResult,
+  type LiveQueryResult,
+  type LiveQueryValue,
   type RawQuery,
   type ViewServerHealthRow,
 } from "@view-server/core";
@@ -13,6 +17,19 @@ export const viewServerHealthQuery = {
     rows: true,
     subscribers: true,
     queueDepth: true,
+    maxSubscriptionLagVersions: true,
+    totalSubscriptionLagVersions: true,
+    activePlanCount: true,
+    activeViewCount: true,
+    activePlanRows: true,
+    activePlanIndexEstimatedBytes: true,
+    activePlanBuildQueueDepth: true,
+    activePlanBuildingCount: true,
+    activePlanPendingCount: true,
+    activePlanBuildMs: true,
+    activePlanBuildMsTotal: true,
+    activePlanBuildMsMax: true,
+    activePlanFallbackCount: true,
     workerLagP95Ms: true,
     deltaFanoutP95Ms: true,
     publishLatencyP95Ms: true,
@@ -38,6 +55,19 @@ export const viewServerHealthQuery = {
     readonly rows: true;
     readonly subscribers: true;
     readonly queueDepth: true;
+    readonly maxSubscriptionLagVersions: true;
+    readonly totalSubscriptionLagVersions: true;
+    readonly activePlanCount: true;
+    readonly activeViewCount: true;
+    readonly activePlanRows: true;
+    readonly activePlanIndexEstimatedBytes: true;
+    readonly activePlanBuildQueueDepth: true;
+    readonly activePlanBuildingCount: true;
+    readonly activePlanPendingCount: true;
+    readonly activePlanBuildMs: true;
+    readonly activePlanBuildMsTotal: true;
+    readonly activePlanBuildMsMax: true;
+    readonly activePlanFallbackCount: true;
     readonly workerLagP95Ms: true;
     readonly deltaFanoutP95Ms: true;
     readonly publishLatencyP95Ms: true;
@@ -54,29 +84,36 @@ export const viewServerHealthQuery = {
   }
 >;
 
+type MetricsViewServerConfig = { readonly topics: {} };
+export type ViewServerMetricsRow = InferReadableQueryResult<
+  MetricsViewServerConfig,
+  typeof VIEW_SERVER_HEALTH_TOPIC,
+  typeof viewServerHealthQuery
+>[number];
+
 export type ViewServerMetricsHooks = {
-  readonly useSubscription: (
+  readonly useLiveQuery: (
     topic: typeof VIEW_SERVER_HEALTH_TOPIC,
     query: typeof viewServerHealthQuery,
-  ) => {
-    readonly data: readonly ViewServerHealthRow[];
-    readonly totalRows: number;
-    readonly status: SubscriptionStatus;
-    readonly error?: unknown;
-  };
+  ) => LiveQueryResult<ViewServerMetricsRow>;
 };
 
 export function ViewServerMetricsDashboard(props: {
   readonly hooks: ViewServerMetricsHooks;
   readonly title?: string | undefined;
 }) {
-  const result = props.hooks.useSubscription(VIEW_SERVER_HEALTH_TOPIC, viewServerHealthQuery);
-  const rows = result.data;
+  const result = props.hooks.useLiveQuery(VIEW_SERVER_HEALTH_TOPIC, viewServerHealthQuery);
+  const value = AsyncResult.match(result, {
+    onInitial: () => emptyMetricsValue,
+    onFailure: (failure) => Option.getOrElse(AsyncResult.value(failure), () => emptyMetricsValue),
+    onSuccess: (success) => success.value,
+  });
+  const rows = value.rows;
   const server = rows.find((row) => row.kind === "server");
   const topics = rows
     .filter((row) => row.kind === "topic")
     .toSorted((left, right) => String(left.topic ?? "").localeCompare(String(right.topic ?? "")));
-  const status = server?.status ?? (result.status === "error" ? "degraded" : "stopping");
+  const status = server?.status ?? (value.status === "reconnecting" ? "degraded" : "stopping");
 
   return (
     <section className="vs-metrics" data-status={status}>
@@ -89,7 +126,7 @@ export function ViewServerMetricsDashboard(props: {
         <div className="vs-metrics__status" data-status={status}>
           <span aria-hidden="true" />
           <strong>{status}</strong>
-          <small>{result.status}</small>
+          <small>{value.status}</small>
         </div>
       </header>
 
@@ -97,7 +134,11 @@ export function ViewServerMetricsDashboard(props: {
         <MetricCell label="rows" value={formatCount(server?.rows)} />
         <MetricCell label="subscribers" value={formatCount(server?.subscribers)} />
         <MetricCell label="queue" value={formatCount(server?.queueDepth)} />
-        <MetricCell label="topics" value={formatCount(topics.length)} />
+        <MetricCell label="sub lag" value={formatCount(server?.maxSubscriptionLagVersions)} />
+        <MetricCell label="plans" value={formatCount(server?.activePlanCount)} />
+        <MetricCell label="plan queue" value={formatCount(server?.activePlanBuildQueueDepth)} />
+        <MetricCell label="indexed rows" value={formatCount(server?.activePlanRows)} />
+        <MetricCell label="fallbacks" value={formatCount(server?.activePlanFallbackCount)} />
       </div>
 
       <div className="vs-metrics__latency" aria-label="Latency signals">
@@ -106,6 +147,9 @@ export function ViewServerMetricsDashboard(props: {
         <SignalCell label="snapshot p95" value={formatMs(server?.snapshotLatencyP95Ms)} />
         <SignalCell label="worker lag" value={formatMs(server?.workerLagP95Ms)} />
         <SignalCell label="kafka lag" value={formatCount(server?.kafkaLagTotal)} />
+        <SignalCell label="plan build" value={formatMs(server?.activePlanBuildMs)} />
+        <SignalCell label="plan build max" value={formatMs(server?.activePlanBuildMsMax)} />
+        <SignalCell label="plan index" value={formatBytes(server?.activePlanIndexEstimatedBytes)} />
       </div>
 
       <div className="vs-metrics__topics" aria-label="Topic health">
@@ -115,6 +159,14 @@ export function ViewServerMetricsDashboard(props: {
           <span>rows</span>
           <span>subs</span>
           <span>queue</span>
+          <span>sub lag</span>
+          <span>plans</span>
+          <span>builds</span>
+          <span>pending</span>
+          <span>views</span>
+          <span>fallbacks</span>
+          <span>indexed rows</span>
+          <span>index</span>
           <span>lag</span>
           <span>updated</span>
         </div>
@@ -125,6 +177,17 @@ export function ViewServerMetricsDashboard(props: {
             <span>{formatCount(topic.rows)}</span>
             <span>{formatCount(topic.subscribers)}</span>
             <span>{formatCount(topic.queueDepth)}</span>
+            <span>{formatCount(topic.maxSubscriptionLagVersions)}</span>
+            <span>{formatCount(topic.activePlanCount)}</span>
+            <span>
+              {formatCount(topic.activePlanBuildingCount)}/
+              {formatCount(topic.activePlanBuildQueueDepth)}
+            </span>
+            <span>{formatCount(topic.activePlanPendingCount)}</span>
+            <span>{formatCount(topic.activeViewCount)}</span>
+            <span>{formatCount(topic.activePlanFallbackCount)}</span>
+            <span>{formatCount(topic.activePlanRows)}</span>
+            <span>{formatBytes(topic.activePlanIndexEstimatedBytes)}</span>
             <span>{formatCount(topic.kafkaLagTotal)}</span>
             <span>{formatTime(topic.updatedAt)}</span>
           </div>
@@ -133,6 +196,16 @@ export function ViewServerMetricsDashboard(props: {
     </section>
   );
 }
+
+const emptyMetricsValue: LiveQueryValue<ViewServerMetricsRow> = {
+  rows: [],
+  totalRows: 0,
+  status: "connecting",
+  connection: {
+    connected: false,
+    attempt: 0,
+  },
+};
 
 function MetricCell(props: { readonly label: string; readonly value: string }) {
   return (
@@ -158,6 +231,21 @@ function formatCount(value: number | undefined): string {
 
 function formatMs(value: number | undefined): string {
   return `${value ?? 0}ms`;
+}
+
+function formatBytes(value: number | undefined): string {
+  if (value === undefined || value === 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"] as const;
+  let unitIndex = 0;
+  let scaled = value;
+  while (scaled >= 1024 && unitIndex < units.length - 1) {
+    scaled = scaled / 1024;
+    unitIndex++;
+  }
+  const digits = scaled >= 100 || unitIndex === 0 ? 0 : 1;
+  return `${scaled.toFixed(digits)} ${units[unitIndex] ?? "GB"}`;
 }
 
 function formatTime(value: bigint | undefined): string {
@@ -278,7 +366,7 @@ export const metricsDashboardCss = `
 
 .vs-metrics__summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 1px;
   margin-top: 16px;
   background: rgba(154, 181, 164, 0.24);
@@ -300,7 +388,7 @@ export const metricsDashboardCss = `
 
 .vs-metrics__latency {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 8px;
   margin-top: 12px;
 }
@@ -330,7 +418,7 @@ export const metricsDashboardCss = `
 .vs-metrics__topic-head,
 .vs-metrics__topic-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1.4fr) 100px repeat(4, minmax(70px, 0.7fr)) 120px;
+  grid-template-columns: minmax(140px, 1.4fr) 92px repeat(12, minmax(70px, 0.7fr)) 120px;
   gap: 10px;
   align-items: center;
   min-height: 42px;
@@ -383,7 +471,7 @@ export const metricsDashboardCss = `
 
   .vs-metrics__topic-head,
   .vs-metrics__topic-row {
-    min-width: 760px;
+    min-width: 1120px;
   }
 }
 `;

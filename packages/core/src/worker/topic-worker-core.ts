@@ -1,4 +1,4 @@
-import { Effect, Queue, Schema, Semaphore, Stream } from "effect";
+import { Effect, Option, Queue, Schema, Semaphore, Stream } from "effect";
 import type * as Cause from "effect/Cause";
 import type * as Scope from "effect/Scope";
 import type { TopicConfig } from "../config/index.ts";
@@ -11,21 +11,38 @@ import {
   type ViewServerError,
 } from "../errors.ts";
 import type {
+  DeltaOperation,
   DeltaEvent,
   QueryResponse,
   RuntimeQuery,
+  RuntimeGroupedQuery,
+  RuntimeRawQuery,
   RuntimeRow,
+  LiveQueryStatusEvent,
   SnapshotEvent,
   SubscriptionEvent,
 } from "../protocol/index.ts";
 import type { SnapshotBackend, SnapshotBackendResult } from "../snapshot/index.ts";
 import { createMemorySnapshotBackend } from "../snapshot/index.ts";
+import {
+  activeRawPlanKey,
+  estimateActiveRawPlanIndexBytes,
+  estimateActiveRawPlanIndexBytesEffect,
+  makeActiveRawPlanEffect,
+  makeActiveRawViewFromPlan,
+  type ActiveRawPlan,
+  type ActiveRawView,
+  type ActiveRawViewChange,
+} from "./active-view.ts";
 import { MutationLog, type MutationLogEntry, type WorkerVersion } from "./mutation-log.ts";
 import {
   changedFields,
   collectDependencyFields,
   diffVisibleRows,
+  executeGroupedQueryEffect,
   executeMemoryQuery,
+  isGroupedQuery,
+  matchesFilter,
   type QueryExecutionResult,
   rowKeyForMemoryQuery,
   rowId,
@@ -36,6 +53,19 @@ export type TopicWorkerMetrics = {
   readonly subscribers: number;
   readonly version: WorkerVersion;
   readonly queueDepth: number;
+  readonly maxSubscriptionLagVersions: number;
+  readonly totalSubscriptionLagVersions: number;
+  readonly activePlanCount: number;
+  readonly activeViewCount: number;
+  readonly activePlanRows: number;
+  readonly activePlanIndexEstimatedBytes: number;
+  readonly activePlanBuildQueueDepth: number;
+  readonly activePlanBuildingCount: number;
+  readonly activePlanPendingCount: number;
+  readonly activePlanBuildMs: number;
+  readonly activePlanBuildMsTotal: number;
+  readonly activePlanBuildMsMax: number;
+  readonly activePlanFallbackCount: number;
   readonly status: "ready" | "degraded" | "stopping";
 };
 
@@ -70,6 +100,48 @@ type ActiveSubscription = {
   lastRows: readonly RuntimeRow[];
   lastTotalRows: number;
   lastVersion: WorkerVersion;
+  pendingLagVersions: bigint;
+  activeView?: ActiveRawView | undefined;
+  activePlanKey?: string | undefined;
+  activePlanBuildKey?: string | undefined;
+  activePlanFallback?: boolean | undefined;
+  dirtyTargetVersion?: WorkerVersion | undefined;
+  groupedRefreshScheduled?: boolean | undefined;
+  groupedRefreshInFlight?: boolean | undefined;
+};
+
+type MaterializedSubscriptionChange = {
+  readonly operations: readonly DeltaOperation<RuntimeRow>[];
+  readonly nextRows?: readonly RuntimeRow[] | undefined;
+  readonly totalRows: number;
+};
+
+type ActiveRawPlanEntry = {
+  readonly plan: ActiveRawPlan;
+  readonly buildMs: number;
+  subscribers: number;
+};
+
+type ActivePlanBuildEntry = {
+  readonly key: string;
+  readonly query: RuntimeRawQuery;
+  readonly requestIds: Set<string>;
+  state: "queued" | "building";
+};
+
+type ActivePlanBuildSnapshot = {
+  readonly key: string;
+  readonly query: RuntimeRawQuery;
+  readonly rows: readonly RuntimeRow[];
+  readonly version: WorkerVersion;
+  readonly remainingEstimatedBytes: number | undefined;
+};
+
+type GroupedRefreshSnapshot = {
+  readonly requestId: string;
+  readonly query: RuntimeGroupedQuery;
+  readonly rows: readonly RuntimeRow[];
+  readonly version: WorkerVersion;
 };
 
 export type TopicWorkerCoreOptions = {
@@ -77,6 +149,13 @@ export type TopicWorkerCoreOptions = {
   readonly snapshotBackend?: SnapshotBackend | undefined;
   readonly maxQueueDepth?: number | undefined;
   readonly mutationLogSize?: number | undefined;
+  readonly deltaCoalescing?: boolean | undefined;
+  readonly maxActivePlans?: number | undefined;
+  readonly maxActivePlanEstimatedBytes?: number | undefined;
+  readonly activePlanBuildConcurrency?: number | undefined;
+  readonly activePlanBuildChunkSize?: number | undefined;
+  readonly groupedRefreshDebounceMs?: number | undefined;
+  readonly groupedRefreshChunkSize?: number | undefined;
 };
 
 export function makeTopicWorkerCore(
@@ -93,13 +172,24 @@ export function makeTopicWorkerCore(
     const literalStringFields = literalStringFieldsForSchema(config.schema);
     const backend = options.snapshotBackend ?? createMemorySnapshotBackend();
     const maxQueueDepth = options.maxQueueDepth ?? 100_000;
+    const deltaCoalescing = options.deltaCoalescing ?? true;
+    const maxActivePlans = options.maxActivePlans;
+    const maxActivePlanEstimatedBytes = options.maxActivePlanEstimatedBytes;
+    const activePlanBuildConcurrency = Math.max(1, options.activePlanBuildConcurrency ?? 1);
+    const activePlanBuildChunkSize = options.activePlanBuildChunkSize;
+    const groupedRefreshDebounceMs = Math.max(0, options.groupedRefreshDebounceMs ?? 50);
+    const groupedRefreshChunkSize = options.groupedRefreshChunkSize;
     const mutationLog = new MutationLog(options.mutationLogSize ?? 10_000);
     const gate = yield* Semaphore.make(1);
+    const activePlanBuildQueue = yield* Queue.unbounded<string>();
     const scope = yield* Effect.scope;
     const subscriptions = new Map<string, ActiveSubscription>();
+    const activePlans = new Map<string, ActiveRawPlanEntry>();
+    const activePlanBuilds = new Map<string, ActivePlanBuildEntry>();
     let rows: RuntimeRow[] = [];
     let idIndex = new Map<string | number, number>();
     let version: WorkerVersion = 0n;
+    let lastActivePlanBuildMs = 0;
     let status: TopicWorkerMetrics["status"] = "ready";
 
     const decodeRow = (input: unknown) =>
@@ -221,6 +311,9 @@ export function makeTopicWorkerCore(
       toVersion: WorkerVersion,
       mutation: MutationLogEntry,
     ) {
+      for (const entry of activePlans.values()) {
+        entry.plan.applyMutation(mutation);
+      }
       yield* Effect.forEach(
         subscriptions.values(),
         (subscription) => {
@@ -230,20 +323,43 @@ export function makeTopicWorkerCore(
           ) {
             return Effect.void;
           }
-          const next = memoryQuery(subscription.query);
-          const operations = diffVisibleRows(
-            subscription.lastRows,
-            next.rows,
-            rowKeyForMemoryQuery(subscription.query, idField),
-          );
-          if (operations.length === 0 && subscription.lastTotalRows === next.totalRows) {
+          if (isGroupedQuery(subscription.query)) {
+            return markGroupedSubscriptionDirty(subscription, toVersion);
+          }
+          if (isPendingActivePlanSubscription(subscription)) {
+            return markPendingActivePlanSubscriptionDirty(subscription, toVersion, mutation);
+          }
+          const materialized =
+            subscription.activeView === undefined
+              ? materializeMemorySubscriptionChange(subscription)
+              : materializeActiveViewSubscriptionChange(
+                  subscription,
+                  subscription.activeView.applyMutation(mutation),
+                );
+          if (materialized === undefined) {
             subscription.lastVersion = toVersion;
             return Effect.void;
           }
           return Effect.gen(function* () {
-            const depth = yield* Queue.size(subscription.queue);
-            if (wouldExceedQueueLimit(depth)) {
-              subscriptions.delete(subscription.requestId);
+            const event: DeltaEvent<readonly RuntimeRow[]> = {
+              type: "delta",
+              requestId: subscription.requestId,
+              ops: materialized.operations,
+              meta: {
+                fromVersion: fromVersion.toString(),
+                toVersion: toVersion.toString(),
+                totalRows: materialized.totalRows,
+                serverTime: Date.now(),
+              },
+            };
+            if (materialized.nextRows !== undefined) {
+              subscription.lastRows = materialized.nextRows;
+            }
+            subscription.lastTotalRows = materialized.totalRows;
+            subscription.lastVersion = toVersion;
+            const offered = yield* offerDelta(subscription, event);
+            if (!offered) {
+              removeSubscription(subscription.requestId);
               yield* Queue.fail(
                 subscription.queue,
                 backpressureExceeded(
@@ -253,26 +369,290 @@ export function makeTopicWorkerCore(
               );
               return;
             }
-            const event: DeltaEvent<readonly RuntimeRow[]> = {
-              type: "delta",
-              requestId: subscription.requestId,
-              ops: operations,
-              meta: {
-                fromVersion: fromVersion.toString(),
-                toVersion: toVersion.toString(),
-                totalRows: next.totalRows,
-                serverTime: Date.now(),
-              },
-            };
-            subscription.lastRows = next.rows;
-            subscription.lastTotalRows = next.totalRows;
-            subscription.lastVersion = toVersion;
-            yield* Queue.offer(subscription.queue, event);
           });
         },
         { discard: true },
       );
     });
+
+    const materializeMemorySubscriptionChange = (
+      subscription: ActiveSubscription,
+    ): MaterializedSubscriptionChange | undefined => {
+      const next = memoryQuery(subscription.query);
+      const operations = diffVisibleRows(
+        subscription.lastRows,
+        next.rows,
+        rowKeyForMemoryQuery(subscription.query, idField),
+      );
+      return operations.length === 0 && subscription.lastTotalRows === next.totalRows
+        ? undefined
+        : {
+            operations,
+            nextRows: next.rows,
+            totalRows: next.totalRows,
+          };
+    };
+
+    const materializeActiveViewSubscriptionChange = (
+      subscription: ActiveSubscription,
+      change: ActiveRawViewChange,
+    ): MaterializedSubscriptionChange | undefined => {
+      switch (change.type) {
+        case "noop":
+          return undefined;
+        case "totalRowsOnly":
+          return {
+            operations: [],
+            totalRows: change.totalRows,
+          };
+        case "changed": {
+          const operations = diffVisibleRows(
+            subscription.lastRows,
+            change.result.rows,
+            rowKeyForMemoryQuery(subscription.query, idField),
+          );
+          return operations.length === 0 && subscription.lastTotalRows === change.result.totalRows
+            ? undefined
+            : {
+                operations,
+                nextRows: change.result.rows,
+                totalRows: change.result.totalRows,
+              };
+        }
+      }
+    };
+
+    const isPendingActivePlanSubscription = (subscription: ActiveSubscription): boolean =>
+      subscription.activePlanBuildKey !== undefined &&
+      subscription.activePlanFallback !== true &&
+      subscription.activeView === undefined &&
+      !isGroupedQuery(subscription.query);
+
+    const markPendingActivePlanSubscriptionDirty = Effect.fnUntraced(function* (
+      subscription: ActiveSubscription,
+      targetVersion: WorkerVersion,
+      mutation: MutationLogEntry,
+    ) {
+      if (isGroupedQuery(subscription.query)) {
+        return;
+      }
+      subscription.dirtyTargetVersion = targetVersion;
+      subscription.lastTotalRows = pendingActivePlanTotalRows(
+        subscription.lastTotalRows,
+        subscription.query,
+        mutation,
+      );
+      const offered = yield* offerStatusEvent(subscription, {
+        type: "status",
+        requestId: subscription.requestId,
+        status: "stale",
+        meta: {
+          version: targetVersion.toString(),
+          totalRows: subscription.lastTotalRows,
+          serverTime: Date.now(),
+        },
+      });
+      if (!offered) {
+        removeSubscription(subscription.requestId);
+        yield* Queue.fail(
+          subscription.queue,
+          backpressureExceeded(
+            subscription.requestId,
+            `Subscription ${subscription.requestId} exceeded maxQueueDepth ${maxQueueDepth}`,
+          ),
+        );
+      }
+    });
+
+    const markGroupedSubscriptionDirty = Effect.fnUntraced(function* (
+      subscription: ActiveSubscription,
+      targetVersion: WorkerVersion,
+    ) {
+      subscription.dirtyTargetVersion = targetVersion;
+      const offered = yield* offerStatusEvent(subscription, {
+        type: "status",
+        requestId: subscription.requestId,
+        status: "stale",
+        meta: {
+          version: targetVersion.toString(),
+          totalRows: subscription.lastTotalRows,
+          serverTime: Date.now(),
+        },
+      });
+      if (!offered) {
+        removeSubscription(subscription.requestId);
+        yield* Queue.fail(
+          subscription.queue,
+          backpressureExceeded(
+            subscription.requestId,
+            `Subscription ${subscription.requestId} exceeded maxQueueDepth ${maxQueueDepth}`,
+          ),
+        );
+        return;
+      }
+      if (subscription.groupedRefreshInFlight !== true) {
+        yield* scheduleGroupedSubscriptionRefresh(subscription.requestId);
+      }
+    });
+
+    function scheduleGroupedSubscriptionRefresh(
+      requestId: string,
+    ): Effect.Effect<void, ViewServerError> {
+      return Effect.gen(function* () {
+        const subscription = subscriptions.get(requestId);
+        if (
+          subscription === undefined ||
+          subscription.groupedRefreshScheduled === true ||
+          subscription.groupedRefreshInFlight === true
+        ) {
+          return;
+        }
+        subscription.groupedRefreshScheduled = true;
+        yield* runGroupedRefresh(requestId).pipe(
+          Effect.catchCause(() => gate.withPermit(resetGroupedRefresh(requestId))),
+          Effect.forkIn(scope),
+          Effect.asVoid,
+        );
+      });
+    }
+
+    const runGroupedRefresh = Effect.fn("view-server.worker.grouped.refresh")(function* (
+      requestId: string,
+    ) {
+      if (groupedRefreshDebounceMs > 0) {
+        yield* Effect.sleep(`${groupedRefreshDebounceMs} millis`);
+      }
+      const snapshot = yield* gate.withPermit(Effect.sync(() => beginGroupedRefresh(requestId)));
+      if (snapshot === undefined) {
+        return;
+      }
+      yield* Effect.annotateCurrentSpan({
+        "view_server.request_id": requestId,
+        "view_server.subscription_id": requestId,
+        "view_server.topic": topic,
+        "view_server.worker_version": snapshot.version.toString(),
+        "view_server.rows": snapshot.rows.length,
+      });
+      const result = yield* groupedRefreshQuery(snapshot);
+      yield* Effect.annotateCurrentSpan({
+        "view_server.rows": result.rows.length,
+        "view_server.total_rows": result.totalRows,
+      });
+      yield* gate.withPermit(installGroupedRefresh(snapshot, result));
+    });
+
+    const groupedRefreshQuery = Effect.fn("view-server.worker.grouped.snapshot")(function* (
+      snapshot: GroupedRefreshSnapshot,
+    ) {
+      if (
+        backend.supportsGroupedRefreshSnapshots === true &&
+        backend.groupedRefreshSnapshot !== undefined
+      ) {
+        const accelerated = yield* backend
+          .groupedRefreshSnapshot({
+            query: snapshot.query,
+            targetVersion: snapshot.version,
+          })
+          .pipe(
+            Effect.map((candidate) =>
+              candidate.backendVersion === snapshot.version
+                ? Option.some({
+                    rows: candidate.rows,
+                    totalRows: candidate.totalRows,
+                  })
+                : Option.none<QueryExecutionResult>(),
+            ),
+            Effect.catchTag("SnapshotBackendFailed", () =>
+              Effect.succeed(Option.none<QueryExecutionResult>()),
+            ),
+          );
+        if (Option.isSome(accelerated)) {
+          yield* Effect.annotateCurrentSpan({
+            "view_server.backend_version": snapshot.version.toString(),
+          });
+          return accelerated.value;
+        }
+      }
+      return yield* executeGroupedQueryEffect(snapshot.rows, snapshot.query, {
+        literalStringFields,
+        chunkSize: groupedRefreshChunkSize,
+      });
+    });
+
+    function beginGroupedRefresh(requestId: string): GroupedRefreshSnapshot | undefined {
+      const subscription = subscriptions.get(requestId);
+      if (subscription === undefined) {
+        return undefined;
+      }
+      subscription.groupedRefreshScheduled = false;
+      if (!isGroupedQuery(subscription.query) || subscription.dirtyTargetVersion === undefined) {
+        return undefined;
+      }
+      subscription.groupedRefreshInFlight = true;
+      return {
+        requestId,
+        query: subscription.query,
+        rows: rows.slice(),
+        version,
+      };
+    }
+
+    function installGroupedRefresh(
+      snapshot: GroupedRefreshSnapshot,
+      result: QueryExecutionResult,
+    ): Effect.Effect<void, ViewServerError> {
+      return Effect.gen(function* () {
+        const subscription = subscriptions.get(snapshot.requestId);
+        if (subscription === undefined) {
+          return;
+        }
+        subscription.groupedRefreshInFlight = false;
+        if (!isGroupedQuery(subscription.query)) {
+          return;
+        }
+        if (
+          subscription.dirtyTargetVersion !== undefined &&
+          subscription.dirtyTargetVersion > snapshot.version
+        ) {
+          yield* scheduleGroupedSubscriptionRefresh(subscription.requestId);
+          return;
+        }
+        yield* refreshSubscriptionSnapshot(subscription, result, snapshot.version);
+      });
+    }
+
+    function resetGroupedRefresh(requestId: string): Effect.Effect<void, ViewServerError> {
+      return Effect.gen(function* () {
+        const subscription = subscriptions.get(requestId);
+        if (subscription === undefined) {
+          return;
+        }
+        subscription.groupedRefreshScheduled = false;
+        subscription.groupedRefreshInFlight = false;
+        if (subscription.dirtyTargetVersion !== undefined) {
+          yield* scheduleGroupedSubscriptionRefresh(requestId);
+        }
+      });
+    }
+
+    const pendingActivePlanTotalRows = (
+      previousTotalRows: number,
+      query: RuntimeRawQuery,
+      mutation: MutationLogEntry,
+    ): number => {
+      const beforeMatches =
+        "before" in mutation && mutation.before !== undefined
+          ? matchesFilter(mutation.before, query.where, { literalStringFields })
+          : false;
+      const afterMatches =
+        "after" in mutation && mutation.after !== undefined
+          ? matchesFilter(mutation.after, query.where, { literalStringFields })
+          : false;
+      if (beforeMatches === afterMatches) {
+        return previousTotalRows;
+      }
+      return previousTotalRows + (afterMatches ? 1 : -1);
+    };
 
     const fanout = (
       fromVersion: WorkerVersion,
@@ -298,14 +678,519 @@ export function makeTopicWorkerCore(
       return total;
     });
 
+    const activePlanStats = (): Pick<
+      TopicWorkerMetrics,
+      | "activePlanCount"
+      | "activeViewCount"
+      | "activePlanRows"
+      | "activePlanIndexEstimatedBytes"
+      | "activePlanBuildQueueDepth"
+      | "activePlanBuildingCount"
+      | "activePlanPendingCount"
+      | "activePlanBuildMs"
+      | "activePlanBuildMsTotal"
+      | "activePlanBuildMsMax"
+      | "activePlanFallbackCount"
+    > => {
+      let activeViewCount = 0;
+      let activePlanRows = 0;
+      let activePlanIndexEstimatedBytes = 0;
+      let activePlanBuildMsTotal = 0;
+      let activePlanBuildMsMax = 0;
+      let activePlanFallbackCount = 0;
+      let activePlanBuildQueueDepth = 0;
+      let activePlanBuildingCount = 0;
+      let activePlanPendingCount = 0;
+      for (const entry of activePlans.values()) {
+        activeViewCount += entry.subscribers;
+        activePlanRows += entry.plan.totalRows();
+        activePlanIndexEstimatedBytes += entry.plan.estimatedIndexBytes();
+        activePlanBuildMsTotal += entry.buildMs;
+        activePlanBuildMsMax = Math.max(activePlanBuildMsMax, entry.buildMs);
+      }
+      for (const build of activePlanBuilds.values()) {
+        if (build.state === "queued") {
+          activePlanBuildQueueDepth++;
+        } else {
+          activePlanBuildingCount++;
+        }
+        activePlanPendingCount += build.requestIds.size;
+      }
+      for (const subscription of subscriptions.values()) {
+        if (subscription.activePlanFallback === true) {
+          activePlanFallbackCount++;
+        }
+      }
+      return {
+        activePlanCount: activePlans.size,
+        activeViewCount,
+        activePlanRows,
+        activePlanIndexEstimatedBytes,
+        activePlanBuildQueueDepth,
+        activePlanBuildingCount,
+        activePlanPendingCount,
+        activePlanBuildMs: lastActivePlanBuildMs,
+        activePlanBuildMsTotal,
+        activePlanBuildMsMax,
+        activePlanFallbackCount,
+      };
+    };
+
+    const subscriptionLagStats = Effect.fnUntraced(function* () {
+      let maxLag = 0n;
+      let totalLag = 0n;
+      for (const subscription of subscriptions.values()) {
+        const depth = yield* Queue.size(subscription.queue);
+        const queuedLag = subscriptionLagVersionsForQueueDepth(
+          depth,
+          subscription.pendingLagVersions,
+          deltaCoalescing,
+        );
+        const dirtyLag =
+          subscription.dirtyTargetVersion !== undefined &&
+          subscription.dirtyTargetVersion > subscription.lastVersion
+            ? subscription.dirtyTargetVersion - subscription.lastVersion
+            : 0n;
+        const lag = queuedLag > dirtyLag ? queuedLag : dirtyLag;
+        if (lag > maxLag) {
+          maxLag = lag;
+        }
+        totalLag += lag;
+      }
+      return {
+        maxSubscriptionLagVersions: bigintMetricNumber(maxLag),
+        totalSubscriptionLagVersions: bigintMetricNumber(totalLag),
+      };
+    });
+
     const wouldExceedQueueLimit = (depth: number): boolean =>
       maxQueueDepth <= 0 ? depth >= 0 : depth >= maxQueueDepth;
 
     const isQueueAtLimit = (depth: number): boolean =>
       maxQueueDepth <= 0 ? depth > 0 : depth >= maxQueueDepth;
 
-    const statusForQueueDepth = (depth: number): TopicWorkerMetrics["status"] =>
-      status === "ready" && isQueueAtLimit(depth) ? "degraded" : status;
+    const statusForPressure = (
+      depth: number,
+      planStats: ReturnType<typeof activePlanStats>,
+    ): TopicWorkerMetrics["status"] =>
+      status === "ready" &&
+      (isQueueAtLimit(depth) ||
+        planStats.activePlanFallbackCount > 0 ||
+        isActivePlanLimitNear(planStats))
+        ? "degraded"
+        : status;
+
+    const offerDelta = Effect.fnUntraced(function* (
+      subscription: ActiveSubscription,
+      event: DeltaEvent<readonly RuntimeRow[]>,
+    ) {
+      if (!deltaCoalescing) {
+        const depth = yield* Queue.size(subscription.queue);
+        if (wouldExceedQueueLimit(depth)) {
+          return false;
+        }
+        yield* Queue.offer(subscription.queue, event);
+        return true;
+      }
+      const queued = yield* drainQueuedEvents(subscription.queue);
+      const queuedPrefix = queued.filter((queuedEvent) => queuedEvent.type !== "delta");
+      const queuedDeltas = queued.filter((queuedEvent) => queuedEvent.type === "delta");
+      const nextQueued = coalescedQueueEvents(queuedPrefix, queuedDeltas, event);
+      if (
+        nextQueued.length > maxQueueDepth ||
+        (queuedDeltas.length === 0 && wouldExceedQueueLimit(queuedPrefix.length))
+      ) {
+        yield* offerQueuedEvents(subscription.queue, queued);
+        return false;
+      }
+      const coalesced = nextQueued[nextQueued.length - 1];
+      if (
+        coalesced?.type === "delta" &&
+        maxQueueDepth > 0 &&
+        deltaVersionSpan(coalesced) > BigInt(maxQueueDepth)
+      ) {
+        yield* offerQueuedEvents(subscription.queue, queued);
+        return false;
+      }
+      yield* offerQueuedEvents(subscription.queue, nextQueued);
+      subscription.pendingLagVersions = queueEventsVersionLag(nextQueued);
+      return true;
+    });
+
+    const offerStatusEvent = Effect.fnUntraced(function* (
+      subscription: ActiveSubscription,
+      event: LiveQueryStatusEvent,
+    ) {
+      const queued = yield* drainQueuedEvents(subscription.queue);
+      const nextQueued = [...queued.filter((queuedEvent) => queuedEvent.type !== "status"), event];
+      if (nextQueued.length > maxQueueDepth) {
+        yield* offerQueuedEvents(subscription.queue, queued);
+        return false;
+      }
+      yield* offerQueuedEvents(subscription.queue, nextQueued);
+      subscription.pendingLagVersions = queueEventsVersionLag(nextQueued);
+      return true;
+    });
+
+    const offerSnapshotEvent = Effect.fnUntraced(function* (
+      subscription: ActiveSubscription,
+      event: SnapshotEvent<readonly RuntimeRow[]>,
+    ) {
+      const queued = yield* drainQueuedEvents(subscription.queue);
+      const nextQueued = [...queued.filter((queuedEvent) => queuedEvent.type !== "status"), event];
+      if (nextQueued.length > maxQueueDepth) {
+        yield* offerQueuedEvents(subscription.queue, queued);
+        return false;
+      }
+      yield* offerQueuedEvents(subscription.queue, nextQueued);
+      subscription.pendingLagVersions = queueEventsVersionLag(nextQueued);
+      return true;
+    });
+
+    const drainQueuedEvents = Effect.fnUntraced(function* (
+      queue: Queue.Queue<SubscriptionEvent<readonly RuntimeRow[]>, ViewServerError | Cause.Done>,
+    ) {
+      const events: SubscriptionEvent<readonly RuntimeRow[]>[] = [];
+      let polling = true;
+      while (polling) {
+        const next = yield* Queue.poll(queue);
+        if (Option.isSome(next)) {
+          events.push(next.value);
+        } else {
+          polling = false;
+        }
+      }
+      return events;
+    });
+
+    const offerQueuedEvents = Effect.fnUntraced(function* (
+      queue: Queue.Queue<SubscriptionEvent<readonly RuntimeRow[]>, ViewServerError | Cause.Done>,
+      events: readonly SubscriptionEvent<readonly RuntimeRow[]>[],
+    ) {
+      yield* Effect.forEach(events, (event) => Queue.offer(queue, event), { discard: true });
+    });
+
+    const prepareActivePlan = Effect.fnUntraced(function* (subscription: ActiveSubscription) {
+      if (isGroupedQuery(subscription.query)) {
+        return;
+      }
+      const rawQuery = subscription.query;
+      const key = activeRawPlanKey(rawQuery, idField);
+      const existing = activePlans.get(key);
+      if (existing !== undefined) {
+        activateSubscriptionWithPlan(subscription, key, rawQuery, existing);
+        return;
+      }
+      subscription.activePlanFallback = false;
+      const pending = activePlanBuilds.get(key);
+      if (pending !== undefined) {
+        pending.requestIds.add(subscription.requestId);
+        subscription.activePlanBuildKey = key;
+        return;
+      }
+      if (wouldExceedActivePlanCountLimitForNewBuild()) {
+        subscription.activePlanFallback = true;
+        subscription.activePlanBuildKey = undefined;
+        return;
+      }
+      const remainingBytes = activePlanEstimatedBytesRemaining();
+      if (
+        remainingBytes !== undefined &&
+        estimateActiveRawPlanIndexBytes([], rawQuery, { literalStringFields }) > remainingBytes
+      ) {
+        subscription.activePlanFallback = true;
+        subscription.activePlanBuildKey = undefined;
+        return;
+      }
+      const build: ActivePlanBuildEntry = {
+        key,
+        query: rawQuery,
+        requestIds: new Set([subscription.requestId]),
+        state: "queued",
+      };
+      activePlanBuilds.set(key, build);
+      subscription.activePlanBuildKey = key;
+      yield* Queue.offer(activePlanBuildQueue, key);
+    });
+
+    const activePlanEstimatedBytes = (): number => {
+      let total = 0;
+      for (const entry of activePlans.values()) {
+        total += entry.plan.estimatedIndexBytes();
+      }
+      return total;
+    };
+
+    const activePlanEstimatedBytesRemaining = (): number | undefined =>
+      maxActivePlanEstimatedBytes === undefined
+        ? undefined
+        : maxActivePlanEstimatedBytes - activePlanEstimatedBytes();
+
+    const wouldExceedActivePlanCountLimitForNewBuild = (): boolean =>
+      maxActivePlans !== undefined && activePlans.size + activePlanBuilds.size >= maxActivePlans;
+
+    const wouldExceedActivePlanCountLimitOnInstall = (): boolean =>
+      maxActivePlans !== undefined && activePlans.size + activePlanBuilds.size > maxActivePlans;
+
+    const wouldExceedActivePlanEstimatedBytesLimit = (newPlanBytes: number): boolean =>
+      maxActivePlanEstimatedBytes !== undefined &&
+      activePlanEstimatedBytes() + newPlanBytes > maxActivePlanEstimatedBytes;
+
+    const isActivePlanLimitNear = (planStats: ReturnType<typeof activePlanStats>): boolean =>
+      isNearLimit(
+        planStats.activePlanCount +
+          planStats.activePlanBuildQueueDepth +
+          planStats.activePlanBuildingCount,
+        maxActivePlans,
+      ) || isNearLimit(planStats.activePlanIndexEstimatedBytes, maxActivePlanEstimatedBytes);
+
+    const activePlanBuildSnapshot = (key: string): ActivePlanBuildSnapshot | undefined => {
+      const build = activePlanBuilds.get(key);
+      if (build === undefined || build.state === "building") {
+        return undefined;
+      }
+      if (build.requestIds.size === 0) {
+        activePlanBuilds.delete(key);
+        return undefined;
+      }
+      build.state = "building";
+      return {
+        key: build.key,
+        query: build.query,
+        rows: rows.slice(),
+        version,
+        remainingEstimatedBytes: activePlanEstimatedBytesRemaining(),
+      };
+    };
+
+    const activateSubscriptionWithPlan = (
+      subscription: ActiveSubscription,
+      key: string,
+      query: RuntimeRawQuery,
+      entry: ActiveRawPlanEntry,
+    ): void => {
+      if (subscription.activePlanKey === key) {
+        return;
+      }
+      entry.subscribers++;
+      subscription.activePlanKey = key;
+      subscription.activePlanBuildKey = undefined;
+      subscription.activePlanFallback = false;
+      subscription.activeView = makeActiveRawViewFromPlan(entry.plan, query, idField);
+    };
+
+    const refreshSubscriptionSnapshot = Effect.fnUntraced(function* (
+      subscription: ActiveSubscription,
+      result: QueryExecutionResult,
+      targetVersion: WorkerVersion,
+    ) {
+      const event: SnapshotEvent<readonly RuntimeRow[]> = {
+        type: "snapshot",
+        requestId: subscription.requestId,
+        rows: result.rows,
+        meta: {
+          version: targetVersion.toString(),
+          totalRows: result.totalRows,
+          serverTime: Date.now(),
+        },
+      };
+      subscription.lastRows = result.rows;
+      subscription.lastTotalRows = result.totalRows;
+      subscription.lastVersion = targetVersion;
+      subscription.dirtyTargetVersion = undefined;
+      const offered = yield* offerSnapshotEvent(subscription, event);
+      if (!offered) {
+        removeSubscription(subscription.requestId);
+        yield* Queue.fail(
+          subscription.queue,
+          backpressureExceeded(
+            subscription.requestId,
+            `Subscription ${subscription.requestId} exceeded maxQueueDepth ${maxQueueDepth}`,
+          ),
+        );
+      }
+    });
+
+    const discardActivePlanBuild = Effect.fnUntraced(function* (key: string) {
+      const build = activePlanBuilds.get(key);
+      if (build === undefined) {
+        return;
+      }
+      activePlanBuilds.delete(key);
+      for (const requestId of build.requestIds) {
+        const subscription = subscriptions.get(requestId);
+        if (subscription?.activePlanBuildKey === key) {
+          subscription.activePlanBuildKey = undefined;
+          subscription.activePlanFallback = true;
+          if (subscription.dirtyTargetVersion !== undefined) {
+            yield* refreshSubscriptionSnapshot(
+              subscription,
+              memoryQuery(subscription.query),
+              version,
+            );
+          }
+        }
+      }
+    });
+
+    const installActivePlanBuild = Effect.fnUntraced(function* (
+      snapshot: ActivePlanBuildSnapshot,
+      plan: ActiveRawPlan,
+      buildMs: number,
+    ) {
+      const build = activePlanBuilds.get(snapshot.key);
+      if (build === undefined || build.requestIds.size === 0) {
+        activePlanBuilds.delete(snapshot.key);
+        return;
+      }
+      if (!catchUpActivePlan(plan, snapshot.version)) {
+        yield* discardActivePlanBuild(snapshot.key);
+        return;
+      }
+      if (
+        wouldExceedActivePlanCountLimitOnInstall() ||
+        wouldExceedActivePlanEstimatedBytesLimit(plan.estimatedIndexBytes())
+      ) {
+        yield* discardActivePlanBuild(snapshot.key);
+        return;
+      }
+      const entry: ActiveRawPlanEntry = {
+        plan,
+        buildMs,
+        subscribers: 0,
+      };
+      activePlans.set(snapshot.key, entry);
+      lastActivePlanBuildMs = buildMs;
+      activePlanBuilds.delete(snapshot.key);
+      for (const requestId of build.requestIds) {
+        const subscription = subscriptions.get(requestId);
+        if (
+          subscription === undefined ||
+          subscription.activePlanBuildKey !== snapshot.key ||
+          isGroupedQuery(subscription.query)
+        ) {
+          continue;
+        }
+        activateSubscriptionWithPlan(subscription, snapshot.key, subscription.query, entry);
+        if (
+          subscription.dirtyTargetVersion !== undefined &&
+          subscription.activeView !== undefined
+        ) {
+          yield* refreshSubscriptionSnapshot(
+            subscription,
+            subscription.activeView.snapshot(),
+            version,
+          );
+        }
+      }
+      if (entry.subscribers <= 0) {
+        activePlans.delete(snapshot.key);
+      }
+    });
+
+    const catchUpActivePlan = (plan: ActiveRawPlan, builtVersion: WorkerVersion): boolean => {
+      if (builtVersion === version) {
+        return true;
+      }
+      if (builtVersion > version || !mutationLog.coversExclusive(builtVersion, version)) {
+        return false;
+      }
+      for (const entry of mutationLog.entriesExclusive(builtVersion, version)) {
+        plan.applyMutation(entry);
+      }
+      return true;
+    };
+
+    const runActivePlanBuild = Effect.fn("view-server.worker.active_plan.build")(function* (
+      key: string,
+    ) {
+      const snapshot = yield* gate.withPermit(Effect.sync(() => activePlanBuildSnapshot(key)));
+      if (snapshot === undefined) {
+        return;
+      }
+      yield* Effect.annotateCurrentSpan({
+        "view_server.topic": topic,
+        "view_server.worker_version": snapshot.version.toString(),
+        "view_server.rows": snapshot.rows.length,
+      });
+      if (snapshot.remainingEstimatedBytes !== undefined) {
+        const estimatedBytes = yield* estimateActiveRawPlanIndexBytesEffect(
+          snapshot.rows,
+          snapshot.query,
+          { literalStringFields, buildChunkSize: activePlanBuildChunkSize },
+          snapshot.remainingEstimatedBytes,
+        );
+        if (estimatedBytes > snapshot.remainingEstimatedBytes) {
+          yield* gate.withPermit(discardActivePlanBuild(snapshot.key));
+          return;
+        }
+      }
+      const started = Date.now();
+      const plan = yield* makeActiveRawPlanEffect(snapshot.rows, snapshot.query, idField, {
+        literalStringFields,
+        buildChunkSize: activePlanBuildChunkSize,
+      });
+      const buildMs = Date.now() - started;
+      yield* Effect.annotateCurrentSpan({
+        "view_server.active_plan_build_ms": buildMs,
+        "view_server.rows": plan.totalRows(),
+      });
+      yield* gate.withPermit(installActivePlanBuild(snapshot, plan, buildMs));
+    });
+
+    const activePlanBuildLoop = Effect.fn("view-server.worker.active_plan.build_loop")(
+      function* () {
+        while (true) {
+          const key = yield* Queue.take(activePlanBuildQueue);
+          yield* runActivePlanBuild(key).pipe(
+            Effect.catchCause(() => gate.withPermit(discardActivePlanBuild(key))),
+          );
+        }
+      },
+    );
+
+    const releaseActivePlan = (key: string | undefined): void => {
+      if (key === undefined) {
+        return;
+      }
+      const entry = activePlans.get(key);
+      if (entry === undefined) {
+        return;
+      }
+      entry.subscribers--;
+      if (entry.subscribers <= 0) {
+        activePlans.delete(key);
+      }
+    };
+
+    const releaseActivePlanBuild = (key: string | undefined, requestId: string): void => {
+      if (key === undefined) {
+        return;
+      }
+      const build = activePlanBuilds.get(key);
+      if (build === undefined) {
+        return;
+      }
+      build.requestIds.delete(requestId);
+      if (build.requestIds.size === 0) {
+        activePlanBuilds.delete(key);
+      }
+    };
+
+    const removeSubscription = (requestId: string): ActiveSubscription | undefined => {
+      const subscription = subscriptions.get(requestId);
+      if (subscription === undefined) {
+        return undefined;
+      }
+      subscriptions.delete(requestId);
+      releaseActivePlan(subscription.activePlanKey);
+      releaseActivePlanBuild(subscription.activePlanBuildKey, requestId);
+      subscription.pendingLagVersions = 0n;
+      subscription.dirtyTargetVersion = undefined;
+      subscription.groupedRefreshScheduled = false;
+      subscription.groupedRefreshInFlight = false;
+      return subscription;
+    };
 
     const appendMutation = Effect.fnUntraced(function* (
       mutation: Omit<MutationLogEntry, "version">,
@@ -334,8 +1219,8 @@ export function makeTopicWorkerCore(
       const id = yield* ensureId(decoded);
       const index = idIndex.get(id);
       if (index === undefined) {
-        rows = [...rows, { ...decoded }];
-        replaceIndexes();
+        rows.push({ ...decoded });
+        idIndex.set(id, rows.length - 1);
         yield* appendMutation({
           kind: "insert",
           id,
@@ -363,6 +1248,8 @@ export function makeTopicWorkerCore(
       version: Effect.sync(() => version),
       metrics: Effect.fn("view-server.worker.metrics")(function* () {
         const depth = yield* queueDepth();
+        const lagStats = yield* subscriptionLagStats();
+        const planStats = activePlanStats();
         yield* Effect.annotateCurrentSpan({
           "view_server.topic": topic,
           "view_server.rows": rows.length,
@@ -372,7 +1259,20 @@ export function makeTopicWorkerCore(
           subscribers: subscriptions.size,
           version,
           queueDepth: depth,
-          status: statusForQueueDepth(depth),
+          maxSubscriptionLagVersions: lagStats.maxSubscriptionLagVersions,
+          totalSubscriptionLagVersions: lagStats.totalSubscriptionLagVersions,
+          activePlanCount: planStats.activePlanCount,
+          activeViewCount: planStats.activeViewCount,
+          activePlanRows: planStats.activePlanRows,
+          activePlanIndexEstimatedBytes: planStats.activePlanIndexEstimatedBytes,
+          activePlanBuildQueueDepth: planStats.activePlanBuildQueueDepth,
+          activePlanBuildingCount: planStats.activePlanBuildingCount,
+          activePlanPendingCount: planStats.activePlanPendingCount,
+          activePlanBuildMs: planStats.activePlanBuildMs,
+          activePlanBuildMsTotal: planStats.activePlanBuildMsTotal,
+          activePlanBuildMsMax: planStats.activePlanBuildMsMax,
+          activePlanFallbackCount: planStats.activePlanFallbackCount,
+          status: statusForPressure(depth, planStats),
         };
       })(),
 
@@ -397,8 +1297,8 @@ export function makeTopicWorkerCore(
           })(),
         ),
 
-      subscribe: (requestId, query) =>
-        Stream.callback<SubscriptionEvent<readonly RuntimeRow[]>, ViewServerError>((queue) =>
+      subscribe: (requestId, query) => {
+        return Stream.callback<SubscriptionEvent<readonly RuntimeRow[]>, ViewServerError>((queue) =>
           gate.withPermit(
             Effect.fn("view-server.worker.subscribe")(function* () {
               yield* Effect.annotateCurrentSpan({
@@ -419,9 +1319,11 @@ export function makeTopicWorkerCore(
                 lastRows: snapshot.rows,
                 lastTotalRows: totalRows,
                 lastVersion: targetVersion,
+                pendingLagVersions: 0n,
               };
               subscriptions.set(requestId, active);
               yield* Queue.offer(queue, snapshot);
+              yield* prepareActivePlan(active);
               yield* Effect.addFinalizer(() =>
                 Effect.fn("view-server.worker.subscribe.finalize")(function* () {
                   yield* Effect.annotateCurrentSpan({
@@ -429,12 +1331,13 @@ export function makeTopicWorkerCore(
                     "view_server.subscription_id": requestId,
                     "view_server.topic": topic,
                   });
-                  subscriptions.delete(requestId);
+                  removeSubscription(requestId);
                 })(),
               );
             })(),
           ),
-        ),
+        );
+      },
 
       unsubscribe: (requestId) =>
         gate.withPermit(
@@ -444,11 +1347,10 @@ export function makeTopicWorkerCore(
               "view_server.subscription_id": requestId,
               "view_server.topic": topic,
             });
-            const subscription = subscriptions.get(requestId);
+            const subscription = removeSubscription(requestId);
             if (subscription === undefined) {
               return;
             }
-            subscriptions.delete(requestId);
             yield* Queue.end(subscription.queue);
           })(),
         ),
@@ -496,8 +1398,17 @@ export function makeTopicWorkerCore(
               return;
             }
             const before = rows[index];
-            rows = rows.filter((row) => rowId(row, idField) !== id);
-            replaceIndexes();
+            const lastIndex = rows.length - 1;
+            const last = rows[lastIndex];
+            rows.pop();
+            idIndex.delete(id);
+            if (index !== lastIndex && last !== undefined) {
+              rows[index] = last;
+              const lastId = last[idField];
+              if (typeof lastId === "string" || typeof lastId === "number") {
+                idIndex.set(lastId, index);
+              }
+            }
             yield* appendMutation({
               kind: "delete",
               id,
@@ -523,13 +1434,15 @@ export function makeTopicWorkerCore(
             { discard: true },
           );
           subscriptions.clear();
+          activePlans.clear();
+          activePlanBuilds.clear();
         })(),
       ),
     };
 
     for (const row of options.initialRows ?? []) {
       const decoded = yield* decodeRow(row);
-      rows = [...rows, decoded];
+      rows.push(decoded);
     }
     replaceIndexes();
     yield* backend.init({
@@ -539,6 +1452,11 @@ export function makeTopicWorkerCore(
       version,
       literalStringFields,
     });
+    yield* Effect.forEach(
+      Array.from({ length: activePlanBuildConcurrency }, (_, index) => index),
+      () => Effect.forkIn(activePlanBuildLoop(), scope, { startImmediately: true }),
+      { discard: true },
+    );
 
     yield* Effect.addFinalizer(() => worker.shutdown.pipe(Effect.ignore));
 
@@ -556,6 +1474,68 @@ function hasDependency(
     }
   }
   return false;
+}
+
+function coalescedQueueEvents(
+  prefix: readonly SubscriptionEvent<readonly RuntimeRow[]>[],
+  queuedDeltas: readonly DeltaEvent<readonly RuntimeRow[]>[],
+  nextDelta: DeltaEvent<readonly RuntimeRow[]>,
+): readonly SubscriptionEvent<readonly RuntimeRow[]>[] {
+  return [...prefix, coalesceDeltas([...queuedDeltas, nextDelta])];
+}
+
+function coalesceDeltas(
+  deltas: readonly DeltaEvent<readonly RuntimeRow[]>[],
+): DeltaEvent<readonly RuntimeRow[]> {
+  const first = deltas[0];
+  const last = deltas[deltas.length - 1];
+  if (first === undefined || last === undefined) {
+    throw new Error("Cannot coalesce an empty delta list");
+  }
+  return {
+    type: "delta",
+    requestId: last.requestId,
+    ops: deltas.flatMap((delta) => delta.ops),
+    meta: {
+      fromVersion: first.meta.fromVersion,
+      toVersion: last.meta.toVersion,
+      totalRows: last.meta.totalRows,
+      serverTime: last.meta.serverTime,
+    },
+  };
+}
+
+function deltaVersionSpan(delta: DeltaEvent<readonly RuntimeRow[]>): bigint {
+  return BigInt(delta.meta.toVersion) - BigInt(delta.meta.fromVersion);
+}
+
+function queueEventsVersionLag(
+  events: readonly SubscriptionEvent<readonly RuntimeRow[]>[],
+): bigint {
+  return events.reduce(
+    (total, event) => (event.type === "delta" ? total + deltaVersionSpan(event) : total),
+    0n,
+  );
+}
+
+export function subscriptionLagVersionsForQueueDepth(
+  queueDepth: number,
+  pendingLagVersions: bigint,
+  deltaCoalescing: boolean,
+): bigint {
+  if (queueDepth <= 0) {
+    return 0n;
+  }
+  return deltaCoalescing ? pendingLagVersions : BigInt(queueDepth);
+}
+
+function bigintMetricNumber(value: bigint): number {
+  const max = BigInt(Number.MAX_SAFE_INTEGER);
+  return value > max ? Number.MAX_SAFE_INTEGER : Number(value);
+}
+
+function isNearLimit(value: number, limit: number | undefined): boolean {
+  return limit !== undefined && limit > 0 && value / limit >= 0.8;
 }
 
 function replayMutations(

@@ -68,6 +68,19 @@ export type HealthResponse = {
         readonly rows: number;
         readonly subscribers: number;
         readonly queueDepth: number;
+        readonly maxSubscriptionLagVersions: number;
+        readonly totalSubscriptionLagVersions: number;
+        readonly activePlanCount: number;
+        readonly activeViewCount: number;
+        readonly activePlanRows: number;
+        readonly activePlanIndexEstimatedBytes: number;
+        readonly activePlanBuildQueueDepth: number;
+        readonly activePlanBuildingCount: number;
+        readonly activePlanPendingCount: number;
+        readonly activePlanBuildMs: number;
+        readonly activePlanBuildMsTotal: number;
+        readonly activePlanBuildMsMax: number;
+        readonly activePlanFallbackCount: number;
         readonly version: string;
         readonly kafkaLagTotal: number;
         readonly kafkaLagMax: number;
@@ -121,6 +134,11 @@ export function makeViewServerRuntime(
         snapshotBackend: backend,
         maxQueueDepth: normalized.worker.maxQueueDepth,
         mutationLogSize: normalized.worker.mutationLogSize,
+        deltaCoalescing: normalized.worker.deltaCoalescing,
+        maxActivePlans: normalized.worker.maxActivePlans,
+        maxActivePlanEstimatedBytes: normalized.worker.maxActivePlanEstimatedBytes,
+        activePlanBuildConcurrency: normalized.worker.activePlanBuildConcurrency,
+        groupedRefreshDebounceMs: normalized.worker.groupedRefreshDebounceMs,
       });
       workers.set(topic, worker);
     }
@@ -160,6 +178,19 @@ export function makeViewServerRuntime(
           rows: number;
           subscribers: number;
           queueDepth: number;
+          maxSubscriptionLagVersions: number;
+          totalSubscriptionLagVersions: number;
+          activePlanCount: number;
+          activeViewCount: number;
+          activePlanRows: number;
+          activePlanIndexEstimatedBytes: number;
+          activePlanBuildQueueDepth: number;
+          activePlanBuildingCount: number;
+          activePlanPendingCount: number;
+          activePlanBuildMs: number;
+          activePlanBuildMsTotal: number;
+          activePlanBuildMsMax: number;
+          activePlanFallbackCount: number;
           version: string;
           kafkaLagTotal: number;
           kafkaLagMax: number;
@@ -176,6 +207,19 @@ export function makeViewServerRuntime(
           rows: metrics.rows,
           subscribers: metrics.subscribers,
           queueDepth: metrics.queueDepth,
+          maxSubscriptionLagVersions: metrics.maxSubscriptionLagVersions,
+          totalSubscriptionLagVersions: metrics.totalSubscriptionLagVersions,
+          activePlanCount: metrics.activePlanCount,
+          activeViewCount: metrics.activeViewCount,
+          activePlanRows: metrics.activePlanRows,
+          activePlanIndexEstimatedBytes: metrics.activePlanIndexEstimatedBytes,
+          activePlanBuildQueueDepth: metrics.activePlanBuildQueueDepth,
+          activePlanBuildingCount: metrics.activePlanBuildingCount,
+          activePlanPendingCount: metrics.activePlanPendingCount,
+          activePlanBuildMs: metrics.activePlanBuildMs,
+          activePlanBuildMsTotal: metrics.activePlanBuildMsTotal,
+          activePlanBuildMsMax: metrics.activePlanBuildMsMax,
+          activePlanFallbackCount: metrics.activePlanFallbackCount,
           version: metrics.version.toString(),
           kafkaLagTotal: kafkaMetrics.lagTotal,
           kafkaLagMax: kafkaMetrics.lagMax,
@@ -445,6 +489,19 @@ function healthRowsFromResponse(health: HealthResponse): readonly ViewServerHeal
     rows: sumTopicMetric(topicEntries, "rows"),
     subscribers: sumTopicMetric(topicEntries, "subscribers"),
     queueDepth: sumTopicMetric(topicEntries, "queueDepth"),
+    maxSubscriptionLagVersions: maxTopicMetric(topicEntries, "maxSubscriptionLagVersions"),
+    totalSubscriptionLagVersions: sumTopicMetric(topicEntries, "totalSubscriptionLagVersions"),
+    activePlanCount: sumTopicMetric(topicEntries, "activePlanCount"),
+    activeViewCount: sumTopicMetric(topicEntries, "activeViewCount"),
+    activePlanRows: sumTopicMetric(topicEntries, "activePlanRows"),
+    activePlanIndexEstimatedBytes: sumTopicMetric(topicEntries, "activePlanIndexEstimatedBytes"),
+    activePlanBuildQueueDepth: sumTopicMetric(topicEntries, "activePlanBuildQueueDepth"),
+    activePlanBuildingCount: sumTopicMetric(topicEntries, "activePlanBuildingCount"),
+    activePlanPendingCount: sumTopicMetric(topicEntries, "activePlanPendingCount"),
+    activePlanBuildMs: maxTopicMetric(topicEntries, "activePlanBuildMs"),
+    activePlanBuildMsTotal: sumTopicMetric(topicEntries, "activePlanBuildMsTotal"),
+    activePlanBuildMsMax: maxTopicMetric(topicEntries, "activePlanBuildMsMax"),
+    activePlanFallbackCount: sumTopicMetric(topicEntries, "activePlanFallbackCount"),
     kafkaLagTotal: sumTopicMetric(topicEntries, "kafkaLagTotal"),
     kafkaLagMax: maxTopicMetric(topicEntries, "kafkaLagMax"),
     kafkaPartitions: sumTopicMetric(topicEntries, "kafkaPartitions"),
@@ -461,6 +518,19 @@ function healthRowsFromResponse(health: HealthResponse): readonly ViewServerHeal
       rows: metrics.rows,
       subscribers: metrics.subscribers,
       queueDepth: metrics.queueDepth,
+      maxSubscriptionLagVersions: metrics.maxSubscriptionLagVersions,
+      totalSubscriptionLagVersions: metrics.totalSubscriptionLagVersions,
+      activePlanCount: metrics.activePlanCount,
+      activeViewCount: metrics.activeViewCount,
+      activePlanRows: metrics.activePlanRows,
+      activePlanIndexEstimatedBytes: metrics.activePlanIndexEstimatedBytes,
+      activePlanBuildQueueDepth: metrics.activePlanBuildQueueDepth,
+      activePlanBuildingCount: metrics.activePlanBuildingCount,
+      activePlanPendingCount: metrics.activePlanPendingCount,
+      activePlanBuildMs: metrics.activePlanBuildMs,
+      activePlanBuildMsTotal: metrics.activePlanBuildMsTotal,
+      activePlanBuildMsMax: metrics.activePlanBuildMsMax,
+      activePlanFallbackCount: metrics.activePlanFallbackCount,
       kafkaLagTotal: metrics.kafkaLagTotal,
       kafkaLagMax: metrics.kafkaLagMax,
       kafkaPartitions: metrics.kafkaPartitions,
@@ -480,6 +550,19 @@ function healthRow(input: {
   readonly rows: number;
   readonly subscribers: number;
   readonly queueDepth: number;
+  readonly maxSubscriptionLagVersions: number;
+  readonly totalSubscriptionLagVersions: number;
+  readonly activePlanCount: number;
+  readonly activeViewCount: number;
+  readonly activePlanRows: number;
+  readonly activePlanIndexEstimatedBytes: number;
+  readonly activePlanBuildQueueDepth: number;
+  readonly activePlanBuildingCount: number;
+  readonly activePlanPendingCount: number;
+  readonly activePlanBuildMs: number;
+  readonly activePlanBuildMsTotal: number;
+  readonly activePlanBuildMsMax: number;
+  readonly activePlanFallbackCount: number;
   readonly kafkaLagTotal: number;
   readonly kafkaLagMax: number;
   readonly kafkaPartitions: number;
@@ -495,6 +578,19 @@ function healthRow(input: {
     rows: input.rows,
     subscribers: input.subscribers,
     queueDepth: input.queueDepth,
+    maxSubscriptionLagVersions: input.maxSubscriptionLagVersions,
+    totalSubscriptionLagVersions: input.totalSubscriptionLagVersions,
+    activePlanCount: input.activePlanCount,
+    activeViewCount: input.activeViewCount,
+    activePlanRows: input.activePlanRows,
+    activePlanIndexEstimatedBytes: input.activePlanIndexEstimatedBytes,
+    activePlanBuildQueueDepth: input.activePlanBuildQueueDepth,
+    activePlanBuildingCount: input.activePlanBuildingCount,
+    activePlanPendingCount: input.activePlanPendingCount,
+    activePlanBuildMs: input.activePlanBuildMs,
+    activePlanBuildMsTotal: input.activePlanBuildMsTotal,
+    activePlanBuildMsMax: input.activePlanBuildMsMax,
+    activePlanFallbackCount: input.activePlanFallbackCount,
     workerLagP95Ms: 0,
     deltaFanoutP95Ms: 0,
     publishLatencyP95Ms: 0,
@@ -513,14 +609,35 @@ function healthRow(input: {
 
 function sumTopicMetric(
   entries: readonly (readonly [string, HealthResponse["topics"][string]])[],
-  field: "rows" | "subscribers" | "queueDepth" | "kafkaLagTotal" | "kafkaPartitions",
+  field:
+    | "rows"
+    | "subscribers"
+    | "queueDepth"
+    | "totalSubscriptionLagVersions"
+    | "activePlanCount"
+    | "activeViewCount"
+    | "activePlanRows"
+    | "activePlanIndexEstimatedBytes"
+    | "activePlanBuildQueueDepth"
+    | "activePlanBuildingCount"
+    | "activePlanPendingCount"
+    | "activePlanBuildMsTotal"
+    | "activePlanFallbackCount"
+    | "kafkaLagTotal"
+    | "kafkaPartitions",
 ): number {
   return entries.reduce((sum, [, metrics]) => sum + metrics[field], 0);
 }
 
 function maxTopicMetric(
   entries: readonly (readonly [string, HealthResponse["topics"][string]])[],
-  field: "kafkaLagMax" | "lastKafkaOffset" | "lastKafkaEndOffset",
+  field:
+    | "maxSubscriptionLagVersions"
+    | "activePlanBuildMs"
+    | "activePlanBuildMsMax"
+    | "kafkaLagMax"
+    | "lastKafkaOffset"
+    | "lastKafkaEndOffset",
 ): number {
   return entries.reduce((max, [, metrics]) => Math.max(max, metrics[field]), 0);
 }

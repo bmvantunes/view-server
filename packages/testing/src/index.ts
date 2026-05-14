@@ -5,6 +5,7 @@ import {
   makeViewServerRuntime,
   type HealthResponse,
   type InferReadableQueryResult,
+  type LiveQueryInitialData,
   type QueryForReadableTopic,
   type ReadableTopicName,
   type RuntimeRow,
@@ -37,7 +38,7 @@ export type InMemoryViewServer<TConfig extends ViewServerConfig> = {
   >(
     topic: TTopic,
     query: TQuery,
-  ) => Promise<InferReadableQueryResult<TConfig, TTopic, TQuery>>;
+  ) => Promise<LiveQueryInitialData<InferReadableQueryResult<TConfig, TTopic, TQuery>[number]>>;
   readonly health: () => Promise<HealthResponse>;
   readonly close: () => Promise<void>;
 };

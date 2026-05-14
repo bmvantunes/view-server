@@ -9,6 +9,7 @@
     "prepare": "vp config"
   },
   "devDependencies": {
+    "@effect/language-service": "catalog:",
     "vite-plus": "catalog:"
   },
   "engines": {

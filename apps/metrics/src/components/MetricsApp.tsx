@@ -4,7 +4,7 @@ import {
   ViewServerMetricsDashboard,
   createViewServerHooks,
   makeBrowserWebsocketClient,
-  type ViewServerHooks,
+  type ViewServerMetricsHooks,
 } from "@view-server/react";
 import {
   metricsViewServerConfig,
@@ -16,7 +16,7 @@ type MetricsConnection =
   | { readonly status: "connecting" }
   | {
       readonly status: "ready";
-      readonly hooks: ViewServerHooks<MetricsViewServerConfig>;
+      readonly hooks: ViewServerMetricsHooks;
     }
   | {
       readonly status: "error";
@@ -38,7 +38,10 @@ export function MetricsApp(props: { readonly rpcUrl?: string | undefined }) {
         const client = yield* Scope.provide(scope)(
           makeBrowserWebsocketClient<MetricsViewServerConfig>(rpcUrl, metricsViewServerConfig),
         );
-        return createViewServerHooks(client, metricsViewServerConfig);
+        const hooks = createViewServerHooks(client, metricsViewServerConfig);
+        return {
+          useLiveQuery: (topic, query) => hooks.useLiveQuery(topic, query),
+        } satisfies ViewServerMetricsHooks;
       }),
     ).then(
       (hooks) => {
