@@ -1,5 +1,6 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import {
@@ -17,19 +18,24 @@ import {
 } from "../config/index.ts";
 import {
   invalidPublish,
+  invalidConfig,
+  invalidQuery,
   kafkaIngestFailed,
   missingTopic,
-  schemaDecodeFailed,
+  serverShutdown,
   snapshotBackendFailed,
   unauthorized,
   type ViewServerError,
 } from "../errors.ts";
 import type {
+  RuntimeFilterNode,
+  RuntimeGroupedQuery,
   QueryResponse,
   RuntimeQuery,
   RuntimeRow,
   SubscriptionEvent,
 } from "../protocol/index.ts";
+import { isRuntimeGroupedQuery } from "../protocol/index.ts";
 import {
   runKafkaSource,
   type KafkaBatchMetrics,
@@ -121,11 +127,13 @@ export function makeViewServerRuntime(
   return Effect.fn("view-server.runtime.make")(function* () {
     const normalized = yield* Effect.try({
       try: () => normalizeConfig(config),
-      catch: (error) => schemaDecodeFailed("__config", error),
+      catch: (error) => invalidConfig("Invalid view-server config", "config", error),
     });
     yield* verifyKafkaSourceTopics(normalized, options);
     const workers = new Map<string, TopicWorkerHost>();
     const kafkaMetricsByTopic = new Map<string, KafkaRuntimeMetrics>();
+    const sourceFibers: Fiber.Fiber<void, ViewServerError>[] = [];
+    let closing = false;
     const makeTopicWorker = options.topicWorkerFactory ?? makeInProcessTopicWorkerHost;
 
     for (const [topic, topicConfig] of Object.entries(normalized.topics)) {
@@ -150,6 +158,22 @@ export function makeViewServerRuntime(
       const worker = workers.get(topic);
       return worker === undefined ? Effect.fail(missingTopic(topic)) : Effect.succeed(worker);
     };
+
+    const ensureRuntimeOpen = (
+      operation: "query" | "subscribe" | "publish" | "delta-publish" | "delete",
+      topic: string,
+      requestId?: string,
+    ) =>
+      closing
+        ? Effect.fail(
+            serverShutdown(`Server is shutting down; refusing ${operation}`, topic, requestId),
+          )
+        : Effect.void;
+
+    const ensureReadableTopic = (topic: string, operation: "subscribe" | "query") =>
+      isReservedTopic(topic) && topic !== VIEW_SERVER_HEALTH_TOPIC
+        ? Effect.fail(unauthorized(topic, operation))
+        : Effect.void;
 
     const authorizeQuery = (topic: string, operation: "subscribe" | "query", payload: unknown) =>
       normalized.auth
@@ -229,11 +253,11 @@ export function makeViewServerRuntime(
           kafkaPartitions: kafkaMetrics.partitions,
           lastKafkaOffset: kafkaMetrics.offset,
           lastKafkaEndOffset: kafkaMetrics.endOffset,
-          status: metrics.status,
+          status: closing ? "stopping" : metrics.status,
         };
       }
       return {
-        ok: Object.values(topics).every((topic) => topic.status === "ready"),
+        ok: !closing && Object.values(topics).every((topic) => topic.status === "ready"),
         topics,
       };
     });
@@ -259,6 +283,7 @@ export function makeViewServerRuntime(
       if (isReservedTopic(topic) && transport !== "internal") {
         return yield* Effect.fail(invalidPublish(topic, "Cannot publish to reserved topics"));
       }
+      yield* ensureRuntimeOpen("publish", topic);
       yield* authorizePublish(topic, "publish", row, transport);
       const worker = yield* workerFor(topic);
       yield* worker.publish(row);
@@ -289,6 +314,7 @@ export function makeViewServerRuntime(
       if (isReservedTopic(topic) && transport !== "internal") {
         return yield* Effect.fail(invalidPublish(topic, "Cannot publish to reserved topics"));
       }
+      yield* ensureRuntimeOpen("delta-publish", topic);
       yield* authorizePublish(topic, "delta-publish", patch, transport);
       const worker = yield* workerFor(topic);
       yield* worker.deltaPublish(patch);
@@ -319,6 +345,7 @@ export function makeViewServerRuntime(
       if (isReservedTopic(topic) && transport !== "internal") {
         return yield* Effect.fail(invalidPublish(topic, "Cannot publish to reserved topics"));
       }
+      yield* ensureRuntimeOpen("delete", topic);
       yield* authorizePublish(topic, "delete", id, transport);
       const worker = yield* workerFor(topic);
       yield* worker.deleteById(id);
@@ -348,9 +375,12 @@ export function makeViewServerRuntime(
       yield* Effect.annotateCurrentSpan({
         "view_server.topic": topic,
       });
-      yield* authorizeQuery(topic, "query", query);
+      yield* ensureRuntimeOpen("query", topic);
+      yield* ensureReadableTopic(topic, "query");
+      const guardedQuery = yield* validateRuntimeQueryLimits(topic, query, normalized.limits);
+      yield* authorizeQuery(topic, "query", guardedQuery);
       const worker = yield* workerFor(topic);
-      const response = yield* worker.query(query);
+      const response = yield* worker.query(guardedQuery);
       yield* Effect.annotateCurrentSpan({
         "view_server.rows": response.rows.length,
         "view_server.total_rows": response.totalRows,
@@ -369,9 +399,12 @@ export function makeViewServerRuntime(
         "view_server.subscription_id": requestId,
         "view_server.topic": topic,
       });
-      yield* authorizeQuery(topic, "subscribe", query);
+      yield* ensureRuntimeOpen("subscribe", topic, requestId);
+      yield* ensureReadableTopic(topic, "subscribe");
+      const guardedQuery = yield* validateRuntimeQueryLimits(topic, query, normalized.limits);
+      yield* authorizeQuery(topic, "subscribe", guardedQuery);
       const worker = yield* workerFor(topic);
-      return worker.subscribe(requestId, query).pipe(
+      return worker.subscribe(requestId, guardedQuery).pipe(
         Stream.onFirst(() => syncHealthTopicIgnoringErrors),
         Stream.ensuring(syncHealthTopicIgnoringErrors),
       );
@@ -391,6 +424,14 @@ export function makeViewServerRuntime(
     });
 
     const closeRuntime = Effect.fn("view-server.runtime.close")(function* () {
+      if (closing) {
+        return;
+      }
+      closing = true;
+      yield* syncHealthTopicIgnoringErrors;
+      yield* Effect.forEach(sourceFibers, (fiber) => Fiber.interrupt(fiber), {
+        discard: true,
+      }).pipe(Effect.ignore);
       yield* Effect.forEach(workers.values(), (worker) => worker.shutdown, { discard: true });
     });
 
@@ -424,12 +465,13 @@ export function makeViewServerRuntime(
     };
 
     yield* syncHealthTopic();
-    yield* startTopicSources(normalized, options, {
+    const startedSourceFibers = yield* startTopicSources(normalized, options, {
       publish: (topic, row) => publishWithTransport(topic, row, "internal"),
       deltaPublish: (topic, patch) => deltaPublishWithTransport(topic, patch, "internal"),
       deleteById: (topic, id) => deleteByIdWithTransport(topic, id, "internal"),
       recordKafkaMetrics,
     });
+    sourceFibers.push(...startedSourceFibers);
 
     return runtime;
   })();
@@ -749,6 +791,97 @@ function kafkaVerificationGroups(sources: readonly KafkaSourceForVerification[])
   }));
 }
 
+type RuntimeQueryLimits = NormalizedViewServerConfig["limits"];
+
+function validateRuntimeQueryLimits(
+  topic: string,
+  query: RuntimeQuery,
+  limits: RuntimeQueryLimits,
+): Effect.Effect<RuntimeQuery, ViewServerError> {
+  return Effect.fnUntraced(function* () {
+    if (query.offset !== undefined && (!Number.isInteger(query.offset) || query.offset < 0)) {
+      return yield* Effect.fail(invalidQuery(topic, "Query offset must be a non-negative integer"));
+    }
+    if (query.limit !== undefined && (!Number.isInteger(query.limit) || query.limit <= 0)) {
+      return yield* Effect.fail(invalidQuery(topic, "Query limit must be a positive integer"));
+    }
+    const limitedQuery =
+      query.limit === undefined ? { ...query, limit: limits.maxPageSize } : query;
+    if (limitedQuery.limit !== undefined && limitedQuery.limit > limits.maxPageSize) {
+      return yield* Effect.fail(
+        invalidQuery(
+          topic,
+          `Query limit ${limitedQuery.limit} exceeds maxPageSize ${limits.maxPageSize}`,
+        ),
+      );
+    }
+    if (isRuntimeGroupedQuery(limitedQuery)) {
+      yield* validateGroupedQueryLimits(topic, limitedQuery, limits);
+    }
+    const filterStats = runtimeFilterStats(limitedQuery.where);
+    if (filterStats.depth > limits.maxFilterDepth) {
+      return yield* Effect.fail(
+        invalidQuery(
+          topic,
+          `Query filter depth ${filterStats.depth} exceeds maxFilterDepth ${limits.maxFilterDepth}`,
+        ),
+      );
+    }
+    if (filterStats.conditions > limits.maxFilterConditions) {
+      return yield* Effect.fail(
+        invalidQuery(
+          topic,
+          `Query filter conditions ${filterStats.conditions} exceeds maxFilterConditions ${limits.maxFilterConditions}`,
+        ),
+      );
+    }
+    return limitedQuery;
+  })();
+}
+
+function validateGroupedQueryLimits(
+  topic: string,
+  query: RuntimeGroupedQuery,
+  limits: RuntimeQueryLimits,
+): Effect.Effect<void, ViewServerError> {
+  return Effect.fnUntraced(function* () {
+    if (query.groupBy.length > limits.maxGroupByFields) {
+      return yield* Effect.fail(
+        invalidQuery(
+          topic,
+          `Query groupBy field count ${query.groupBy.length} exceeds maxGroupByFields ${limits.maxGroupByFields}`,
+        ),
+      );
+    }
+    const aggregateCount = Object.keys(query.aggregates).length;
+    if (aggregateCount > limits.maxAggregateCount) {
+      return yield* Effect.fail(
+        invalidQuery(
+          topic,
+          `Query aggregate count ${aggregateCount} exceeds maxAggregateCount ${limits.maxAggregateCount}`,
+        ),
+      );
+    }
+  })();
+}
+
+function runtimeFilterStats(node: RuntimeFilterNode | undefined): {
+  readonly depth: number;
+  readonly conditions: number;
+} {
+  if (node === undefined) {
+    return { depth: 0, conditions: 0 };
+  }
+  if ("conditions" in node) {
+    const childStats = node.conditions.map(runtimeFilterStats);
+    return {
+      depth: 1 + childStats.reduce((max, stats) => Math.max(max, stats.depth), 0),
+      conditions: childStats.reduce((sum, stats) => sum + stats.conditions, 0),
+    };
+  }
+  return { depth: 1, conditions: 1 };
+}
+
 function startTopicSources(
   config: NormalizedViewServerConfig,
   options: ViewServerRuntimeOptions,
@@ -767,9 +900,14 @@ function startTopicSources(
       metrics: KafkaBatchMetrics,
     ) => Effect.Effect<void, ViewServerError>;
   },
-): Effect.Effect<void, ViewServerError, import("effect/Scope").Scope> {
+): Effect.Effect<
+  readonly Fiber.Fiber<void, ViewServerError>[],
+  ViewServerError,
+  import("effect/Scope").Scope
+> {
   return Effect.fn("view-server.runtime.sources.start")(function* () {
     const entries = Object.entries(config.topics);
+    const fibers: Fiber.Fiber<void, ViewServerError>[] = [];
     yield* Effect.annotateCurrentSpan({
       "view_server.batch_size": entries.length,
     });
@@ -791,9 +929,10 @@ function startTopicSources(
             deleteById: (id) => runtime.deleteById(topic, id),
           };
           if (topicConfig.source._tag === "EffectSource") {
-            yield* topicConfig.source
+            const fiber = yield* topicConfig.source
               .run(context)
-              .pipe(Effect.forkScoped({ startImmediately: true }), Effect.asVoid);
+              .pipe(Effect.forkScoped({ startImmediately: true }));
+            fibers.push(fiber);
             return;
           }
           const source = topicConfig.source;
@@ -806,16 +945,18 @@ function startTopicSources(
               ),
             );
           }
-          yield* runKafkaSource({
+          const fiber = yield* runKafkaSource({
             viewTopic: topic,
             idField: topicConfig.id,
             source,
             consumer,
             runtime: context,
             onBatchMetrics: (metrics) => runtime.recordKafkaMetrics(topic, metrics),
-          }).pipe(Effect.forkScoped({ startImmediately: true }), Effect.asVoid);
+          }).pipe(Effect.forkScoped({ startImmediately: true }));
+          fibers.push(fiber);
         }).pipe(Effect.withSpan("view-server.runtime.source.start")),
       { discard: true },
     );
+    return fibers;
   })();
 }

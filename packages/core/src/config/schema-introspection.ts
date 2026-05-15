@@ -5,14 +5,11 @@ export function literalStringFieldsForSchema(
   schema: Schema.Decoder<RowObject, never>,
 ): ReadonlySet<string> {
   const fields = new Set<string>();
-  if (!hasAst(schema) || !isRecord(schema.ast) || schema.ast._tag !== "Objects") {
+  const signatures = propertySignaturesForSchema(schema);
+  if (signatures === undefined) {
     return fields;
   }
-  const propertySignatures = schema.ast.propertySignatures;
-  if (!Array.isArray(propertySignatures)) {
-    return fields;
-  }
-  for (const signature of propertySignatures) {
+  for (const signature of signatures) {
     if (!isRecord(signature) || typeof signature.name !== "string") {
       continue;
     }
@@ -21,6 +18,39 @@ export function literalStringFieldsForSchema(
     }
   }
   return fields;
+}
+
+export function fieldNamesForSchema(
+  schema: Schema.Decoder<RowObject, never>,
+): ReadonlySet<string> | undefined {
+  const signatures = propertySignaturesForSchema(schema);
+  if (signatures === undefined) {
+    return undefined;
+  }
+  const fields = new Set<string>();
+  for (const signature of signatures) {
+    if (isRecord(signature) && typeof signature.name === "string") {
+      fields.add(signature.name);
+    }
+  }
+  return fields;
+}
+
+export function schemaHasField(
+  schema: Schema.Decoder<RowObject, never>,
+  field: string,
+): boolean | undefined {
+  return fieldNamesForSchema(schema)?.has(field);
+}
+
+function propertySignaturesForSchema(
+  schema: Schema.Decoder<RowObject, never>,
+): readonly unknown[] | undefined {
+  if (!hasAst(schema) || !isRecord(schema.ast) || schema.ast._tag !== "Objects") {
+    return undefined;
+  }
+  const propertySignatures = schema.ast.propertySignatures;
+  return Array.isArray(propertySignatures) ? propertySignatures : undefined;
 }
 
 function isStringLiteralOnlyAst(ast: unknown): boolean {

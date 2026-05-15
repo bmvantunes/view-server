@@ -115,6 +115,18 @@ export class InvalidStartupEnv extends Schema.TaggedErrorClass<InvalidStartupEnv
   },
 ) {}
 
+export class InvalidConfig extends Schema.TaggedErrorClass<InvalidConfig>()("InvalidConfig", {
+  field: Schema.optional(Schema.String),
+  message: Schema.String,
+  cause: Schema.optional(Schema.Defect),
+}) {}
+
+export class ServerShutdown extends Schema.TaggedErrorClass<ServerShutdown>()("ServerShutdown", {
+  topic: Schema.optional(Schema.String),
+  requestId: Schema.optional(Schema.String),
+  message: Schema.String,
+}) {}
+
 export const ViewServerError = Schema.Union([
   MissingTopic,
   MissingTopicId,
@@ -132,6 +144,8 @@ export const ViewServerError = Schema.Union([
   TransportError,
   BackpressureExceeded,
   InvalidStartupEnv,
+  InvalidConfig,
+  ServerShutdown,
 ]);
 
 export type ViewServerError = typeof ViewServerError.Type;
@@ -221,6 +235,24 @@ export const invalidStartupEnv = (
     ...(error === undefined ? {} : { cause: error }),
   });
 
+export const invalidConfig = (message: string, field?: string, error?: unknown): InvalidConfig =>
+  new InvalidConfig({
+    message,
+    ...(field === undefined ? {} : { field }),
+    ...(error === undefined ? {} : { cause: error }),
+  });
+
+export const serverShutdown = (
+  message: string,
+  topic?: string,
+  requestId?: string,
+): ServerShutdown =>
+  new ServerShutdown({
+    message,
+    ...(topic === undefined ? {} : { topic }),
+    ...(requestId === undefined ? {} : { requestId }),
+  });
+
 export function isViewServerError(error: unknown): error is ViewServerError {
   return (
     typeof error === "object" &&
@@ -248,4 +280,6 @@ const viewServerErrorTags = new Set([
   "TransportError",
   "BackpressureExceeded",
   "InvalidStartupEnv",
+  "InvalidConfig",
+  "ServerShutdown",
 ]);

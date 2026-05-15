@@ -2,7 +2,13 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { invalidStartupEnv, type InvalidStartupEnv } from "../errors.ts";
+import { readViewServerConfigExport, type ViewServerConfig } from "../config/index.ts";
+import {
+  invalidConfig,
+  invalidStartupEnv,
+  type InvalidConfig,
+  type InvalidStartupEnv,
+} from "../errors.ts";
 
 const ViewServerPort = Schema.NumberFromString.pipe(
   Schema.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 65_535 })),
@@ -20,6 +26,26 @@ export type ViewServerStartupEnv = {
   readonly kafkaBrokers: readonly [string, ...string[]];
   readonly rpcPort: number;
   readonly rpcPath: `/${string}`;
+};
+
+export const RawViewServerProductionEnv = Schema.Struct({
+  KAFKA_BROKERS: Schema.NonEmptyString,
+  VIEW_SERVER_PORT: ViewServerPort,
+  VIEW_SERVER_RPC_PATH: Schema.NonEmptyString,
+  VIEW_SERVER_CONFIG_MODULE: Schema.NonEmptyString,
+  VIEW_SERVER_CONFIG_EXPORT: Schema.optional(Schema.NonEmptyString),
+});
+
+export type RawViewServerProductionEnv = typeof RawViewServerProductionEnv.Type;
+
+export type ViewServerProductionEnv = ViewServerStartupEnv & {
+  readonly configModuleUrl: string;
+  readonly configExport?: string | undefined;
+};
+
+export type ViewServerProductionConfig = {
+  readonly env: ViewServerProductionEnv;
+  readonly config: ViewServerConfig;
 };
 
 export class ViewServerStartupEnvService extends Context.Service<
@@ -62,6 +88,58 @@ export function decodeViewServerStartupEnv(
   })();
 }
 
+export function decodeViewServerProductionEnv(
+  env: Record<string, string | undefined>,
+): Effect.Effect<ViewServerProductionEnv, InvalidStartupEnv> {
+  return Effect.fn("view-server.env.production.decode")(function* () {
+    const raw = yield* Schema.decodeUnknownEffect(RawViewServerProductionEnv)(env).pipe(
+      Effect.mapError((error) => invalidStartupEnv("Invalid production environment", error)),
+    );
+    const startup = yield* decodeViewServerStartupEnv(env);
+    return {
+      ...startup,
+      configModuleUrl: raw.VIEW_SERVER_CONFIG_MODULE,
+      ...(raw.VIEW_SERVER_CONFIG_EXPORT === undefined
+        ? {}
+        : { configExport: raw.VIEW_SERVER_CONFIG_EXPORT }),
+    };
+  })();
+}
+
+export function loadViewServerProductionConfigFromEnv(
+  env: Record<string, string | undefined>,
+): Effect.Effect<ViewServerProductionConfig, InvalidStartupEnv | InvalidConfig> {
+  return Effect.fn("view-server.env.production.load_config")(function* () {
+    const productionEnv = yield* decodeViewServerProductionEnv(env);
+    const configModuleUrl = yield* Effect.try({
+      try: () => toImportUrl(productionEnv.configModuleUrl),
+      catch: (error) =>
+        invalidStartupEnv(
+          "Failed to resolve VIEW_SERVER_CONFIG_MODULE",
+          error,
+          "VIEW_SERVER_CONFIG_MODULE",
+        ),
+    });
+    const moduleValue = yield* Effect.tryPromise({
+      try: () => importConfigModule(configModuleUrl),
+      catch: (error) =>
+        invalidStartupEnv(
+          `Failed to import VIEW_SERVER_CONFIG_MODULE ${configModuleUrl}`,
+          error,
+          "VIEW_SERVER_CONFIG_MODULE",
+        ),
+    });
+    const config = yield* Effect.try({
+      try: () => readViewServerConfigExport(moduleValue, productionEnv.configExport),
+      catch: (error) => invalidConfig("Invalid production config module", "config", error),
+    });
+    return {
+      env: productionEnv,
+      config,
+    };
+  })();
+}
+
 export const layerViewServerStartupEnv = (
   env: Record<string, string | undefined>,
 ): Layer.Layer<ViewServerStartupEnvService, InvalidStartupEnv> =>
@@ -78,4 +156,29 @@ function splitKafkaBrokers(value: string): readonly [string, ...string[]] | unde
 
 function isRpcPath(value: string): value is `/${string}` {
   return value.startsWith("/");
+}
+
+function toImportUrl(value: string): string {
+  if (isAbsoluteUrl(value)) {
+    return value;
+  }
+  return new URL(value, fileUrlForCwd()).href;
+}
+
+function isAbsoluteUrl(value: string): boolean {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function importConfigModule(configModuleUrl: string): Promise<unknown> {
+  return import(/* @vite-ignore */ configModuleUrl);
+}
+
+function fileUrlForCwd(): string {
+  const cwd = typeof process === "undefined" ? "/" : process.cwd();
+  return `file://${cwd.endsWith("/") ? cwd : `${cwd}/`}`;
 }

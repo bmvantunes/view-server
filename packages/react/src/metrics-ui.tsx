@@ -45,7 +45,7 @@ export const viewServerHealthQuery = {
     updatedAt: true,
   },
   orderBy: [{ field: "id", direction: "asc" }],
-  limit: 2_000,
+  limit: 50,
 } satisfies RawQuery<
   ViewServerHealthRow,
   {

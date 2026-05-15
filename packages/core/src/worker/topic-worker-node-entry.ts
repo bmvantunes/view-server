@@ -9,8 +9,8 @@ import { workerData } from "node:worker_threads";
 import {
   type NormalizedViewServerConfig,
   normalizeConfig,
+  readViewServerConfigExport,
   type TopicConfig,
-  type TopicConfigMap,
   type ViewServerConfig,
 } from "../config/index.ts";
 import { missingTopic, schemaDecodeFailed, type ViewServerError } from "../errors.ts";
@@ -187,31 +187,5 @@ async function importConfigModule(configModuleUrl: string): Promise<unknown> {
 }
 
 function readConfigExport(moduleValue: unknown): ViewServerConfig {
-  if (!isRecord(moduleValue)) {
-    throw new Error("Config module did not resolve to an object");
-  }
-  const config = moduleValue.default ?? moduleValue.config ?? moduleValue.viewServerConfig;
-  if (!isViewServerConfig(config)) {
-    throw new Error("Config module must export a defineConfig result");
-  }
-  return config;
-}
-
-function isViewServerConfig(value: unknown): value is ViewServerConfig {
-  return isRecord(value) && isTopicConfigMap(value.topics);
-}
-
-function isTopicConfigMap(value: unknown): value is TopicConfigMap {
-  if (!isRecord(value)) {
-    return false;
-  }
-  return Object.values(value).every(isTopicConfig);
-}
-
-function isTopicConfig(value: unknown): value is TopicConfig {
-  return isRecord(value) && typeof value.id === "string" && Schema.isSchema(value.schema);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  return readViewServerConfigExport(moduleValue);
 }

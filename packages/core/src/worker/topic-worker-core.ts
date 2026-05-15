@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -13,6 +14,7 @@ import {
   invalidPublish,
   missingTopicId,
   schemaDecodeFailed,
+  serverShutdown,
   type ViewServerError,
 } from "../errors.ts";
 import type {
@@ -160,6 +162,16 @@ type GroupedRefreshEntry = {
   state: "queued" | "running";
 };
 
+type ShutdownSubscription = {
+  readonly requestId: string;
+  readonly queue: ActiveSubscription["queue"];
+};
+
+type ShutdownState = {
+  readonly subscriptions: readonly ShutdownSubscription[];
+  readonly backgroundFibers: readonly Fiber.Fiber<void, unknown>[];
+};
+
 export type TopicWorkerCoreOptions = {
   readonly initialRows?: readonly RuntimeRow[] | undefined;
   readonly snapshotBackend?: SnapshotBackend | undefined;
@@ -199,6 +211,8 @@ export function makeTopicWorkerCore(
     const gate = yield* Semaphore.make(1);
     const activePlanBuildQueue = yield* Queue.unbounded<string>();
     const scope = yield* Effect.scope;
+    const activePlanBuildFibers: Fiber.Fiber<void, unknown>[] = [];
+    const groupedRefreshFibers = new Set<Fiber.Fiber<void, unknown>>();
     const subscriptions = new Map<string, ActiveSubscription>();
     const activePlans = new Map<string, ActiveRawPlanEntry>();
     const activePlanBuilds = new Map<string, ActivePlanBuildEntry>();
@@ -541,11 +555,19 @@ export function makeTopicWorkerCore(
           pendingRequestIds: new Set(),
           state: "queued",
         });
-        yield* runGroupedRefresh(key).pipe(
+        let fiber: Fiber.Fiber<void, unknown> | undefined;
+        const trackedRefresh = runGroupedRefresh(key).pipe(
           Effect.catchCause(() => gate.withPermit(resetGroupedRefresh(key))),
-          Effect.forkIn(scope),
-          Effect.asVoid,
+          Effect.ensuring(
+            Effect.sync(() => {
+              if (fiber !== undefined) {
+                groupedRefreshFibers.delete(fiber);
+              }
+            }),
+          ),
         );
+        fiber = yield* Effect.forkIn(trackedRefresh, scope, { startImmediately: true });
+        groupedRefreshFibers.add(fiber);
       });
     }
 
@@ -1525,25 +1547,47 @@ export function makeTopicWorkerCore(
 
       getRowsForTest: Effect.sync(() => rows.map((row) => ({ ...row }))),
 
-      shutdown: gate.withPermit(
-        Effect.fn("view-server.worker.shutdown")(function* () {
-          yield* Effect.annotateCurrentSpan({
-            "view_server.topic": topic,
-            "view_server.worker_version": version.toString(),
-          });
-          status = "stopping";
-          yield* backend.close();
-          yield* Effect.forEach(
-            subscriptions.values(),
-            (subscription) => Queue.end(subscription.queue),
-            { discard: true },
-          );
-          subscriptions.clear();
-          activePlans.clear();
-          activePlanBuilds.clear();
-          groupedRefreshes.clear();
-        })(),
-      ),
+      shutdown: Effect.fn("view-server.worker.shutdown")(function* () {
+        const shutdownState = yield* gate.withPermit(
+          Effect.sync((): ShutdownState => {
+            status = "stopping";
+            const shutdownSubscriptions = Array.from(
+              subscriptions.values(),
+              (subscription): ShutdownSubscription => ({
+                requestId: subscription.requestId,
+                queue: subscription.queue,
+              }),
+            );
+            const backgroundFibers = [...activePlanBuildFibers, ...groupedRefreshFibers];
+            subscriptions.clear();
+            activePlans.clear();
+            activePlanBuilds.clear();
+            groupedRefreshes.clear();
+            groupedRefreshFibers.clear();
+            return {
+              subscriptions: shutdownSubscriptions,
+              backgroundFibers,
+            };
+          }),
+        );
+        yield* Effect.annotateCurrentSpan({
+          "view_server.topic": topic,
+          "view_server.worker_version": version.toString(),
+        });
+        yield* Effect.forEach(
+          shutdownState.subscriptions,
+          (subscription) =>
+            Queue.fail(
+              subscription.queue,
+              serverShutdown("Topic worker is shutting down", topic, subscription.requestId),
+            ),
+          { discard: true },
+        );
+        yield* Effect.forEach(shutdownState.backgroundFibers, (fiber) => Fiber.interrupt(fiber), {
+          discard: true,
+        }).pipe(Effect.ignore);
+        yield* backend.close();
+      })(),
     };
 
     for (const row of options.initialRows ?? []) {
@@ -1558,11 +1602,11 @@ export function makeTopicWorkerCore(
       version,
       literalStringFields,
     });
-    yield* Effect.forEach(
+    const buildFibers = yield* Effect.forEach(
       Array.from({ length: activePlanBuildConcurrency }, (_, index) => index),
       () => Effect.forkIn(activePlanBuildLoop(), scope, { startImmediately: true }),
-      { discard: true },
     );
+    activePlanBuildFibers.push(...buildFibers);
 
     yield* Effect.addFinalizer(() => worker.shutdown.pipe(Effect.ignore));
 

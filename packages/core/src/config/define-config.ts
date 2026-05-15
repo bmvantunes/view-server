@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type { ViewServerError } from "../errors.ts";
+import { schemaHasField } from "./schema-introspection.ts";
 
 export const VIEW_SERVER_HEALTH_TOPIC = "__view_server_health";
 export const RESERVED_TOPIC_PREFIX = "__";
@@ -128,6 +129,15 @@ export type ViewServerConfig<TTopics extends TopicConfigMap = TopicConfigMap> = 
         readonly groupedRefreshDebounceMs?: number | undefined;
       }
     | undefined;
+  readonly limits?:
+    | {
+        readonly maxPageSize?: number | undefined;
+        readonly maxAggregateCount?: number | undefined;
+        readonly maxGroupByFields?: number | undefined;
+        readonly maxFilterDepth?: number | undefined;
+        readonly maxFilterConditions?: number | undefined;
+      }
+    | undefined;
   readonly health?:
     | {
         readonly path?: HttpPath | undefined;
@@ -163,6 +173,13 @@ export type NormalizedViewServerConfig = {
     readonly maxActivePlanEstimatedBytes?: number | undefined;
     readonly activePlanBuildConcurrency: number;
     readonly groupedRefreshDebounceMs: number;
+  };
+  readonly limits: {
+    readonly maxPageSize: number;
+    readonly maxAggregateCount: number;
+    readonly maxGroupByFields: number;
+    readonly maxFilterDepth: number;
+    readonly maxFilterConditions: number;
   };
   readonly health: {
     readonly path: HttpPath;
@@ -269,11 +286,55 @@ const healthTopic = {
 } satisfies TopicConfig<ViewServerHealthRow, "id">;
 
 export function normalizeConfig(config: ViewServerConfig): NormalizedViewServerConfig {
-  for (const topic of Object.keys(config.topics)) {
+  for (const [topic, topicConfig] of Object.entries(config.topics)) {
     if (topic.startsWith(RESERVED_TOPIC_PREFIX)) {
       throw new Error(`User-defined topic ${topic} uses reserved prefix ${RESERVED_TOPIC_PREFIX}`);
     }
+    const idExists = schemaHasField(topicConfig.schema, topicConfig.id);
+    if (idExists === false) {
+      throw new Error(`Topic ${topic} id field ${topicConfig.id} is not present in the schema`);
+    }
   }
+
+  const worker = {
+    maxQueueDepth: config.worker?.maxQueueDepth ?? 100_000,
+    mutationLogSize: config.worker?.mutationLogSize ?? 10_000,
+    deltaCoalescing: config.worker?.deltaCoalescing ?? true,
+    activePlanBuildConcurrency: config.worker?.activePlanBuildConcurrency ?? 1,
+    groupedRefreshDebounceMs: config.worker?.groupedRefreshDebounceMs ?? 50,
+    ...(config.worker?.maxActivePlans === undefined
+      ? {}
+      : { maxActivePlans: config.worker.maxActivePlans }),
+    ...(config.worker?.maxActivePlanEstimatedBytes === undefined
+      ? {}
+      : { maxActivePlanEstimatedBytes: config.worker.maxActivePlanEstimatedBytes }),
+  };
+  validatePositiveInt("worker.maxQueueDepth", worker.maxQueueDepth);
+  validatePositiveInt("worker.mutationLogSize", worker.mutationLogSize);
+  validatePositiveInt("worker.activePlanBuildConcurrency", worker.activePlanBuildConcurrency);
+  validateNonNegativeNumber("worker.groupedRefreshDebounceMs", worker.groupedRefreshDebounceMs);
+  if (worker.maxActivePlans !== undefined) {
+    validateNonNegativeInt("worker.maxActivePlans", worker.maxActivePlans);
+  }
+  if (worker.maxActivePlanEstimatedBytes !== undefined) {
+    validateNonNegativeNumber(
+      "worker.maxActivePlanEstimatedBytes",
+      worker.maxActivePlanEstimatedBytes,
+    );
+  }
+
+  const limits = {
+    maxPageSize: config.limits?.maxPageSize ?? 50,
+    maxAggregateCount: config.limits?.maxAggregateCount ?? 32,
+    maxGroupByFields: config.limits?.maxGroupByFields ?? 8,
+    maxFilterDepth: config.limits?.maxFilterDepth ?? 8,
+    maxFilterConditions: config.limits?.maxFilterConditions ?? 64,
+  };
+  validatePositiveInt("limits.maxPageSize", limits.maxPageSize);
+  validatePositiveInt("limits.maxAggregateCount", limits.maxAggregateCount);
+  validatePositiveInt("limits.maxGroupByFields", limits.maxGroupByFields);
+  validatePositiveInt("limits.maxFilterDepth", limits.maxFilterDepth);
+  validatePositiveInt("limits.maxFilterConditions", limits.maxFilterConditions);
 
   return {
     topics: {
@@ -289,19 +350,8 @@ export function normalizeConfig(config: ViewServerConfig): NormalizedViewServerC
       serialization: "ndjson",
       path: config.rpc?.path ?? "/rpc",
     },
-    worker: {
-      maxQueueDepth: config.worker?.maxQueueDepth ?? 100_000,
-      mutationLogSize: config.worker?.mutationLogSize ?? 10_000,
-      deltaCoalescing: config.worker?.deltaCoalescing ?? true,
-      activePlanBuildConcurrency: config.worker?.activePlanBuildConcurrency ?? 1,
-      groupedRefreshDebounceMs: config.worker?.groupedRefreshDebounceMs ?? 50,
-      ...(config.worker?.maxActivePlans === undefined
-        ? {}
-        : { maxActivePlans: config.worker.maxActivePlans }),
-      ...(config.worker?.maxActivePlanEstimatedBytes === undefined
-        ? {}
-        : { maxActivePlanEstimatedBytes: config.worker.maxActivePlanEstimatedBytes }),
-    },
+    worker,
+    limits,
     health: {
       path: config.health?.path ?? "/health",
       readyPath: config.health?.readyPath ?? "/ready",
@@ -311,4 +361,22 @@ export function normalizeConfig(config: ViewServerConfig): NormalizedViewServerC
 
 export function isReservedTopic(topic: string): boolean {
   return topic.startsWith(RESERVED_TOPIC_PREFIX);
+}
+
+function validatePositiveInt(field: string, value: number): void {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${field} must be a positive integer`);
+  }
+}
+
+function validateNonNegativeInt(field: string, value: number): void {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative integer`);
+  }
+}
+
+function validateNonNegativeNumber(field: string, value: number): void {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative number`);
+  }
 }
