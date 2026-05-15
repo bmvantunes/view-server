@@ -7,6 +7,7 @@ export default {
     force: true,
     include: [
       "@effect/platform-browser",
+      "effect/Cause",
       "effect/BigDecimal",
       "effect/Context",
       "effect/Deferred",
@@ -31,6 +32,7 @@ export default {
     exclude: ["@view-server/core", "@view-server/react"],
   },
   resolve: {
+    tsconfigPaths: true,
     alias: {
       "vite-plus/test": "vitest",
     },

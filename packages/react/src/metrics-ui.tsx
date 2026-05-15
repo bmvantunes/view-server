@@ -1,13 +1,8 @@
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/unstable/reactivity";
-import {
-  VIEW_SERVER_HEALTH_TOPIC,
-  type InferReadableQueryResult,
-  type LiveQueryResult,
-  type LiveQueryValue,
-  type RawQuery,
-  type ViewServerHealthRow,
-} from "@view-server/core";
+import { VIEW_SERVER_HEALTH_TOPIC, type ViewServerHealthRow } from "@view-server/core/config";
+import type { InferReadableQueryResult, RawQuery } from "@view-server/core/query";
+import type { LiveQueryResult, LiveQueryValue } from "@view-server/core/client";
 
 export const viewServerHealthQuery = {
   fields: {

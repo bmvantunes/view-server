@@ -232,10 +232,10 @@ importers:
         specifier: workspace:*
         version: link:../core
       effect:
-        specifier: 'catalog:'
+        specifier: 4.0.0-beta.65
         version: 4.0.0-beta.65
       react:
-        specifier: 'catalog:'
+        specifier: ^19.0.0
         version: 19.2.6
     devDependencies:
       '@effect/platform-node':
@@ -284,7 +284,7 @@ importers:
         specifier: workspace:*
         version: link:../react
       effect:
-        specifier: 'catalog:'
+        specifier: 4.0.0-beta.65
         version: 4.0.0-beta.65
     devDependencies:
       '@effect/platform-browser':

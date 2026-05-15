@@ -12,16 +12,14 @@ import {
   queryResultToRuntimeRows,
   rowKeyForTypedQuery,
   runtimeRowsToQueryResult,
-  type InferReadableQueryResult,
   type LiveQueryInitialData,
   type LiveQueryResult,
-  type QueryForReadableTopic,
-  type ReadableTopicName,
-  transportError,
   type ViewServerClient,
-  type ViewServerConfig,
-  ViewServerRpcs,
-} from "@view-server/core";
+} from "@view-server/core/client";
+import type { ReadableTopicName, ViewServerConfig } from "@view-server/core/config";
+import { transportError } from "@view-server/core/errors";
+import type { InferReadableQueryResult, QueryForReadableTopic } from "@view-server/core/query";
+import { ViewServerRpcs } from "@view-server/core/rpc";
 import {
   createContext,
   createElement,

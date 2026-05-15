@@ -1,27 +1,33 @@
 import * as Effect from "effect/Effect";
-import * as RpcTest from "effect/unstable/rpc/RpcTest";
+import * as Stream from "effect/Stream";
 import {
   createViewServerClient,
   type ActiveSubscription,
+  type LiveQueryInitialData,
+  type ViewServerClient,
+  type ViewServerRpcTransport,
+} from "@view-server/core/client";
+import type {
+  ReadableTopicName,
+  TopicIdFromConfig,
+  TopicName,
+  TopicPatchFromConfig,
+  TopicRowFromConfig,
+  ViewServerConfig,
+} from "@view-server/core/config";
+import type { ViewServerError } from "@view-server/core/errors";
+import type {
+  InferReadableQueryResult,
+  QueryForReadableTopic,
+  RuntimeRow,
+  SubscriptionEvent,
+} from "@view-server/core/query";
+import {
   makeViewServerRuntime,
   type HealthResponse,
-  type InferReadableQueryResult,
-  type LiveQueryInitialData,
-  type QueryForReadableTopic,
-  type ReadableTopicName,
-  type RuntimeRow,
-  type SubscriptionEvent,
-  type TopicIdFromConfig,
-  type TopicName,
-  type TopicPatchFromConfig,
-  type TopicRowFromConfig,
-  type ViewServerClient,
-  type ViewServerConfig,
-  type ViewServerError,
-  ViewServerRuntime,
-  ViewServerRpcs,
-  ViewServerHandlersLive,
-} from "@view-server/core";
+  type ViewServerRuntimeShape,
+} from "@view-server/core/runtime";
+import { fromWireRow, wireQueryResponse, wireSubscriptionEvent } from "@view-server/core/rpc";
 import { createViewServerHooks, type ViewServerHooks } from "@view-server/react";
 
 export type InMemoryViewServer<TConfig extends ViewServerConfig> = {
@@ -75,11 +81,7 @@ export function inMemoryViewServer<const TConfig extends ViewServerConfig>(
       initialRows: normalizeInitialRows(options.initialRows),
       useMemorySnapshotBackend: true,
     });
-    const rpcClient = yield* RpcTest.makeClient(ViewServerRpcs).pipe(
-      Effect.provide(ViewServerHandlersLive),
-      Effect.provideService(ViewServerRuntime, runtime),
-    );
-    const client = createViewServerClient<TConfig>(rpcClient, config);
+    const client = createViewServerClient<TConfig>(runtimeTransport(runtime), config);
     const hooks = createViewServerHooks(client, config);
 
     const server: InMemoryViewServer<TConfig> = {
@@ -115,4 +117,20 @@ function normalizeInitialRows<TConfig extends ViewServerConfig>(
     }
   }
   return normalized;
+}
+
+function runtimeTransport(runtime: ViewServerRuntimeShape): ViewServerRpcTransport {
+  return {
+    Query: (payload) =>
+      runtime.query(payload.topic, payload.query).pipe(Effect.map(wireQueryResponse)),
+    Subscribe: (payload) =>
+      runtime
+        .subscribe(payload.requestId, payload.topic, payload.query)
+        .pipe(Stream.map(wireSubscriptionEvent)),
+    Unsubscribe: (payload) => runtime.unsubscribe(payload.requestId),
+    Publish: (payload) => runtime.publish(payload.topic, fromWireRow(payload.row)),
+    DeltaPublish: (payload) => runtime.deltaPublish(payload.topic, fromWireRow(payload.patch)),
+    DeleteById: (payload) => runtime.deleteById(payload.topic, payload.id),
+    Health: () => runtime.health,
+  };
 }

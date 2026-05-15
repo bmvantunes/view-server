@@ -11,6 +11,7 @@ export default defineConfig({
     force: true,
     include: [
       "@effect/platform-browser",
+      "effect/Cause",
       "effect/BigDecimal",
       "effect/Context",
       "effect/Deferred",
@@ -35,6 +36,7 @@ export default defineConfig({
     exclude: ["@view-server/core", "@view-server/react", "@view-server/testing"],
   },
   resolve: {
+    tsconfigPaths: true,
     alias: {
       "@view-server/react": reactSource,
       "vite-plus/test": "vitest",

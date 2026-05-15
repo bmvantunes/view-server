@@ -23,6 +23,7 @@ export default {
     force: true,
     include: [
       "@effect/platform-browser",
+      "effect/Cause",
       "effect/BigDecimal",
       "effect/Context",
       "effect/Deferred",

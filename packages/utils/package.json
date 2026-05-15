@@ -1,6 +1,7 @@
 {
   "name": "utils",
   "version": "0.0.0",
+  "private": true,
   "description": "A starter for creating a TypeScript package.",
   "homepage": "https://github.com/author/library#readme",
   "bugs": {
@@ -16,6 +17,7 @@
     "dist"
   ],
   "type": "module",
+  "sideEffects": false,
   "exports": {
     ".": "./dist/index.mjs",
     "./package.json": "./package.json"
@@ -36,5 +38,8 @@
     "bumpp": "^11.0.1",
     "typescript": "^6.0.2",
     "vite-plus": "^0.1.14"
+  },
+  "engines": {
+    "node": ">=26.0.0"
   }
 }

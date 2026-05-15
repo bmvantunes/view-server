@@ -1,31 +1,64 @@
 {
   "name": "@view-server/core",
   "version": "0.0.0",
-  "private": true,
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "type": "module",
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./src/index.ts",
-      "import": "./src/index.ts"
+      "import": "./dist/index.mjs"
+    },
+    "./client": {
+      "types": "./src/client.ts",
+      "import": "./dist/client.mjs"
+    },
+    "./config": {
+      "types": "./src/config.ts",
+      "import": "./dist/config.mjs"
+    },
+    "./errors": {
+      "types": "./src/errors.ts",
+      "import": "./dist/errors.mjs"
+    },
+    "./kafka": {
+      "types": "./src/kafka.ts",
+      "import": "./dist/kafka.mjs"
     },
     "./snapshot/chdb": {
       "types": "./src/snapshot/chdb-backend.ts",
-      "import": "./src/snapshot/chdb-backend.ts"
-    },
-    "./rpc/websocket": {
-      "types": "./src/rpc/websocket.ts",
-      "import": "./src/rpc/websocket.ts"
+      "import": "./dist/snapshot/chdb-backend.mjs"
     },
     "./kafka/platformatic": {
       "types": "./src/kafka/platformatic-consumer.ts",
-      "import": "./src/kafka/platformatic-consumer.ts"
+      "import": "./dist/kafka/platformatic-consumer.mjs"
+    },
+    "./query": {
+      "types": "./src/query.ts",
+      "import": "./dist/query.mjs"
+    },
+    "./rpc": {
+      "types": "./src/rpc.ts",
+      "import": "./dist/rpc.mjs"
+    },
+    "./rpc/websocket": {
+      "types": "./src/rpc/websocket.ts",
+      "import": "./dist/rpc/websocket.mjs"
+    },
+    "./runtime": {
+      "types": "./src/runtime.ts",
+      "import": "./dist/runtime.mjs"
+    },
+    "./snapshot": {
+      "types": "./src/snapshot.ts",
+      "import": "./dist/snapshot.mjs"
     },
     "./worker/node": {
       "types": "./src/worker/topic-worker-node-host.ts",
-      "import": "./src/worker/topic-worker-node-host.ts"
+      "import": "./dist/worker/topic-worker-node-host.mjs"
     },
     "./package.json": "./package.json"
   },
@@ -52,5 +85,11 @@
     "typescript": "catalog:",
     "vite-plus": "catalog:",
     "vitest": "catalog:"
+  },
+  "peerDependencies": {
+    "effect": "4.0.0-beta.65"
+  },
+  "engines": {
+    "node": ">=26.0.0"
   }
 }

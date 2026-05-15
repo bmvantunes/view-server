@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "sideEffects": false,
   "scripts": {
     "dev": "vp dev",
     "server": "node --experimental-strip-types src/server.ts",
@@ -25,5 +26,8 @@
     "typescript": "~6.0.2",
     "vite": "catalog:",
     "vite-plus": "catalog:"
+  },
+  "engines": {
+    "node": ">=26.0.0"
   }
 }
