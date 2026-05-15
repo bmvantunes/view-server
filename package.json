@@ -6,6 +6,9 @@
   "scripts": {
     "ready": "vp check && vp run -r test && vp run -r build",
     "dev": "vp run metrics#dev",
+    "demo:server": "vp run orders-demo#server",
+    "demo:web": "vp run orders-demo#dev",
+    "demo:build": "vp run orders-demo#build",
     "prepare": "vp config"
   },
   "devDependencies": {
@@ -13,7 +16,7 @@
     "vite-plus": "catalog:"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=26.0.0"
   },
   "packageManager": "pnpm@11.0.9",
   "pnpm": {
