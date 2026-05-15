@@ -144,6 +144,7 @@ void Effect.runPromise(
       0.99,
     );
     const metricsMaxMs = max(samples.map((sample) => sample.metricsMs));
+    const buildPendingSamples = samples.filter((sample) => sample.activeBuildPending).length;
     const benchmarkResult: BenchmarkResult = {
       case: {
         operation: config.operation,
@@ -161,6 +162,12 @@ void Effect.runPromise(
         { name: "metricsP95Ms", value: metricsP95Ms, unit: "ms" },
         { name: "metricsP99Ms", value: metricsP99Ms, unit: "ms" },
         { name: "metricsMaxMs", value: metricsMaxMs, unit: "ms" },
+        {
+          name: "buildPendingSamples",
+          value: buildPendingSamples,
+          unit: "count",
+          lowerIsBetter: false,
+        },
         { name: "staleStatusCount", value: eventStats.staleStatusCount, unit: "count" },
         { name: "snapshotCount", value: eventStats.snapshotCount, unit: "count" },
         { name: "deltaCount", value: eventStats.deltaCount, unit: "count" },
@@ -176,13 +183,21 @@ void Effect.runPromise(
         chunkSize: config.chunkSize ?? "default",
       },
       [benchmarkResult],
+      {
+        notes:
+          buildPendingSamples === 0
+            ? [
+                "CI smoke did not overlap measured operations with an active-plan build; use the large local active-plan responsiveness benchmark for build-overlap proof.",
+              ]
+            : undefined,
+      },
     );
     yield* Effect.logInfo(
       [
         "active-plan responsiveness result",
         `operation=${config.operation}`,
         `samples=${samples.length}`,
-        `buildPendingSamples=${samples.filter((sample) => sample.activeBuildPending).length}`,
+        `buildPendingSamples=${buildPendingSamples}`,
         `operationP50Ms=${formatMs(operationP50Ms)}`,
         `operationP95Ms=${formatMs(operationP95Ms)}`,
         `operationP99Ms=${formatMs(operationP99Ms)}`,

@@ -24,6 +24,7 @@ export type BenchmarkArtifact = {
   readonly benchmark: string;
   readonly generatedAt: string;
   readonly config: Readonly<Record<string, BenchmarkPrimitive>>;
+  readonly notes?: readonly string[] | undefined;
   readonly results: readonly BenchmarkResult[];
 };
 
@@ -33,6 +34,10 @@ export type BenchmarkArtifactResult = {
   readonly regressionCount: number;
   readonly warningCount: number;
   readonly summaryPath?: string | undefined;
+};
+
+export type BenchmarkArtifactOptions = {
+  readonly notes?: readonly string[] | undefined;
 };
 
 type BenchmarkComparisonStatus = "pass" | "warn" | "fail";
@@ -63,6 +68,7 @@ export function writeBenchmarkArtifact(
   benchmark: string,
   config: Readonly<Record<string, BenchmarkPrimitive>>,
   results: readonly BenchmarkResult[],
+  options: BenchmarkArtifactOptions = {},
 ): Effect.Effect<BenchmarkArtifactResult> {
   return Effect.fn("view-server.bench.artifact.write")(function* () {
     const generatedAt = DateTime.formatIso(yield* DateTime.now);
@@ -71,6 +77,9 @@ export function writeBenchmarkArtifact(
       benchmark,
       generatedAt,
       config,
+      ...(options.notes === undefined || options.notes.length === 0
+        ? {}
+        : { notes: options.notes }),
       results,
     };
     const artifactPath = benchmarkArtifactPath(benchmark, artifact.generatedAt);
@@ -106,7 +115,12 @@ export function writeBenchmarkArtifact(
       regressionMetricFilter(),
       artifactPath,
     );
-    const summaryPath = yield* appendBenchmarkSummary(comparisons, artifactPath, baselinePath);
+    const summaryPath = yield* appendBenchmarkSummary(
+      comparisons,
+      artifactPath,
+      baselinePath,
+      artifact.notes,
+    );
     const regressions = comparisons.filter((comparison) => comparison.status === "fail");
     const warningCount = comparisons.filter((comparison) => comparison.status === "warn").length;
     if (regressions.length > 0) {
@@ -172,6 +186,7 @@ function decodeBenchmarkArtifact(value: unknown): BenchmarkArtifact {
   const benchmark = value.benchmark;
   const generatedAt = value.generatedAt;
   const config = decodePrimitiveRecord(value.config, "config");
+  const notes = decodeNotes(value.notes);
   const results = decodeBenchmarkResults(value.results);
   if (schemaVersion !== 1 || typeof benchmark !== "string" || typeof generatedAt !== "string") {
     throw new Error("benchmark artifact metadata is invalid");
@@ -181,8 +196,19 @@ function decodeBenchmarkArtifact(value: unknown): BenchmarkArtifact {
     benchmark,
     generatedAt,
     config,
+    ...(notes === undefined ? {} : { notes }),
     results,
   };
+}
+
+function decodeNotes(value: unknown): readonly string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new Error("benchmark artifact notes must be an array of strings");
+  }
+  return value;
 }
 
 function decodeBenchmarkResults(value: unknown): readonly BenchmarkResult[] {
@@ -327,6 +353,7 @@ function appendBenchmarkSummary(
   comparisons: readonly BenchmarkComparison[],
   artifactPath: string,
   baselinePath: string,
+  notes: readonly string[] | undefined,
 ): Effect.Effect<string | undefined> {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (summaryPath === undefined || summaryPath.length === 0) {
@@ -334,7 +361,10 @@ function appendBenchmarkSummary(
   }
   return Effect.tryPromise({
     try: () =>
-      appendFile(summaryPath, benchmarkSummaryMarkdown(comparisons, artifactPath, baselinePath)),
+      appendFile(
+        summaryPath,
+        benchmarkSummaryMarkdown(comparisons, artifactPath, baselinePath, notes),
+      ),
     catch: (cause) =>
       new BenchmarkArtifactError({
         message: `Failed to append benchmark summary: ${String(cause)}`,
@@ -347,6 +377,7 @@ function benchmarkSummaryMarkdown(
   comparisons: readonly BenchmarkComparison[],
   artifactPath: string,
   baselinePath: string,
+  notes: readonly string[] | undefined,
 ): string {
   const title = comparisons[0]?.benchmark ?? "benchmark";
   const lines = [
@@ -374,6 +405,12 @@ function benchmarkSummaryMarkdown(
   }
   if (comparisons.length === 0) {
     lines.push("| pass | no matching metrics | n/a | n/a | n/a | n/a | `" + artifactPath + "` |");
+  }
+  if (notes !== undefined && notes.length > 0) {
+    lines.push("", "Notes:");
+    for (const note of notes) {
+      lines.push(`- ${escapeMarkdown(note)}`);
+    }
   }
   return `${lines.join("\n")}\n\n`;
 }

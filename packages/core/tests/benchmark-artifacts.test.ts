@@ -40,6 +40,7 @@ describe("benchmark artifacts", () => {
               metrics: [{ name: "operationP99Ms", value: 3.5, unit: "ms" }],
             },
           ],
+          { notes: ["smoke artifact note"] },
         );
 
         const artifact = yield* readArtifact(result.artifactPath);
@@ -56,6 +57,7 @@ describe("benchmark artifacts", () => {
             rows: 1_000,
             subscriptions: 5,
           },
+          notes: ["smoke artifact note"],
           results: [
             {
               case: {
@@ -220,6 +222,7 @@ describe("benchmark artifacts", () => {
               metrics: [{ name: "operationP99Ms", value: 1.4, unit: "ms" }],
             },
           ],
+          { notes: ["smoke did not overlap active-plan build"] },
         );
         const summary = yield* readText(summaryPath);
 
@@ -230,6 +233,7 @@ describe("benchmark artifacts", () => {
         expect(summary).toContain("### Benchmark: active-plan-responsiveness");
         expect(summary).toContain("| warn | `operationP99Ms`");
         expect(summary).toContain("40.0% (0.40ms)");
+        expect(summary).toContain("- smoke did not overlap active-plan build");
       }),
     ),
   );
