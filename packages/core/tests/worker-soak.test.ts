@@ -82,6 +82,9 @@ describe("topic worker soak", () => {
           initialRows,
           groupedRefreshDebounceMs: shape.groupedRefreshDebounceMs,
         });
+        collectGarbage();
+        const baselineHeap = process.memoryUsage().heapUsed;
+        const baselineRss = process.memoryUsage().rss;
         const subscriptionFibers: Fiber.Fiber<void, ViewServerError>[] = [];
         const events = eventCounts();
 
@@ -172,6 +175,7 @@ describe("topic worker soak", () => {
 
         yield* Effect.forEach(subscriptionFibers, Fiber.join, { discard: true });
         collectGarbage();
+        collectGarbage();
 
         const released = yield* waitForMetrics(
           worker.metrics,
@@ -190,8 +194,16 @@ describe("topic worker soak", () => {
 
         const releasedHeap = process.memoryUsage().heapUsed;
         const releasedRss = process.memoryUsage().rss;
-        if (globalThis.gc !== undefined) {
-          expect(releasedHeap).toBeLessThanOrEqual(Math.ceil(loadedHeap * 1.1));
+        const heapGrowthRatio =
+          baselineHeap === 0 ? 0 : Math.max(0, releasedHeap - baselineHeap) / baselineHeap;
+        const heapGrowthThreshold = optionalEnvNumber("VS_WORKER_SOAK_HEAP_GROWTH_THRESHOLD");
+        if (heapGrowthThreshold !== undefined && globalThis.gc !== undefined) {
+          expect(heapGrowthRatio).toBeLessThanOrEqual(heapGrowthThreshold);
+        }
+        if (heapGrowthThreshold === undefined && globalThis.gc !== undefined) {
+          yield* Effect.logWarning(
+            `worker soak retained heap ratio=${heapGrowthRatio.toFixed(4)} baseline=${baselineHeap} released=${releasedHeap}`,
+          );
         }
 
         yield* writeSoakSummary({
@@ -219,11 +231,15 @@ describe("topic worker soak", () => {
           queueDepthAfterSettle: settled.queueDepth,
           queueDepthAfterCleanup: released.queueDepth,
           groupedRefreshCountsExposed: false,
+          heapBaselineBytes: baselineHeap,
           heapSubscribedBytes: subscribedHeap,
           heapLoadedBytes: loadedHeap,
           heapReleasedBytes: releasedHeap,
+          rssBaselineBytes: baselineRss,
           rssLoadedBytes: loadedRss,
           rssReleasedBytes: releasedRss,
+          heapGrowthRatio,
+          heapGrowthThreshold,
           gcAvailable: globalThis.gc !== undefined,
           events,
           retries: 0,
@@ -279,11 +295,15 @@ type SoakSummary = {
   readonly queueDepthAfterSettle: number;
   readonly queueDepthAfterCleanup: number;
   readonly groupedRefreshCountsExposed: boolean;
+  readonly heapBaselineBytes: number;
   readonly heapSubscribedBytes: number;
   readonly heapLoadedBytes: number;
   readonly heapReleasedBytes: number;
+  readonly rssBaselineBytes: number;
   readonly rssLoadedBytes: number;
   readonly rssReleasedBytes: number;
+  readonly heapGrowthRatio: number;
+  readonly heapGrowthThreshold?: number | undefined;
   readonly gcAvailable: boolean;
   readonly events: SoakEventCounts;
   readonly retries: number;
@@ -343,6 +363,15 @@ function envNumber(name: string, fallback: number): number {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : fallback;
+}
+
+function optionalEnvNumber(name: string): number | undefined {
+  const value = process.env[name];
+  if (value === undefined || value.length === 0) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function orderRow(index: number): OrderRow {

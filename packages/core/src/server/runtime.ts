@@ -1,5 +1,7 @@
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -132,6 +134,7 @@ export function makeViewServerRuntime(
     yield* verifyKafkaSourceTopics(normalized, options);
     const workers = new Map<string, TopicWorkerHost>();
     const kafkaMetricsByTopic = new Map<string, KafkaRuntimeMetrics>();
+    const sourceFailuresByTopic = new Map<string, string>();
     const sourceFibers: Fiber.Fiber<void, ViewServerError>[] = [];
     let closing = false;
     const makeTopicWorker = options.topicWorkerFactory ?? makeInProcessTopicWorkerHost;
@@ -230,6 +233,7 @@ export function makeViewServerRuntime(
       for (const [topic, worker] of workers) {
         const metrics = yield* worker.metrics;
         const kafkaMetrics = kafkaMetricsByTopic.get(topic) ?? emptyKafkaRuntimeMetrics;
+        const sourceFailed = sourceFailuresByTopic.has(topic);
         topics[topic] = {
           rows: metrics.rows,
           subscribers: metrics.subscribers,
@@ -253,7 +257,7 @@ export function makeViewServerRuntime(
           kafkaPartitions: kafkaMetrics.partitions,
           lastKafkaOffset: kafkaMetrics.offset,
           lastKafkaEndOffset: kafkaMetrics.endOffset,
-          status: closing ? "stopping" : metrics.status,
+          status: closing ? "stopping" : sourceFailed ? "degraded" : metrics.status,
         };
       }
       return {
@@ -443,6 +447,18 @@ export function makeViewServerRuntime(
       yield* syncHealthTopic();
     });
 
+    const recordSourceFailure = Effect.fn("view-server.runtime.source.failed")(function* (
+      topic: string,
+      message: string,
+    ) {
+      yield* Effect.annotateCurrentSpan({
+        "view_server.topic": topic,
+      });
+      sourceFailuresByTopic.set(topic, message);
+      yield* Effect.logWarning(`view-server source degraded topic=${topic} reason=${message}`);
+      yield* syncHealthTopicIgnoringErrors;
+    });
+
     const runtime: ViewServerRuntimeShape = {
       config: normalized,
 
@@ -470,6 +486,7 @@ export function makeViewServerRuntime(
       deltaPublish: (topic, patch) => deltaPublishWithTransport(topic, patch, "internal"),
       deleteById: (topic, id) => deleteByIdWithTransport(topic, id, "internal"),
       recordKafkaMetrics,
+      recordSourceFailure,
     });
     sourceFibers.push(...startedSourceFibers);
 
@@ -899,6 +916,10 @@ function startTopicSources(
       topic: string,
       metrics: KafkaBatchMetrics,
     ) => Effect.Effect<void, ViewServerError>;
+    readonly recordSourceFailure: (
+      topic: string,
+      message: string,
+    ) => Effect.Effect<void, ViewServerError>;
   },
 ): Effect.Effect<
   readonly Fiber.Fiber<void, ViewServerError>[],
@@ -929,9 +950,11 @@ function startTopicSources(
             deleteById: (id) => runtime.deleteById(topic, id),
           };
           if (topicConfig.source._tag === "EffectSource") {
-            const fiber = yield* topicConfig.source
-              .run(context)
-              .pipe(Effect.forkScoped({ startImmediately: true }));
+            const fiber = yield* monitorSource(
+              topic,
+              topicConfig.source.run(context),
+              runtime.recordSourceFailure,
+            ).pipe(Effect.forkScoped({ startImmediately: true }));
             fibers.push(fiber);
             return;
           }
@@ -945,18 +968,37 @@ function startTopicSources(
               ),
             );
           }
-          const fiber = yield* runKafkaSource({
-            viewTopic: topic,
-            idField: topicConfig.id,
-            source,
-            consumer,
-            runtime: context,
-            onBatchMetrics: (metrics) => runtime.recordKafkaMetrics(topic, metrics),
-          }).pipe(Effect.forkScoped({ startImmediately: true }));
+          const fiber = yield* monitorSource(
+            topic,
+            runKafkaSource({
+              viewTopic: topic,
+              idField: topicConfig.id,
+              source,
+              consumer,
+              runtime: context,
+              onBatchMetrics: (metrics) => runtime.recordKafkaMetrics(topic, metrics),
+            }),
+            runtime.recordSourceFailure,
+          ).pipe(Effect.forkScoped({ startImmediately: true }));
           fibers.push(fiber);
         }).pipe(Effect.withSpan("view-server.runtime.source.start")),
       { discard: true },
     );
     return fibers;
   })();
+}
+
+function monitorSource(
+  topic: string,
+  source: Effect.Effect<void, ViewServerError>,
+  recordSourceFailure: (topic: string, message: string) => Effect.Effect<void, ViewServerError>,
+): Effect.Effect<void, ViewServerError> {
+  return source.pipe(
+    Effect.exit,
+    Effect.flatMap((exit) =>
+      Exit.isSuccess(exit)
+        ? recordSourceFailure(topic, "Source exited")
+        : recordSourceFailure(topic, Cause.pretty(exit.cause)),
+    ),
+  );
 }

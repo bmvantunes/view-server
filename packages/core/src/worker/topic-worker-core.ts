@@ -261,10 +261,22 @@ export function makeTopicWorkerCore(
         backendVersion: undefined,
       });
       const result = yield* backend.snapshot({ query, targetVersion }).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            if (status === "degraded") {
+              status = "ready";
+            }
+          }),
+        ),
         Effect.map(
           (candidate) => reconcileSnapshot(candidate, query, targetVersion) ?? memorySnapshot(),
         ),
-        Effect.catchTag("SnapshotBackendFailed", () => Effect.succeed(memorySnapshot())),
+        Effect.catchTag("SnapshotBackendFailed", () =>
+          Effect.sync(() => {
+            status = "degraded";
+            return memorySnapshot();
+          }),
+        ),
       );
       yield* Effect.annotateCurrentSpan({
         "view_server.rows": result.rows.length,
@@ -608,6 +620,13 @@ export function makeTopicWorkerCore(
             targetVersion: snapshot.version,
           })
           .pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                if (status === "degraded") {
+                  status = "ready";
+                }
+              }),
+            ),
             Effect.map((candidate) =>
               candidate.backendVersion === snapshot.version
                 ? Option.some({
@@ -617,7 +636,10 @@ export function makeTopicWorkerCore(
                 : Option.none<QueryExecutionResult>(),
             ),
             Effect.catchTag("SnapshotBackendFailed", () =>
-              Effect.succeed(Option.none<QueryExecutionResult>()),
+              Effect.sync(() => {
+                status = "degraded";
+                return Option.none<QueryExecutionResult>();
+              }),
             ),
           );
         if (Option.isSome(accelerated)) {
@@ -1328,6 +1350,13 @@ export function makeTopicWorkerCore(
           highestVersion: version,
         })
         .pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              if (status === "degraded") {
+                status = "ready";
+              }
+            }),
+          ),
           Effect.catchTag("SnapshotBackendFailed", () =>
             Effect.sync(() => {
               status = "degraded";
