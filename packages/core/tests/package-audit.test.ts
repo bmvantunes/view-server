@@ -15,6 +15,14 @@ const PackageJson = Schema.Struct({
   sideEffects: Schema.Boolean,
   exports: Schema.Record(Schema.String, Schema.Unknown),
   peerDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  peerDependenciesMeta: Schema.optional(
+    Schema.Record(
+      Schema.String,
+      Schema.Struct({
+        optional: Schema.Boolean,
+      }),
+    ),
+  ),
   engines: Schema.Struct({
     node: Schema.String,
   }),
@@ -96,6 +104,18 @@ describe("release package audit", () => {
       expect(Object.keys(corePackage.exports)).not.toContain("./worker/core");
       expect(Object.keys(corePackage.exports)).not.toContain("./snapshot/chdb-query-worker-entry");
       expect(Object.keys(corePackage.exports)).not.toContain("./testing");
+    }),
+  );
+
+  it.effect("keeps production integrations optional for memory and browser consumers", () =>
+    Effect.gen(function* () {
+      const corePackage = yield* readPackageJson("packages/core/package.json");
+      expect(corePackage.peerDependencies?.["@effect/platform-node"]).toBe("4.0.0-beta.65");
+      expect(corePackage.peerDependencies?.chdb).toBe("1.6.0");
+      expect(corePackage.peerDependencies?.["@platformatic/kafka"]).toBe("2.0.1");
+      expect(corePackage.peerDependenciesMeta?.["@effect/platform-node"]?.optional).toBe(true);
+      expect(corePackage.peerDependenciesMeta?.chdb?.optional).toBe(true);
+      expect(corePackage.peerDependenciesMeta?.["@platformatic/kafka"]?.optional).toBe(true);
     }),
   );
 

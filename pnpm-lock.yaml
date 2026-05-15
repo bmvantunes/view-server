@@ -188,31 +188,31 @@ importers:
 
   packages/core:
     dependencies:
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.0-beta.65
+    devDependencies:
       '@effect/platform-node':
         specifier: 'catalog:'
         version: 4.0.0-beta.65(effect@4.0.0-beta.65)(ioredis@5.10.1)
       '@effect/sql-clickhouse':
         specifier: 'catalog:'
         version: 4.0.0-beta.65(@effect/platform-node@4.0.0-beta.65(effect@4.0.0-beta.65)(ioredis@5.10.1))(effect@4.0.0-beta.65)
-      '@platformatic/kafka':
-        specifier: 'catalog:'
-        version: 2.0.1
-      chdb:
-        specifier: 'catalog:'
-        version: 1.6.0
-      effect:
-        specifier: 'catalog:'
-        version: 4.0.0-beta.65
-    devDependencies:
       '@effect/vitest':
         specifier: 'catalog:'
         version: 4.0.0-beta.65(effect@4.0.0-beta.65)(vitest@4.1.5)
+      '@platformatic/kafka':
+        specifier: 'catalog:'
+        version: 2.0.1
       '@types/node':
         specifier: 'catalog:'
         version: 24.12.3
       '@vitest/coverage-v8':
         specifier: 'catalog:'
         version: 4.1.5(@vitest/browser@4.1.5)(vitest@4.1.5)
+      chdb:
+        specifier: 'catalog:'
+        version: 1.6.0
       typescript:
         specifier: 'catalog:'
         version: 5.9.3

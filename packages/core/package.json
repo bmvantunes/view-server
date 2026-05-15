@@ -72,22 +72,36 @@
     "check": "vp check"
   },
   "dependencies": {
-    "@effect/platform-node": "catalog:",
-    "@effect/sql-clickhouse": "catalog:",
-    "@platformatic/kafka": "catalog:",
-    "chdb": "catalog:",
     "effect": "catalog:"
   },
   "devDependencies": {
+    "@effect/platform-node": "catalog:",
+    "@effect/sql-clickhouse": "catalog:",
     "@effect/vitest": "catalog:",
+    "@platformatic/kafka": "catalog:",
     "@types/node": "catalog:",
     "@vitest/coverage-v8": "catalog:",
+    "chdb": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:",
     "vitest": "catalog:"
   },
   "peerDependencies": {
+    "@effect/platform-node": "4.0.0-beta.65",
+    "@platformatic/kafka": "2.0.1",
+    "chdb": "1.6.0",
     "effect": "4.0.0-beta.65"
+  },
+  "peerDependenciesMeta": {
+    "@effect/platform-node": {
+      "optional": true
+    },
+    "@platformatic/kafka": {
+      "optional": true
+    },
+    "chdb": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=26.0.0"

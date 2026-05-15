@@ -137,6 +137,29 @@ Intentionally private:
 
 The tarballs should include `dist`, `src`, and `package.json`. They should not include tests, benchmark artifacts, screenshots, coverage, or local `.vitest-attachments`.
 
+Memory-only and testing consumers should be able to install the public packages without building node-only integration dependencies. `@effect/platform-node`, `chdb`, and `@platformatic/kafka` are optional peers for the node-only subpaths; applications that use `@view-server/core/rpc/websocket`, `@view-server/core/worker/node`, `@view-server/core/snapshot/chdb`, or `@view-server/core/kafka/platformatic` must install the relevant optional packages explicitly.
+
+## External Consumer Smoke
+
+Before a release candidate, install actual tarballs into a fresh temp project outside the monorepo and run the consumer smoke in `docs/consumer-smoke.md`.
+
+Required checks:
+
+```bash
+pnpm exec tsc --noEmit
+pnpm run node:smoke
+pnpm run build
+pnpm run bundle:grep
+pnpm run test
+```
+
+The smoke proves:
+
+- public package subpaths are sufficient for a Node memory-runtime consumer
+- the React package builds in a Vite production bundle
+- browser assets do not include chDB, Kafka, worker threads, `fs`, or `net`
+- `@view-server/testing` works from the packed tarball without production chDB/Kafka dependencies
+
 ## Manual Demo Smoke
 
 Run the websocket demo:

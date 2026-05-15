@@ -353,3 +353,4 @@ Public packages must have:
 - explicit `exports`
 - `files` including `dist` and `src`
 - peer dependencies for shared runtime libraries (`effect`, `react`, `@view-server/core`, `@view-server/react`) instead of bundling duplicate copies
+- optional peer dependencies for Node-only integrations (`@effect/platform-node`, `chdb`, `@platformatic/kafka`) so memory/testing/browser consumers are not forced to install production integrations
