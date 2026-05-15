@@ -160,6 +160,16 @@ The smoke proves:
 - browser assets do not include chDB, Kafka, worker threads, `fs`, or `net`
 - `@view-server/testing` works from the packed tarball without production chDB/Kafka dependencies
 
+## Deployment Smoke
+
+Build and run the containerized demo server:
+
+```bash
+pnpm run smoke:deployment
+```
+
+This uses `Dockerfile` and `docker-compose.production-smoke.yml`, waits for `/ready`, exercises the real Effect RPC websocket from the host, verifies raw/grouped query plus publish/delta/delete, and shuts Compose down cleanly. Details and env vars are in `docs/deployment-smoke.md`.
+
 ## Manual Demo Smoke
 
 Run the websocket demo:

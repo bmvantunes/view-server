@@ -1,0 +1,11 @@
+.git
+.github
+**/node_modules
+**/dist
+**/coverage
+**/.vitest-attachments
+**/__screenshots__
+bench/.artifacts
+view-server-*.tgz
+*.log
+.DS_Store
