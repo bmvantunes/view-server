@@ -1017,6 +1017,59 @@ describe("Effect RPC in-memory", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("serves opt-in supported grouped subscriptions with an incremental accumulator", () =>
+    Effect.gen(function* () {
+      const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
+        initialRows: [
+          { id: "o-1", symbol: "AAPL", price: 100 },
+          { id: "o-2", symbol: "AAPL", price: 200 },
+          { id: "o-3", symbol: "MSFT", price: 50 },
+        ],
+        groupedAccumulatorMaxRows: 100,
+        groupedRefreshDebounceMs: 250,
+      });
+      const events = yield* worker
+        .subscribe("grouped-incremental", groupedOrdersQuery)
+        .pipe(Stream.toQueue({ capacity: 16 }));
+      const initial = yield* Queue.take(events);
+      expect(initial.type).toBe("snapshot");
+      if (initial.type !== "snapshot") {
+        throw new Error("Expected initial grouped snapshot");
+      }
+      expect(initial.rows).toEqual([
+        { symbol: "AAPL", orders: 2, totalPrice: 300 },
+        { symbol: "MSFT", orders: 1, totalPrice: 50 },
+      ]);
+
+      yield* worker.deltaPublish({ id: "o-3", price: 400 });
+
+      const delta = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+      expect(delta.type).toBe("delta");
+      if (delta.type !== "delta") {
+        throw new Error("Expected grouped incremental delta");
+      }
+      expect(delta.meta.totalRows).toBe(2);
+      expect(delta.ops).toEqual([
+        {
+          type: "upsert",
+          key: '{"symbol":"MSFT"}',
+          row: { symbol: "MSFT", orders: 1, totalPrice: 400 },
+          index: 0,
+        },
+        {
+          type: "upsert",
+          key: '{"symbol":"AAPL"}',
+          row: { symbol: "AAPL", orders: 2, totalPrice: 300 },
+          index: 1,
+        },
+      ]);
+
+      const metrics = yield* worker.metrics;
+      expect(metrics.maxSubscriptionLagVersions).toBe(0);
+      yield* worker.unsubscribe("grouped-incremental");
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("uses an exact snapshot backend for grouped refresh snapshots", () =>
     Effect.gen(function* () {
       const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {

@@ -3,6 +3,7 @@ import type * as Queue from "effect/Queue";
 import type { ViewServerError } from "../errors.ts";
 import type { RuntimeQuery, RuntimeRow, SubscriptionEvent } from "../protocol/index.ts";
 import type { ActiveRawView } from "./active-view.ts";
+import type { GroupedAccumulator } from "./grouped-accumulator.ts";
 import type { WorkerVersion } from "./mutation-log.ts";
 
 export type ActiveSubscription = {
@@ -25,6 +26,7 @@ export type ActiveSubscription = {
   dirtyTargetVersion?: WorkerVersion | undefined;
   groupedRefreshScheduled?: boolean | undefined;
   groupedRefreshInFlight?: boolean | undefined;
+  groupedAccumulator?: GroupedAccumulator | undefined;
 };
 
 export type ShutdownSubscription = {

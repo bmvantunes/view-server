@@ -5,16 +5,16 @@ import {
   rowKeyForQuery,
   type DeltaOperation,
   type OrderBy,
-  type RuntimeAggregateDefinition,
-  type RuntimeAggregateMap,
   type RuntimeGroupedQuery,
   type RuntimeFilterNode,
   type RuntimeRawQuery,
+  type RuntimeAggregateMap,
   type RuntimeQuery,
   type RuntimeRow,
   type RuntimeRowKey,
   type RuntimeRowKeyFn,
 } from "../protocol/index.ts";
+import { aggregateRows } from "./aggregate-functions.ts";
 
 export type QueryExecutionResult = {
   readonly rows: readonly RuntimeRow[];
@@ -509,6 +509,15 @@ function collectFilterFields(filter: RuntimeFilterNode | undefined, fields: Set<
   fields.add(filter.field);
 }
 
+export function groupedQueryOrderBy(query: RuntimeGroupedQuery): OrderBy<RuntimeRow> {
+  return [
+    ...(query.orderBy ?? []),
+    ...query.groupBy
+      .filter((field) => !query.orderBy?.some((order) => order.field === field))
+      .map((field) => ({ field, direction: "asc" as const })),
+  ];
+}
+
 function buildGroups(
   rows: readonly RuntimeRow[],
   groupBy: readonly string[],
@@ -524,15 +533,6 @@ function buildGroups(
     result.push(groupedResultRowSync(groupRows, groupBy, aggregates));
   }
   return result;
-}
-
-function groupedQueryOrderBy(query: RuntimeGroupedQuery): OrderBy<RuntimeRow> {
-  return [
-    ...(query.orderBy ?? []),
-    ...query.groupBy
-      .filter((field) => !query.orderBy?.some((order) => order.field === field))
-      .map((field) => ({ field, direction: "asc" as const })),
-  ];
 }
 
 function addGroupedRow(
@@ -565,134 +565,14 @@ function groupedResultRowSync(
   return row;
 }
 
-function normalizePositiveInteger(value: number | undefined, fallback: number): number {
-  return value === undefined || !Number.isFinite(value) || value <= 0
-    ? fallback
-    : Math.trunc(value);
-}
-
 function encodeGroupKey(value: unknown): unknown {
   return typeof value === "bigint" ? value.toString() : value;
 }
 
-function aggregateRows(
-  rows: readonly RuntimeRow[],
-  aggregate: RuntimeAggregateDefinition,
-): unknown {
-  switch (aggregate.aggFunc) {
-    case "count":
-      return rows.length;
-    case "count_distinct":
-      return countDistinctRows(rows, aggregate.field);
-    case "sum":
-      return sumRows(rows, aggregate.field);
-    case "avg":
-      if (rows.length === 0) {
-        return 0;
-      }
-      const sum = sumRows(rows, aggregate.field);
-      return BigDecimal.isBigDecimal(sum)
-        ? BigDecimal.divideUnsafe(sum, BigDecimal.fromBigInt(BigInt(rows.length)))
-        : sum / rows.length;
-    case "min":
-      return extremaRows(rows, aggregate.field, "min");
-    case "max":
-      return extremaRows(rows, aggregate.field, "max");
-    case "string_concat":
-      return sortedStrings(stringValues(rows, aggregate.field), aggregate.sort).join(
-        aggregate.joiner,
-      );
-    case "string_concat_distinct":
-      return sortedStrings(
-        Array.from(new Set(stringValues(rows, aggregate.field))),
-        aggregate.sort ?? "asc",
-      ).join(aggregate.joiner);
-  }
-}
-
-function countDistinctRows(rows: readonly RuntimeRow[], field: string): number {
-  const values = new Set<unknown>();
-  for (const row of rows) {
-    values.add(row[field]);
-  }
-  return values.size;
-}
-
-function sumRows(rows: readonly RuntimeRow[], field: string): number | BigDecimal.BigDecimal {
-  let numberSum = 0;
-  let decimalSum: BigDecimal.BigDecimal | undefined;
-  for (const row of rows) {
-    const value = row[field];
-    if (BigDecimal.isBigDecimal(value)) {
-      decimalSum = BigDecimal.sum(decimalSum ?? decimalFromNumber(numberSum), value);
-      continue;
-    }
-    if (decimalSum !== undefined) {
-      decimalSum = BigDecimal.sum(decimalSum, toBigDecimal(value) ?? BigDecimal.make(0n, 0));
-      continue;
-    }
-    numberSum += numericValue(value);
-  }
-  return decimalSum ?? numberSum;
-}
-
-function decimalFromNumber(value: number): BigDecimal.BigDecimal {
-  return toBigDecimal(value) ?? BigDecimal.make(0n, 0);
-}
-
-function extremaRows(
-  rows: readonly RuntimeRow[],
-  field: string,
-  direction: "min" | "max",
-): unknown {
-  let hasValue = false;
-  let current: unknown;
-  for (const row of rows) {
-    const value = row[field];
-    if (value == null) {
-      continue;
-    }
-    if (!hasValue) {
-      hasValue = true;
-      current = value;
-      continue;
-    }
-    const comparison = compareComparable(value, current);
-    current =
-      direction === "min" ? (comparison < 0 ? value : current) : comparison > 0 ? value : current;
-  }
-  return hasValue ? current : undefined;
-}
-
-function stringValues(rows: readonly RuntimeRow[], field: string): readonly string[] {
-  const values: string[] = [];
-  for (const row of rows) {
-    values.push(stringAggregateValue(row[field]));
-  }
-  return values;
-}
-
-function stringAggregateValue(value: unknown): string {
-  if (value == null) {
-    return "";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  if (typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") {
-    return String(value);
-  }
-  return JSON.stringify(value);
-}
-
-function numericValue(value: unknown): number {
-  if (typeof value === "number") {
-    return value;
-  }
-  if (typeof value === "bigint") {
-    return Number(value);
-  }
-  return 0;
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+  return value === undefined || !Number.isFinite(value) || value <= 0
+    ? fallback
+    : Math.trunc(value);
 }
 
 function toBigDecimal(value: unknown): BigDecimal.BigDecimal | undefined {
@@ -709,17 +589,4 @@ function toBigDecimal(value: unknown): BigDecimal.BigDecimal | undefined {
     return Option.getOrUndefined(BigDecimal.fromString(value));
   }
   return undefined;
-}
-
-function sortedStrings(
-  values: readonly string[],
-  direction: "asc" | "desc" | undefined,
-): readonly string[] {
-  if (direction === undefined) {
-    return values;
-  }
-  const sorted = [...values].sort((left, right) =>
-    left.toLocaleLowerCase().localeCompare(right.toLocaleLowerCase()),
-  );
-  return direction === "asc" ? sorted : sorted.reverse();
 }

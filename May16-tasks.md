@@ -51,6 +51,10 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
 - [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [x] Task 39: chDB SQL compiler contract tests and internal compiler module.
+- [x] Task 10: Aggregate Function Modules for count, sum, min, max, avg, count distinct,
+      and string aggregates with focused BigDecimal/null/update tests.
+- [x] Task 9: GroupedAccumulator prototype for opt-in count/sum/min/max grouped subscriptions,
+      with worker delta test and 1M rows / 100 aggregates / 10k mutations benchmark evidence.
 - [x] Task 1: Topic Worker State Machine Split. MutationStore, SnapshotReconciler,
       ActivePlanCoordinator, FanoutQueue, SubscriptionRegistry, GroupedRefreshCoordinator,
       WorkerHealthProjection, RuntimeHealthProjection, and RuntimeShutdownController are extracted

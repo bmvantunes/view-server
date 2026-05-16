@@ -6,6 +6,8 @@ import type {
   RuntimeGroupedQuery,
   RuntimeRow,
 } from "../src/protocol/index.ts";
+import { makeIncrementalGroupedAccumulator } from "../src/worker/grouped-accumulator.ts";
+import type { MutationLogEntry } from "../src/worker/mutation-log.ts";
 import { executeGroupedQuery, stableSortRows } from "../src/worker/query-engine.ts";
 import {
   writeBenchmarkArtifact,
@@ -23,11 +25,12 @@ const rows = envNumber("VS_GROUPED_AGGREGATION_ROWS", 100_000);
 const groups = envNumber("VS_GROUPED_AGGREGATION_GROUPS", 1_000);
 const aggregateCounts = envList("VS_GROUPED_AGGREGATION_AGGREGATES", [10, 50, 100]);
 const iterations = envNumber("VS_GROUPED_AGGREGATION_ITERATIONS", 1);
+const mutations = envNumber("VS_GROUPED_AGGREGATION_MUTATIONS", 1_000);
 
 void Effect.runPromise(
   Effect.gen(function* () {
     yield* Effect.logInfo(
-      `grouped-aggregation benchmark rows=${rows} groups=${groups} aggregateCounts=${aggregateCounts.join(",")} iterations=${iterations}`,
+      `grouped-aggregation benchmark rows=${rows} groups=${groups} aggregateCounts=${aggregateCounts.join(",")} iterations=${iterations} mutations=${mutations}`,
     );
     const sourceRows = makeRows(rows, groups);
     const results: BenchmarkResult[] = [];
@@ -35,13 +38,50 @@ void Effect.runPromise(
       const query = groupedQuery(aggregateCount);
       const optimized = timeRepeated(iterations, () => executeGroupedQuery(sourceRows, query));
       const legacy = timeRepeated(iterations, () => legacyExecuteGroupedQuery(sourceRows, query));
+      const mutationEntries = makeMutations(sourceRows, mutations);
+      const accumulatorBuild = timeOnce(() => {
+        const accumulator = makeIncrementalGroupedAccumulator({
+          rows: sourceRows,
+          query,
+          idOf: (row) => String(row.id),
+        });
+        if (accumulator === undefined) {
+          throw new Error("Grouped accumulator benchmark query must be supported");
+        }
+        return accumulator;
+      });
+      const accumulatorApply = timeOnce(() => {
+        for (const mutation of mutationEntries) {
+          accumulatorBuild.value.applyMutation(mutation);
+        }
+        return accumulatorRows(accumulatorBuild.value.groupedRows(), query);
+      });
+      const mutatedRows = applyMutations(sourceRows, mutationEntries);
+      const recomputeAfterMutations = timeOnce(() => executeGroupedQuery(mutatedRows, query));
       expectSameGroupedResult(optimized.value.rows, legacy.value.rows);
+      expectSameGroupedResult(accumulatorApply.value, recomputeAfterMutations.value.rows);
       const result = benchmarkResult(aggregateCount, [
         { name: "optimizedMs", value: optimized.ms, unit: "ms" },
         { name: "legacyMs", value: legacy.ms, unit: "ms" },
+        { name: "incrementalBuildMs", value: accumulatorBuild.ms, unit: "ms" },
+        { name: "incrementalApplyMs", value: accumulatorApply.ms, unit: "ms" },
+        {
+          name: "fullRecomputeAfterMutationsMs",
+          value: recomputeAfterMutations.ms,
+          unit: "ms",
+        },
         {
           name: "speedupRatio",
           value: optimized.ms === 0 ? Number.MAX_SAFE_INTEGER : legacy.ms / optimized.ms,
+          unit: "ratio",
+          lowerIsBetter: false,
+        },
+        {
+          name: "incrementalApplySpeedupRatio",
+          value:
+            accumulatorApply.ms === 0
+              ? Number.MAX_SAFE_INTEGER
+              : recomputeAfterMutations.ms / accumulatorApply.ms,
           unit: "ratio",
           lowerIsBetter: false,
         },
@@ -69,11 +109,11 @@ void Effect.runPromise(
     }
     const artifact = yield* writeBenchmarkArtifact(
       "grouped-aggregation",
-      { rows, groups, aggregateCounts: aggregateCounts.join(","), iterations },
+      { rows, groups, aggregateCounts: aggregateCounts.join(","), iterations, mutations },
       results,
       {
         notes: [
-          "Compares single-pass grouped accumulation against the previous per-aggregate row-map implementation.",
+          "Compares current grouped snapshot aggregation, a simple row-map baseline, and incremental grouped accumulator mutation apply cost.",
         ],
       },
     );
@@ -111,10 +151,8 @@ function groupedQuery(aggregateCount: number): RuntimeGroupedQuery {
         : mode === 1
           ? { aggFunc: "sum", field }
           : mode === 2
-            ? { aggFunc: "avg", field }
-            : mode === 3
-              ? { aggFunc: "min", field }
-              : { aggFunc: "max", field };
+            ? { aggFunc: "min", field }
+            : { aggFunc: "max", field };
   }
   return {
     groupBy: ["symbol"],
@@ -205,6 +243,75 @@ function timeRepeated<T>(iterations: number, run: () => T): Timed<T> {
     throw new Error("Benchmark must run at least once");
   }
   return { value, ms: performance.now() - started };
+}
+
+function timeOnce<T>(run: () => T): Timed<T> {
+  const started = performance.now();
+  return { value: run(), ms: performance.now() - started };
+}
+
+function makeMutations(
+  sourceRows: readonly RuntimeRow[],
+  mutationCount: number,
+): readonly MutationLogEntry[] {
+  const entries: MutationLogEntry[] = [];
+  for (let index = 0; index < mutationCount; index++) {
+    const row = sourceRows[(index * 97) % sourceRows.length];
+    if (row === undefined) {
+      continue;
+    }
+    entries.push({
+      version: BigInt(index + 1),
+      kind: "update",
+      id: String(row.id),
+      before: row,
+      after: {
+        ...row,
+        value0: Number(row.value0) + 1,
+        value1: Number(row.value1) + 2,
+      },
+      changedFields: new Set(["value0", "value1"]),
+    });
+  }
+  return entries;
+}
+
+function applyMutations(
+  sourceRows: readonly RuntimeRow[],
+  mutationsToApply: readonly MutationLogEntry[],
+): readonly RuntimeRow[] {
+  const rows = [...sourceRows];
+  const indexById = new Map<string, number>();
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    if (row !== undefined) {
+      indexById.set(String(row.id), index);
+    }
+  }
+  for (const mutation of mutationsToApply) {
+    const index = indexById.get(String(mutation.id));
+    if (index !== undefined && mutation.after !== undefined) {
+      rows[index] = mutation.after;
+    }
+  }
+  return rows;
+}
+
+function accumulatorRows(
+  rows: readonly RuntimeRow[],
+  query: RuntimeGroupedQuery,
+): readonly RuntimeRow[] {
+  const sorted = stableSortRows(rows, groupedOrder(query));
+  return sorted.slice(0, 50);
+}
+
+function groupedOrder(query: RuntimeGroupedQuery) {
+  return [
+    ...(query.orderBy ?? []),
+    ...query.groupBy
+      .filter((field) => !query.orderBy?.some((order) => order.field === field))
+      .map((field) => ({ field, direction: "asc" as const })),
+  ];
 }
 
 function expectSameGroupedResult(left: readonly RuntimeRow[], right: readonly RuntimeRow[]): void {

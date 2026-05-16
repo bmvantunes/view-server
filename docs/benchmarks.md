@@ -31,3 +31,29 @@ vp run core#bench:compare
 ```
 
 The checked-in baselines are intentionally lightweight smoke budgets. For serious performance decisions, use the larger benchmark shapes documented in the project plan.
+
+## Local Grouped Accumulator Check
+
+The grouped accumulator is opt-in and currently supports count, sum, min, and max grouped
+subscriptions. It should be compared against full grouped recompute before changing default grouped
+runtime policy:
+
+```bash
+VS_GROUPED_AGGREGATION_ROWS=1000000 \
+VS_GROUPED_AGGREGATION_GROUPS=1000 \
+VS_GROUPED_AGGREGATION_AGGREGATES=100 \
+VS_GROUPED_AGGREGATION_MUTATIONS=10000 \
+VS_GROUPED_AGGREGATION_ITERATIONS=1 \
+node --experimental-strip-types packages/core/bench/grouped-aggregation.bench.ts
+```
+
+Latest local result on May 16, 2026:
+
+- grouped snapshot: `940.30ms`
+- incremental accumulator build: `4304.61ms`
+- incremental apply for 10k mutations: `97.29ms`
+- full recompute after mutations: `935.08ms`
+- incremental apply speedup: `9.61x`
+
+That says incremental apply is useful once built, but initial accumulator build time is still too high
+to make this the default grouped strategy for large topics.

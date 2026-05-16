@@ -26,6 +26,7 @@ import type {
   SnapshotEvent,
   SubscriptionEvent,
 } from "../protocol/index.ts";
+import { rowKeyByField } from "../protocol/index.ts";
 import type { SnapshotBackend } from "../snapshot/index.ts";
 import { createMemorySnapshotBackend } from "../snapshot/index.ts";
 import {
@@ -47,11 +48,16 @@ import {
   diffVisibleRows,
   executeGroupedQueryEffect,
   executeMemoryQuery,
+  groupedQueryOrderBy,
   isGroupedQuery,
   matchesFilter,
+  normalizeLimit,
+  normalizeOffset,
   type QueryExecutionResult,
   rowKeyForMemoryQuery,
+  stableSortRows,
 } from "./query-engine.ts";
+import { makeIncrementalGroupedAccumulator } from "./grouped-accumulator.ts";
 import { makeSnapshotReconciler } from "./snapshot-reconciler.ts";
 import {
   SubscriptionRegistry,
@@ -104,6 +110,7 @@ export type TopicWorkerCoreOptions = {
   readonly activePlanAutoBuildMaxRows?: number | undefined;
   readonly activePlanBuildConcurrency?: number | undefined;
   readonly activePlanBuildChunkSize?: number | undefined;
+  readonly groupedAccumulatorMaxRows?: number | undefined;
   readonly groupedRefreshDebounceMs?: number | undefined;
   readonly groupedRefreshChunkSize?: number | undefined;
 };
@@ -129,6 +136,7 @@ export function makeTopicWorkerCore(
     const activePlanAutoBuildMaxRows = options.activePlanAutoBuildMaxRows ?? 1_000_000;
     const activePlanBuildConcurrency = Math.max(1, options.activePlanBuildConcurrency ?? 1);
     const activePlanBuildChunkSize = options.activePlanBuildChunkSize;
+    const groupedAccumulatorMaxRows = Math.max(0, options.groupedAccumulatorMaxRows ?? 0);
     const groupedRefreshDebounceMs = Math.max(0, options.groupedRefreshDebounceMs ?? 50);
     const groupedRefreshChunkSize = options.groupedRefreshChunkSize;
     const mutationStore = new MutationStore({
@@ -265,6 +273,14 @@ export function makeTopicWorkerCore(
             return Effect.void;
           }
           if (isGroupedQuery(subscription.query)) {
+            if (subscription.groupedAccumulator !== undefined) {
+              return fanoutGroupedAccumulatorSubscription(
+                subscription,
+                fromVersion,
+                toVersion,
+                mutation,
+              );
+            }
             return markGroupedSubscriptionDirty(subscription, toVersion);
           }
           if (isPendingActivePlanSubscription(subscription)) {
@@ -436,6 +452,99 @@ export function makeTopicWorkerCore(
         yield* scheduleGroupedSubscriptionRefresh(subscription.requestId);
       }
     });
+
+    const fanoutGroupedAccumulatorSubscription = Effect.fnUntraced(function* (
+      subscription: ActiveSubscription,
+      fromVersion: WorkerVersion,
+      toVersion: WorkerVersion,
+      mutation: MutationLogEntry,
+    ) {
+      if (!isGroupedQuery(subscription.query) || subscription.groupedAccumulator === undefined) {
+        return;
+      }
+      const beforeMatches =
+        mutation.before !== undefined &&
+        matchesFilter(mutation.before, subscription.query.where, { literalStringFields });
+      const afterMatches =
+        mutation.after !== undefined &&
+        matchesFilter(mutation.after, subscription.query.where, { literalStringFields });
+      if (!beforeMatches && !afterMatches) {
+        subscription.lastVersion = toVersion;
+        return;
+      }
+      if (beforeMatches && afterMatches) {
+        subscription.groupedAccumulator.applyMutation(mutation);
+      } else if (beforeMatches && mutation.before !== undefined) {
+        subscription.groupedAccumulator.applyMutation({
+          version: mutation.version,
+          kind: "delete",
+          id: mutation.id,
+          before: mutation.before,
+          changedFields: mutation.changedFields,
+        });
+      } else if (afterMatches && mutation.after !== undefined) {
+        subscription.groupedAccumulator.applyMutation({
+          version: mutation.version,
+          kind: "insert",
+          id: mutation.id,
+          after: mutation.after,
+          changedFields: mutation.changedFields,
+        });
+      }
+      const next = groupedAccumulatorQueryResult(subscription);
+      const operations = diffVisibleRows(
+        subscription.lastRows,
+        next.rows,
+        rowKeyForMemoryQuery(subscription.query, idField),
+      );
+      if (operations.length === 0 && subscription.lastTotalRows === next.totalRows) {
+        subscription.lastVersion = toVersion;
+        return;
+      }
+      const event: DeltaEvent<readonly RuntimeRow[]> = {
+        type: "delta",
+        requestId: subscription.requestId,
+        ops: operations,
+        meta: {
+          fromVersion: fromVersion.toString(),
+          toVersion: toVersion.toString(),
+          totalRows: next.totalRows,
+          serverTime: Date.now(),
+        },
+      };
+      subscription.lastRows = next.rows;
+      subscription.lastTotalRows = next.totalRows;
+      subscription.lastVersion = toVersion;
+      const offered = yield* fanoutQueue.offerDelta(subscription.queue, subscription, event);
+      if (!offered) {
+        removeSubscription(subscription.requestId);
+        yield* Queue.fail(
+          subscription.queue,
+          backpressureExceeded(
+            subscription.requestId,
+            `Subscription ${subscription.requestId} exceeded maxQueueDepth ${maxQueueDepth}`,
+          ),
+        );
+      }
+    });
+
+    const groupedAccumulatorQueryResult = (
+      subscription: ActiveSubscription,
+    ): QueryExecutionResult => {
+      if (!isGroupedQuery(subscription.query) || subscription.groupedAccumulator === undefined) {
+        return memoryQuery(subscription.query);
+      }
+      const sorted = stableSortRows(
+        subscription.groupedAccumulator.groupedRows(),
+        groupedQueryOrderBy(subscription.query),
+      );
+      const offset = normalizeOffset(subscription.query.offset);
+      const limit = normalizeLimit(subscription.query.limit);
+      return {
+        rows: sorted.slice(offset, offset + limit),
+        totalRows: sorted.length,
+      };
+    };
 
     function scheduleGroupedSubscriptionRefresh(requestId: string): Effect.Effect<void> {
       return Effect.gen(function* () {
@@ -618,6 +727,7 @@ export function makeTopicWorkerCore(
 
     const prepareActivePlan = Effect.fnUntraced(function* (subscription: ActiveSubscription) {
       if (isGroupedQuery(subscription.query)) {
+        prepareGroupedAccumulator(subscription);
         return;
       }
       const decision = activePlanCoordinator.prepareSubscription(
@@ -629,6 +739,26 @@ export function makeTopicWorkerCore(
         yield* Queue.offer(activePlanBuildQueue, decision.key);
       }
     });
+
+    const prepareGroupedAccumulator = (subscription: ActiveSubscription): void => {
+      if (
+        !isGroupedQuery(subscription.query) ||
+        groupedAccumulatorMaxRows <= 0 ||
+        mutationStore.rows().length > groupedAccumulatorMaxRows
+      ) {
+        return;
+      }
+      const accumulator = makeIncrementalGroupedAccumulator({
+        rows: mutationStore
+          .rows()
+          .filter((row) => matchesFilter(row, subscription.query.where, { literalStringFields })),
+        query: subscription.query,
+        idOf: (row) => rowKeyByField(row, idField),
+      });
+      if (accumulator !== undefined) {
+        subscription.groupedAccumulator = accumulator;
+      }
+    };
 
     const activePlanBuildSnapshot = (key: string): ActivePlanBuildSnapshot | undefined => {
       return activePlanCoordinator.beginBuildSnapshot({
