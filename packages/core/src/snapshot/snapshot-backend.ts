@@ -16,8 +16,15 @@ export type SnapshotBackendResult = {
   readonly replayRows?: readonly RuntimeRow[] | undefined;
 };
 
+export type SnapshotBackendHealth = {
+  readonly status: "ready" | "degraded";
+  readonly message?: string | undefined;
+};
+
 export interface SnapshotBackend {
   readonly supportsGroupedRefreshSnapshots?: boolean | undefined;
+
+  readonly health?: Effect.Effect<SnapshotBackendHealth> | undefined;
 
   readonly init: (args: {
     readonly topic: string;

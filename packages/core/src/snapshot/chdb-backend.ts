@@ -10,7 +10,12 @@ import type {
   RuntimeRow,
 } from "../protocol/index.ts";
 import type { MutationLogEntry, WorkerVersion } from "../worker/mutation-log.ts";
-import type { SnapshotBackend, SnapshotBackendResult, VersionedRow } from "./snapshot-backend.ts";
+import type {
+  SnapshotBackend,
+  SnapshotBackendHealth,
+  SnapshotBackendResult,
+  VersionedRow,
+} from "./snapshot-backend.ts";
 import { fork, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type {
@@ -49,6 +54,20 @@ let nextBackendTableId = 0;
 export type ChdbSnapshotBackendOptions = {
   readonly groupedRefreshWorker?: boolean | undefined;
   readonly groupedRefreshWorkerEntryUrl?: string | URL | undefined;
+  readonly restartWorkerOnUnexpectedExit?: boolean | undefined;
+  /** @internal Test/supervision hook. */
+  readonly onWorkerSpawn?: ((pid: number | undefined) => void) | undefined;
+  /** @internal Test/supervision hook. */
+  readonly onWorkerExit?:
+    | ((event: { readonly pid: number | undefined; readonly message: string }) => void)
+    | undefined;
+  /** @internal Test/supervision hook. */
+  readonly onWorkerRequest?:
+    | ((request: {
+        readonly pid: number | undefined;
+        readonly type: ChdbQueryWorkerRequest["type"];
+      }) => void)
+    | undefined;
 };
 
 export function createChdbSnapshotBackend(
@@ -71,20 +90,31 @@ type ChdbWorkerPending = {
   readonly reject: (error: unknown) => void;
 };
 
+type ChdbWorkerClientOptions = Pick<
+  ChdbSnapshotBackendOptions,
+  "groupedRefreshWorkerEntryUrl" | "onWorkerExit" | "onWorkerRequest" | "onWorkerSpawn"
+>;
+
 class ChdbGroupedSnapshotWorkerClient {
   readonly #worker: ChildProcess;
+  readonly #onWorkerExit: ChdbWorkerClientOptions["onWorkerExit"];
+  readonly #onWorkerRequest: ChdbWorkerClientOptions["onWorkerRequest"];
   #topic = "chdb";
   #nextId = 0;
   #pending = new Map<number, ChdbWorkerPending>();
   #closed = false;
+  #exitMessage: string | undefined;
 
-  constructor(workerEntryUrl: string | URL | undefined) {
-    const entryUrl = resolveChdbQueryWorkerEntryUrl(workerEntryUrl);
+  constructor(options: ChdbWorkerClientOptions = {}) {
+    const entryUrl = resolveChdbQueryWorkerEntryUrl(options.groupedRefreshWorkerEntryUrl);
+    this.#onWorkerExit = options.onWorkerExit;
+    this.#onWorkerRequest = options.onWorkerRequest;
     this.#worker = fork(fileURLToPath(entryUrl), [], {
       execArgv: defaultExecArgv(entryUrl),
       serialization: "advanced",
       stdio: ["ignore", "inherit", "inherit", "ipc"],
     });
+    options.onWorkerSpawn?.(this.#worker.pid);
     this.#worker.on("message", (response: unknown) => {
       if (isChdbQueryWorkerResponse(response)) {
         this.#handleResponse(response);
@@ -95,11 +125,35 @@ class ChdbGroupedSnapshotWorkerClient {
     this.#worker.on("error", (error) => {
       this.#failPending(error);
     });
-    this.#worker.on("exit", (code) => {
-      if (!this.#closed && code !== 0) {
-        this.#failPending(new Error(`chDB grouped refresh worker exited with code ${code}`));
+    this.#worker.on("exit", (code, signal) => {
+      const message =
+        signal === null
+          ? `chDB worker exited with code ${String(code)}`
+          : `chDB worker exited from signal ${signal}`;
+      if (!this.#closed) {
+        this.#exitMessage = message;
+        this.#onWorkerExit?.({ pid: this.#worker.pid, message });
       }
+      this.#failPending(new Error(message));
     });
+  }
+
+  get pid(): number | undefined {
+    return this.#worker.pid;
+  }
+
+  get health(): SnapshotBackendHealth {
+    return this.#exitMessage === undefined
+      ? { status: "ready" }
+      : { status: "degraded", message: this.#exitMessage };
+  }
+
+  get exitedUnexpectedly(): boolean {
+    return this.#exitMessage !== undefined;
+  }
+
+  kill(signal: NodeJS.Signals = "SIGTERM"): void {
+    this.#worker.kill(signal);
   }
 
   init(args: Parameters<SnapshotBackend["init"]>[0]): Effect.Effect<void, ViewServerError> {
@@ -150,10 +204,14 @@ class ChdbGroupedSnapshotWorkerClient {
   }
 
   close(): Effect.Effect<void, ViewServerError> {
-    return this.#request({
-      id: this.#requestId(),
-      type: "close",
-    }).pipe(
+    if (this.#closed) {
+      return this.#terminate();
+    }
+    this.#closed = true;
+    if (this.#worker.exitCode !== null || this.#worker.killed || !this.#worker.connected) {
+      return this.#terminate();
+    }
+    return this.#requestClose(250).pipe(
       Effect.flatMap(() => this.#terminate()),
       Effect.asVoid,
     );
@@ -193,12 +251,39 @@ class ChdbGroupedSnapshotWorkerClient {
     return Effect.tryPromise({
       try: () =>
         new Promise<ChdbQueryWorkerResponse>((resolve, reject) => {
+          if (this.#exitMessage !== undefined) {
+            reject(new Error(this.#exitMessage));
+            return;
+          }
+          if (this.#worker.exitCode !== null || this.#worker.killed || !this.#worker.connected) {
+            reject(new Error("chDB worker IPC channel is closed"));
+            return;
+          }
           this.#pending.set(request.id, { resolve, reject });
-          const sent = this.#worker.send(request);
+          let sent = false;
+          try {
+            sent = this.#worker.send(request, (error) => {
+              if (error === null) {
+                return;
+              }
+              const pending = this.#pending.get(request.id);
+              if (pending === undefined) {
+                return;
+              }
+              this.#pending.delete(request.id);
+              pending.reject(error);
+            });
+          } catch (error) {
+            this.#pending.delete(request.id);
+            reject(error);
+            return;
+          }
           if (!sent) {
             this.#pending.delete(request.id);
             reject(new Error("chDB worker IPC channel is not writable"));
+            return;
           }
+          this.#onWorkerRequest?.({ pid: this.#worker.pid, type: request.type });
         }).then((response) => {
           if (response.success) {
             return response;
@@ -213,6 +298,42 @@ class ChdbGroupedSnapshotWorkerClient {
     const id = this.#nextId;
     this.#nextId++;
     return id;
+  }
+
+  #requestClose(deadlineMs: number): Effect.Effect<void, ViewServerError> {
+    return Effect.tryPromise({
+      try: () =>
+        new Promise<void>((resolve) => {
+          const id = this.#requestId();
+          let settled = false;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const settle = () => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            if (timer !== undefined) {
+              clearTimeout(timer);
+            }
+            this.#pending.delete(id);
+            resolve();
+          };
+          timer = setTimeout(settle, deadlineMs);
+          this.#pending.set(id, {
+            resolve: settle,
+            reject: settle,
+          });
+          try {
+            const sent = this.#worker.send({ id, type: "close" });
+            if (!sent) {
+              settle();
+            }
+          } catch {
+            settle();
+          }
+        }),
+      catch: (error) => snapshotBackendFailed(this.#topic, error),
+    });
   }
 
   #handleResponse(response: ChdbQueryWorkerResponse): void {
@@ -239,10 +360,30 @@ class ChdbGroupedSnapshotWorkerClient {
             resolve();
             return;
           }
-          this.#worker.once("exit", () => {
+          let settled = false;
+          let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+          let giveUpTimer: ReturnType<typeof setTimeout> | undefined;
+          const settle = () => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            if (forceKillTimer !== undefined) {
+              clearTimeout(forceKillTimer);
+            }
+            if (giveUpTimer !== undefined) {
+              clearTimeout(giveUpTimer);
+            }
             resolve();
+          };
+          this.#worker.once("exit", () => {
+            settle();
           });
-          this.#worker.kill();
+          forceKillTimer = setTimeout(() => {
+            this.#worker.kill("SIGKILL");
+          }, 250);
+          giveUpTimer = setTimeout(settle, 2_000);
+          this.#worker.kill("SIGTERM");
         }),
       catch: (error) => snapshotBackendFailed(this.#topic, error),
     });
@@ -250,42 +391,161 @@ class ChdbGroupedSnapshotWorkerClient {
 }
 
 class WorkerChdbSnapshotBackend implements SnapshotBackend {
-  readonly #worker: ChdbGroupedSnapshotWorkerClient;
+  readonly #options: ChdbSnapshotBackendOptions;
+  #worker: ChdbGroupedSnapshotWorkerClient;
+  #topic = "chdb";
+  #idField = "id";
+  #literalStringFields: ReadonlySet<string> | undefined;
+  #mirrorRows = new Map<string | number, RuntimeRow>();
+  #mirrorPendingByVersion = new Map<WorkerVersion, MutationLogEntry>();
+  #mirrorVersion: WorkerVersion = 0n;
+  #closed = false;
 
   constructor(options: ChdbSnapshotBackendOptions = {}) {
-    this.#worker = new ChdbGroupedSnapshotWorkerClient(options.groupedRefreshWorkerEntryUrl);
+    this.#options = options;
+    this.#worker = this.#makeWorker();
   }
 
   get supportsGroupedRefreshSnapshots(): boolean {
     return true;
   }
 
+  get health(): Effect.Effect<SnapshotBackendHealth> {
+    return Effect.sync(() => this.#worker.health);
+  }
+
   init(args: Parameters<SnapshotBackend["init"]>[0]): Effect.Effect<void, ViewServerError> {
-    return this.#worker.init(args);
+    return Effect.fn("view-server.chdb.worker_backend.init")(function* (
+      backend: WorkerChdbSnapshotBackend,
+    ) {
+      backend.#topic = args.topic;
+      backend.#idField = args.idField;
+      backend.#literalStringFields = args.literalStringFields;
+      backend.#mirrorRows = new Map();
+      backend.#mirrorPendingByVersion = new Map();
+      backend.#mirrorVersion = args.version;
+      for (const entry of args.rows) {
+        const id = entry.row[args.idField];
+        if (typeof id === "string" || typeof id === "number") {
+          backend.#mirrorRows.set(id, { ...entry.row });
+        }
+      }
+      yield* backend.#worker.init(args);
+    })(this);
   }
 
   applyBatch(
     args: Parameters<SnapshotBackend["applyBatch"]>[0],
   ): Effect.Effect<void, ViewServerError> {
-    return this.#worker.applyBatch(args);
+    return Effect.fnUntraced(function* (backend: WorkerChdbSnapshotBackend) {
+      backend.#applyBatchToMirror(args);
+      const worker = yield* backend.#ensureWorker();
+      yield* worker.applyBatch(args);
+    })(this);
   }
 
   snapshot(args: {
     readonly query: RuntimeQuery;
     readonly targetVersion: WorkerVersion;
   }): Effect.Effect<SnapshotBackendResult, ViewServerError> {
-    return this.#worker.snapshot(args);
+    return Effect.fn("view-server.chdb.worker_backend.snapshot")(function* (
+      backend: WorkerChdbSnapshotBackend,
+    ) {
+      const worker = yield* backend.#ensureWorker();
+      return yield* worker.snapshot(args);
+    })(this);
   }
 
   groupedRefreshSnapshot(args: {
     readonly query: RuntimeQuery;
     readonly targetVersion: WorkerVersion;
   }): Effect.Effect<SnapshotBackendResult, ViewServerError> {
-    return this.#worker.snapshot(args);
+    return Effect.fn("view-server.chdb.worker_backend.grouped_refresh_snapshot")(function* (
+      backend: WorkerChdbSnapshotBackend,
+    ) {
+      const worker = yield* backend.#ensureWorker();
+      return yield* worker.snapshot(args);
+    })(this);
   }
 
   close(): Effect.Effect<void> {
-    return this.#worker.close().pipe(Effect.ignore);
+    return Effect.fn("view-server.chdb.worker_backend.close")(function* (
+      backend: WorkerChdbSnapshotBackend,
+    ) {
+      backend.#closed = true;
+      yield* backend.#worker.close().pipe(Effect.ignore);
+    })(this);
+  }
+
+  #makeWorker(): ChdbGroupedSnapshotWorkerClient {
+    return new ChdbGroupedSnapshotWorkerClient(this.#options);
+  }
+
+  #ensureWorker(): Effect.Effect<ChdbGroupedSnapshotWorkerClient, ViewServerError> {
+    if (
+      this.#closed ||
+      !this.#worker.exitedUnexpectedly ||
+      this.#options.restartWorkerOnUnexpectedExit !== true
+    ) {
+      return this.#worker.exitedUnexpectedly && !this.#closed
+        ? Effect.fail(
+            snapshotBackendFailed(this.#topic, this.#worker.health.message ?? "chDB worker exited"),
+          )
+        : Effect.succeed(this.#worker);
+    }
+    return Effect.fn("view-server.chdb.worker_backend.restart")(function* (
+      backend: WorkerChdbSnapshotBackend,
+    ) {
+      yield* Effect.logWarning(`view-server chDB worker restarting topic=${backend.#topic}`);
+      const nextWorker = backend.#makeWorker();
+      backend.#worker = nextWorker;
+      yield* nextWorker.init({
+        topic: backend.#topic,
+        idField: backend.#idField,
+        rows: Array.from(backend.#mirrorRows.values(), (row) => ({
+          row,
+          version: backend.#mirrorVersion,
+        })),
+        version: backend.#mirrorVersion,
+        ...(backend.#literalStringFields === undefined
+          ? {}
+          : { literalStringFields: backend.#literalStringFields }),
+      });
+      return nextWorker;
+    })(this);
+  }
+
+  #applyBatchToMirror(args: Parameters<SnapshotBackend["applyBatch"]>[0]): void {
+    for (const mutation of args.mutations) {
+      if (mutation.version > this.#mirrorVersion) {
+        this.#mirrorPendingByVersion.set(mutation.version, mutation);
+      }
+    }
+    let nextVersion = this.#mirrorVersion + 1n;
+    while (true) {
+      const mutation = this.#mirrorPendingByVersion.get(nextVersion);
+      if (mutation === undefined) {
+        return;
+      }
+      this.#mirrorPendingByVersion.delete(nextVersion);
+      this.#applyMutationToMirror(mutation);
+      this.#mirrorVersion = mutation.version;
+      nextVersion = this.#mirrorVersion + 1n;
+    }
+  }
+
+  #applyMutationToMirror(mutation: MutationLogEntry): void {
+    if (mutation.kind === "delete") {
+      this.#mirrorRows.delete(mutation.id);
+      return;
+    }
+    if (mutation.after === undefined) {
+      return;
+    }
+    const id = mutation.after[this.#idField];
+    if (typeof id === "string" || typeof id === "number") {
+      this.#mirrorRows.set(id, { ...mutation.after });
+    }
   }
 }
 
@@ -310,14 +570,16 @@ class ChdbSnapshotBackend implements SnapshotBackend {
     this.#tableName = `topic_rows_${nextBackendTableId}`;
     nextBackendTableId++;
     if (options.groupedRefreshWorker !== false) {
-      this.#groupedRefreshWorker = new ChdbGroupedSnapshotWorkerClient(
-        options.groupedRefreshWorkerEntryUrl,
-      );
+      this.#groupedRefreshWorker = new ChdbGroupedSnapshotWorkerClient(options);
     }
   }
 
   get supportsGroupedRefreshSnapshots(): boolean {
     return this.#groupedRefreshWorker !== undefined;
+  }
+
+  get health(): Effect.Effect<SnapshotBackendHealth> {
+    return Effect.sync(() => this.#groupedRefreshWorker?.health ?? { status: "ready" });
   }
 
   init(args: {

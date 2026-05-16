@@ -58,7 +58,7 @@ worker: {
 }
 ```
 
-`maxActivePlans` is the primary guardrail. `maxActivePlanEstimatedBytes` is a lower-bound sorted-index estimate, not a full heap budget. Keep process heap headroom for row memory, active plan maps, RPC buffers, chDB workers, and Kafka decode bursts.
+`maxActivePlans` is the primary guardrail. `maxActivePlanEstimatedBytes` is a lower-bound sorted-index estimate, not a full heap budget. Keep process heap headroom for row memory, active plan maps, RPC buffers, one chDB child process per active topic, and Kafka decode bursts.
 
 ## Nginx Websocket
 
@@ -182,5 +182,5 @@ pnpm exec vitest run --config packages/core/vitest.config.ts packages/core/tests
 6. Verify `/ready` is 200 before routing traffic.
 7. Start with low `maxActivePlans` and watch fallback/build metrics.
 8. Confirm websocket proxy does not buffer NDJSON.
-9. Roll one instance first and watch queue depth, subscription lag, Kafka lag, and chDB snapshot failures.
+9. Roll one instance first and watch queue depth, subscription lag, Kafka lag, per-topic chDB process health, and chDB snapshot failures.
 10. Exercise shutdown and confirm `/ready` flips non-200 before the instance leaves service.

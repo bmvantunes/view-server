@@ -29,7 +29,11 @@ import type {
   SnapshotEvent,
   SubscriptionEvent,
 } from "../protocol/index.ts";
-import type { SnapshotBackend, SnapshotBackendResult } from "../snapshot/index.ts";
+import type {
+  SnapshotBackend,
+  SnapshotBackendHealth,
+  SnapshotBackendResult,
+} from "../snapshot/index.ts";
 import { createMemorySnapshotBackend } from "../snapshot/index.ts";
 import {
   activeRawPlanKey,
@@ -891,16 +895,22 @@ export function makeTopicWorkerCore(
     const isQueueAtLimit = (depth: number): boolean =>
       maxQueueDepth <= 0 ? depth > 0 : depth >= maxQueueDepth;
 
+    const backendHealth = (): Effect.Effect<SnapshotBackendHealth> =>
+      backend.health ?? Effect.succeed({ status: "ready" });
+
     const statusForPressure = (
       depth: number,
       planStats: ReturnType<typeof activePlanStats>,
+      snapshotHealth: SnapshotBackendHealth,
     ): TopicWorkerMetrics["status"] =>
-      status === "ready" &&
-      (isQueueAtLimit(depth) ||
-        planStats.activePlanFallbackCount > 0 ||
-        isActivePlanLimitNear(planStats))
+      snapshotHealth.status === "degraded"
         ? "degraded"
-        : status;
+        : status === "ready" &&
+            (isQueueAtLimit(depth) ||
+              planStats.activePlanFallbackCount > 0 ||
+              isActivePlanLimitNear(planStats))
+          ? "degraded"
+          : status;
 
     const offerDelta = Effect.fnUntraced(function* (
       subscription: ActiveSubscription,
@@ -1402,6 +1412,7 @@ export function makeTopicWorkerCore(
         const depth = yield* queueDepth();
         const lagStats = yield* subscriptionLagStats();
         const planStats = activePlanStats();
+        const snapshotHealth = yield* backendHealth();
         yield* Effect.annotateCurrentSpan({
           "view_server.topic": topic,
           "view_server.rows": rows.length,
@@ -1424,7 +1435,7 @@ export function makeTopicWorkerCore(
           activePlanBuildMsTotal: planStats.activePlanBuildMsTotal,
           activePlanBuildMsMax: planStats.activePlanBuildMsMax,
           activePlanFallbackCount: planStats.activePlanFallbackCount,
-          status: statusForPressure(depth, planStats),
+          status: statusForPressure(depth, planStats, snapshotHealth),
         };
       })(),
 

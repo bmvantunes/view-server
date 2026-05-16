@@ -9,8 +9,8 @@ import { defineConfig } from "../src/config/index.ts";
 import { snapshotBackendFailed, type ViewServerError } from "../src/errors.ts";
 import type { RuntimeQuery, RuntimeRow } from "../src/protocol/index.ts";
 import { createChdbSnapshotBackend } from "../src/snapshot/chdb-backend.ts";
-import type { SnapshotBackend } from "../src/snapshot/index.ts";
-import { makeViewServerRuntime } from "../src/server/index.ts";
+import type { SnapshotBackend, SnapshotBackendHealth } from "../src/snapshot/index.ts";
+import { makeViewServerRuntime, type HealthResponse } from "../src/server/index.ts";
 import { makeTopicWorkerCore } from "../src/worker/index.ts";
 import type { MutationLogEntry, WorkerVersion } from "../src/worker/mutation-log.ts";
 
@@ -770,10 +770,345 @@ describe("chDB snapshot backend", () => {
       expect(error._tag).toBe("SnapshotBackendFailed");
     }).pipe(Effect.scoped),
   );
+
+  it.effect("reports degraded runtime health when the chDB child process exits unexpectedly", () =>
+    Effect.gen(function* () {
+      let childPid: number | undefined;
+      const runtime = yield* makeViewServerRuntime(
+        defineConfig({
+          topics: {
+            orders: {
+              id: "id",
+              schema: Order,
+            },
+          },
+        }),
+        {
+          __testingSnapshotBackendFactory: () =>
+            createChdbSnapshotBackend({
+              onWorkerSpawn: (pid) => {
+                childPid = pid;
+              },
+            }),
+        },
+      );
+
+      yield* runtime.publish("orders", { id: "o-1", symbol: "AAPL", price: 100 });
+      const pid = expectPid(childPid);
+      process.kill(pid, "SIGKILL");
+
+      const degraded = yield* waitForRuntimeHealth(runtime, (health) => {
+        return health.topics.orders?.status === "degraded";
+      });
+      expect(degraded.ok).toBe(false);
+      expect(isProcessAlive(pid)).toBe(false);
+      yield* runtime.close.pipe(Effect.timeout("1 second"));
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps chDB child failure isolated to its owning topic", () =>
+    Effect.gen(function* () {
+      const childPids = new Map<string, number>();
+      const runtime = yield* makeViewServerRuntime(
+        defineConfig({
+          topics: {
+            orders: {
+              id: "id",
+              schema: Order,
+            },
+            trades: {
+              id: "id",
+              schema: Order,
+            },
+          },
+        }),
+        {
+          __testingSnapshotBackendFactory: (topic) =>
+            createChdbSnapshotBackend({
+              onWorkerSpawn: (pid) => {
+                if (pid !== undefined) {
+                  childPids.set(topic, pid);
+                }
+              },
+            }),
+        },
+      );
+
+      yield* runtime.publish("orders", { id: "o-1", symbol: "AAPL", price: 100 });
+      yield* runtime.publish("trades", { id: "t-1", symbol: "MSFT", price: 200 });
+      const ordersPid = expectPid(childPids.get("orders"));
+      const tradesPid = expectPid(childPids.get("trades"));
+      expect(ordersPid).not.toBe(tradesPid);
+
+      process.kill(ordersPid, "SIGKILL");
+      const degraded = yield* waitForRuntimeHealth(
+        runtime,
+        (health) =>
+          health.topics.orders?.status === "degraded" && health.topics.trades?.status === "ready",
+      );
+      expect(degraded.ok).toBe(false);
+      expect(degraded.topics.orders?.status).toBe("degraded");
+      expect(degraded.topics.trades?.status).toBe("ready");
+      expect(isProcessAlive(ordersPid)).toBe(false);
+      expect(isProcessAlive(tradesPid)).toBe(true);
+
+      const trades = yield* runtime.query("trades", allOrdersQuery);
+      expect(trades.rows).toEqual([{ id: "t-1", symbol: "MSFT", price: 200 }]);
+      expect(trades.version).toBe("1");
+
+      const orders = yield* runtime.query("orders", allOrdersQuery);
+      expect(orders.rows).toEqual([{ id: "o-1", symbol: "AAPL", price: 100 }]);
+      yield* runtime.close.pipe(Effect.timeout("1 second"));
+      yield* waitForProcessExit(tradesPid);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("fails pending snapshot and grouped refresh requests when the chDB child exits", () =>
+    Effect.gen(function* () {
+      let snapshotKilled = false;
+      let snapshotPid: number | undefined;
+      const snapshotBackend = createChdbSnapshotBackend({
+        onWorkerSpawn: (pid) => {
+          snapshotPid = pid;
+        },
+        onWorkerRequest: ({ pid, type }) => {
+          if (type === "snapshot" && !snapshotKilled) {
+            snapshotKilled = true;
+            process.kill(expectPid(pid), "SIGTERM");
+          }
+        },
+      });
+      yield* Effect.addFinalizer(() => snapshotBackend.close());
+      yield* snapshotBackend.init({
+        topic: "orders",
+        idField: "id",
+        version: 1n,
+        rows: versionedRows([{ id: "o-1", symbol: "AAPL", price: 100 }]),
+      });
+
+      const snapshotError = yield* snapshotBackend
+        .snapshot({ query: allOrdersQuery, targetVersion: 1n })
+        .pipe(Effect.flip, Effect.timeout("2 seconds"));
+      expect(snapshotError._tag).toBe("SnapshotBackendFailed");
+      expect((yield* snapshotBackendHealth(snapshotBackend)).status).toBe("degraded");
+      expect(isProcessAlive(expectPid(snapshotPid))).toBe(false);
+
+      let groupedKilled = false;
+      let groupedPid: number | undefined;
+      const groupedBackend = createChdbSnapshotBackend({
+        onWorkerSpawn: (pid) => {
+          groupedPid = pid;
+        },
+        onWorkerRequest: ({ pid, type }) => {
+          if (type === "snapshot" && !groupedKilled) {
+            groupedKilled = true;
+            process.kill(expectPid(pid), "SIGKILL");
+          }
+        },
+      });
+      yield* Effect.addFinalizer(() => groupedBackend.close());
+      yield* groupedBackend.init({
+        topic: "orders",
+        idField: "id",
+        version: 1n,
+        rows: versionedRows([{ id: "o-1", symbol: "AAPL", price: 100 }]),
+      });
+      if (groupedBackend.groupedRefreshSnapshot === undefined) {
+        return yield* Effect.die(new Error("Expected grouped refresh snapshot support"));
+      }
+
+      const groupedError = yield* groupedBackend
+        .groupedRefreshSnapshot({
+          query: groupedQuery,
+          targetVersion: 1n,
+        })
+        .pipe(Effect.flip, Effect.timeout("2 seconds"));
+      expect(groupedError._tag).toBe("SnapshotBackendFailed");
+      expect((yield* snapshotBackendHealth(groupedBackend)).status).toBe("degraded");
+      expect(isProcessAlive(expectPid(groupedPid))).toBe(false);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("fails pending applyBatch when the chDB child exits during flush", () =>
+    Effect.gen(function* () {
+      let killed = false;
+      let childPid: number | undefined;
+      const backend = createChdbSnapshotBackend({
+        onWorkerSpawn: (pid) => {
+          childPid = pid;
+        },
+        onWorkerRequest: ({ pid, type }) => {
+          if (type === "applyBatch" && !killed) {
+            killed = true;
+            process.kill(expectPid(pid), "SIGTERM");
+          }
+        },
+      });
+      yield* Effect.addFinalizer(() => backend.close());
+      yield* backend.init({
+        topic: "orders",
+        idField: "id",
+        version: 1n,
+        rows: versionedRows([{ id: "o-1", symbol: "AAPL", price: 100 }]),
+      });
+
+      const error = yield* backend
+        .applyBatch({
+          highestVersion: 2n,
+          mutations: [
+            {
+              version: 2n,
+              kind: "insert",
+              id: "o-2",
+              after: { id: "o-2", symbol: "MSFT", price: 200 },
+              changedFields: new Set(["id", "symbol", "price"]),
+            },
+          ],
+        })
+        .pipe(Effect.flip, Effect.timeout("2 seconds"));
+      expect(error._tag).toBe("SnapshotBackendFailed");
+      expect((yield* snapshotBackendHealth(backend)).status).toBe("degraded");
+      expect(isProcessAlive(expectPid(childPid))).toBe(false);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("can restart a supervised chDB child after an unexpected exit", () =>
+    Effect.gen(function* () {
+      const childPids: number[] = [];
+      const backend = createChdbSnapshotBackend({
+        restartWorkerOnUnexpectedExit: true,
+        onWorkerSpawn: (pid) => {
+          if (pid !== undefined) {
+            childPids.push(pid);
+          }
+        },
+      });
+      yield* Effect.addFinalizer(() => backend.close());
+      yield* backend.init({
+        topic: "orders",
+        idField: "id",
+        version: 1n,
+        rows: versionedRows([{ id: "o-1", symbol: "AAPL", price: 100 }]),
+      });
+      yield* backend.applyBatch({
+        highestVersion: 2n,
+        mutations: [
+          {
+            version: 2n,
+            kind: "insert",
+            id: "o-2",
+            after: { id: "o-2", symbol: "MSFT", price: 200 },
+            changedFields: new Set(["id", "symbol", "price"]),
+          },
+        ],
+      });
+
+      const firstPid = expectPid(childPids[0]);
+      process.kill(firstPid, "SIGKILL");
+      yield* waitForBackendHealth(backend, (health) => health.status === "degraded");
+      expect(isProcessAlive(firstPid)).toBe(false);
+
+      const result = yield* backend.snapshot({ query: allOrdersQuery, targetVersion: 2n });
+      expect(result.backendVersion).toBe(2n);
+      expect(result.rows).toEqual([
+        { id: "o-1", symbol: "AAPL", price: 100 },
+        { id: "o-2", symbol: "MSFT", price: 200 },
+      ]);
+      expect(childPids.length).toBe(2);
+      expect(childPids[1]).not.toBe(firstPid);
+      expect((yield* snapshotBackendHealth(backend)).status).toBe("ready");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("kills the chDB child process cleanly on shutdown", () =>
+    Effect.gen(function* () {
+      let childPid: number | undefined;
+      const backend = createChdbSnapshotBackend({
+        onWorkerSpawn: (pid) => {
+          childPid = pid;
+        },
+      });
+      yield* backend.init({
+        topic: "orders",
+        idField: "id",
+        version: 1n,
+        rows: versionedRows([{ id: "o-1", symbol: "AAPL", price: 100 }]),
+      });
+      const pid = expectPid(childPid);
+      expect(isProcessAlive(pid)).toBe(true);
+
+      yield* backend.close().pipe(Effect.timeout("2 seconds"));
+      yield* waitForProcessExit(pid);
+      expect(isProcessAlive(pid)).toBe(false);
+    }).pipe(Effect.scoped),
+  );
 });
 
 function versionedRows(rows: readonly RuntimeRow[]) {
   return rows.map((row, index) => ({ row, version: BigInt(index + 1) }));
+}
+
+function snapshotBackendHealth(backend: SnapshotBackend): Effect.Effect<SnapshotBackendHealth> {
+  return backend.health ?? Effect.succeed({ status: "ready" });
+}
+
+function waitForBackendHealth(
+  backend: SnapshotBackend,
+  predicate: (health: SnapshotBackendHealth) => boolean,
+) {
+  return Effect.gen(function* () {
+    while (true) {
+      const health = yield* snapshotBackendHealth(backend);
+      if (predicate(health)) {
+        return health;
+      }
+      yield* sleepHost(10);
+    }
+  }).pipe(Effect.timeout("2 seconds"));
+}
+
+function waitForRuntimeHealth(
+  runtime: { readonly health: Effect.Effect<HealthResponse, ViewServerError> },
+  predicate: (health: HealthResponse) => boolean,
+) {
+  return Effect.gen(function* () {
+    while (true) {
+      const health = yield* runtime.health;
+      if (predicate(health)) {
+        return health;
+      }
+      yield* sleepHost(10);
+    }
+  }).pipe(Effect.timeout("2 seconds"));
+}
+
+function waitForProcessExit(pid: number) {
+  return Effect.gen(function* () {
+    while (isProcessAlive(pid)) {
+      yield* sleepHost(10);
+    }
+  }).pipe(Effect.timeout("2 seconds"));
+}
+
+function sleepHost(milliseconds: number): Effect.Effect<void> {
+  return Effect.promise(() => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function expectPid(pid: number | undefined): number {
+  expect(typeof pid).toBe("number");
+  if (pid === undefined) {
+    throw new Error("Expected chDB child pid");
+  }
+  return pid;
 }
 
 function flushChdb() {

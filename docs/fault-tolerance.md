@@ -14,6 +14,8 @@ Shutdown interrupts source fibers and should complete even when a source is stuc
 
 chDB is mandatory for production runtime startup, but it is not the source of truth. Worker memory and the mutation log remain authoritative.
 
+chDB supervision is per topic. Each topic worker owns its own chDB child process, so one topic's chDB crash or restart does not poison unrelated topics.
+
 If chDB cannot initialize during startup, production runtime startup fails fast. If snapshot, grouped refresh, or mirror writes fail after startup, the topic reports degraded and falls back to worker memory. A later successful backend operation can return the topic to ready.
 
 Snapshots are accepted from chDB only when the version fence proves correctness. Grouped chDB refreshes require an exact backend version match; stale or failed refreshes are discarded and recomputed from memory.
@@ -49,7 +51,8 @@ Shutdown behavior is explicit:
 - websocket streams receive typed shutdown errors
 - source fibers are interrupted
 - topic workers drain and close
-- backend workers close
+- each topic's chDB child process is terminated
+- backend workers close without orphaning child processes
 
 Health after shutdown should show no subscribers, queue depth, active plan builds, or grouped refresh work remaining.
 

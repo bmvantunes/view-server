@@ -43,7 +43,9 @@ This is the fence that prevents snapshot/delta gaps.
 
 chDB is mandatory for production runtime startup and accelerates initial snapshots, one-shot queries, and grouped refresh snapshots. It is not the source of truth.
 
-The worker hot path never waits for chDB flushes. chDB writes are serialized behind a contiguous backend-version fence, and grouped chDB refresh can run in a worker thread. If chDB cannot initialize at startup, production runtime startup fails fast. If chDB is temporarily behind or failing after startup, worker memory remains authoritative and subscriptions can continue from memory fallback while health reports degraded.
+Each topic owns its own chDB child process through its topic worker backend. There is no shared global chDB process for all topics. This keeps IPC queues, memory accounting, and failure boundaries per topic.
+
+The worker hot path never waits for chDB flushes. chDB writes are serialized behind a contiguous backend-version fence, and grouped chDB refresh runs off the topic worker in the topic-owned chDB child process. If chDB cannot initialize at startup, production runtime startup fails fast. If one topic's chDB process exits or falls behind after startup, that topic reports degraded while worker memory remains authoritative; other topics stay ready if their own workers/backends are healthy.
 
 ## Active Raw Views
 
