@@ -70,6 +70,9 @@ focused tests and the relevant integration tests still pass.
       limit overrides, typed limit errors, rejected-query metrics, and metrics UI surfacing.
 - [x] Task 31: AuthPolicy seam owns private system-topic guards, health read
       authorization, subscription authorization, publish authorization, and RPC typed-error coverage.
+- [x] Task 33: ChdbHealth contract normalizes public child health fields,
+      serializes through Schema, preserves restart semantics, and proves /health
+      plus health-topic parity for ready/degraded chDB state.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
 - [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [x] Task 39: chDB SQL compiler contract tests and internal compiler module.

@@ -833,6 +833,61 @@ describe("chDB snapshot backend", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("mirrors ready chDB child health in runtime health and the health topic", () =>
+    Effect.gen(function* () {
+      let childPid: number | undefined;
+      const runtime = yield* makeViewServerRuntime(
+        defineConfig({
+          topics: {
+            orders: {
+              id: "id",
+              schema: Order,
+            },
+          },
+        }),
+        {
+          __testingSnapshotBackendFactory: () =>
+            createChdbSnapshotBackend({
+              onWorkerSpawn: (pid) => {
+                childPid = pid;
+              },
+            }),
+        },
+      );
+
+      const health = yield* waitForRuntimeHealth(
+        runtime,
+        (candidate) =>
+          childPid !== undefined &&
+          candidate.topics.orders?.chdbPid === childPid &&
+          candidate.topics.orders.chdbStatus === "ready",
+      );
+      const ordersHealth = health.topics.orders;
+      expect(ordersHealth).toBeDefined();
+      if (ordersHealth === undefined) {
+        throw new Error("Missing orders health");
+      }
+      expect(ordersHealth).toMatchObject({
+        chdbStatus: "ready",
+        chdbPid: expectPid(childPid),
+        chdbRestarts: 0,
+        chdbPendingRequests: 0,
+        chdbLastError: "",
+      });
+
+      const healthTopic = yield* runtime.query(VIEW_SERVER_HEALTH_TOPIC, healthChdbQuery);
+      expect(rowById(healthTopic.rows, "topic:orders")).toMatchObject({
+        chdbStatus: ordersHealth.chdbStatus,
+        chdbPid: ordersHealth.chdbPid,
+        chdbRestarts: ordersHealth.chdbRestarts,
+        chdbPendingRequests: ordersHealth.chdbPendingRequests,
+        chdbLastError: ordersHealth.chdbLastError,
+        chdbBackendVersion: ordersHealth.chdbBackendVersion,
+      });
+      yield* runtime.close.pipe(Effect.timeout("1 second"));
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("keeps chDB child failure isolated to its owning topic", () =>
     Effect.gen(function* () {
       const childPids = new Map<string, number>();

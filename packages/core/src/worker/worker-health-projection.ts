@@ -1,6 +1,10 @@
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
-import type { SnapshotBackendHealth } from "../snapshot/index.ts";
+import {
+  chdbHealthFromSnapshotBackendHealth,
+  type ChdbHealth,
+  type SnapshotBackendHealth,
+} from "../snapshot/index.ts";
 import type { ActivePlanCoordinatorMetrics } from "./active-plan-coordinator.ts";
 import type { WorkerVersion } from "./mutation-log.ts";
 import type { ActiveSubscription } from "./subscription-registry.ts";
@@ -26,7 +30,7 @@ export type TopicWorkerMetrics = {
   readonly activePlanBuildMsMax: number;
   readonly activePlanFallbackCount: number;
   readonly activePlanAutoBuildSkippedCount: number;
-  readonly chdbStatus: SnapshotBackendHealth["status"];
+  readonly chdbStatus: ChdbHealth["status"];
   readonly chdbPid: number;
   readonly chdbRestarts: number;
   readonly chdbPendingRequests: number;
@@ -88,7 +92,9 @@ export class WorkerHealthProjection {
       const depth = yield* projection.#queueDepth();
       const lagStats = yield* projection.#subscriptionLagStats();
       const planStats = projection.#options.activePlanMetrics();
-      const snapshotHealth = yield* projection.#options.backendHealth();
+      const snapshotHealth = chdbHealthFromSnapshotBackendHealth(
+        yield* projection.#options.backendHealth(),
+      );
       yield* Effect.annotateCurrentSpan({
         "view_server.topic": projection.#options.topic,
         "view_server.rows": projection.#options.rows(),
@@ -113,11 +119,11 @@ export class WorkerHealthProjection {
         activePlanFallbackCount: planStats.activePlanFallbackCount,
         activePlanAutoBuildSkippedCount: planStats.activePlanAutoBuildSkippedCount,
         chdbStatus: snapshotHealth.status,
-        chdbPid: snapshotHealth.pid ?? 0,
-        chdbRestarts: snapshotHealth.restarts ?? 0,
-        chdbPendingRequests: snapshotHealth.pendingRequests ?? 0,
-        chdbLastError: snapshotHealth.lastError ?? snapshotHealth.message ?? "",
-        chdbBackendVersion: snapshotHealth.backendVersion ?? 0n,
+        chdbPid: snapshotHealth.pid,
+        chdbRestarts: snapshotHealth.restarts,
+        chdbPendingRequests: snapshotHealth.pendingRequests,
+        chdbLastError: snapshotHealth.lastError,
+        chdbBackendVersion: snapshotHealth.backendVersion,
         status: projection.#statusForPressure(depth, planStats, snapshotHealth),
       };
     })(this);
@@ -164,7 +170,7 @@ export class WorkerHealthProjection {
   #statusForPressure(
     depth: number,
     planStats: ActivePlanCoordinatorMetrics,
-    snapshotHealth: SnapshotBackendHealth,
+    snapshotHealth: ChdbHealth,
   ): TopicWorkerStatus {
     if (snapshotHealth.status === "degraded" || snapshotHealth.status === "restarting") {
       return "degraded";
