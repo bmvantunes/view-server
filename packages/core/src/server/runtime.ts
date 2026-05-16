@@ -1,15 +1,11 @@
 import * as Context from "effect/Context";
-import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
-import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import {
   type AuthorizationContext,
   columnCatalogForTopic,
   type ColumnCatalog,
-  type EffectSourceContext,
   type KafkaSourceConfig,
   isReservedTopic,
   normalizeConfig,
@@ -23,7 +19,6 @@ import {
   invalidPublish,
   invalidConfig,
   invalidQuery,
-  kafkaIngestFailed,
   missingTopic,
   snapshotBackendFailed,
   unauthorized,
@@ -38,25 +33,18 @@ import type {
   SubscriptionEvent,
 } from "../protocol/index.ts";
 import { isRuntimeGroupedQuery } from "../protocol/index.ts";
-import {
-  runKafkaSource,
-  type KafkaBatchMetrics,
-  type KafkaTopicConsumer,
-  type KafkaTopicVerifier,
-} from "../kafka/index.ts";
+import type { KafkaTopicConsumer, KafkaTopicVerifier } from "../kafka/index.ts";
 import { createMemorySnapshotBackend, type SnapshotBackend } from "../snapshot/snapshot-backend.ts";
 import {
   makeInProcessTopicWorkerHost,
   type TopicWorkerHost,
   type TopicWorkerHostFactory,
 } from "../worker/index.ts";
+import { KafkaSourceSupervisor } from "./kafka-source-supervisor.ts";
 import {
-  emptyKafkaRuntimeMetrics,
   healthRowsFromResponse,
-  kafkaRuntimeMetrics,
   projectRuntimeHealth,
   type HealthResponse,
-  type KafkaRuntimeMetrics,
   type RuntimeHealthProjectionTopicInput,
 } from "./runtime-health-projection.ts";
 import { RuntimeShutdownController } from "./runtime-shutdown-controller.ts";
@@ -112,7 +100,11 @@ export function makeViewServerRuntime(
       try: () => normalizeConfig(config),
       catch: (error) => invalidConfig("Invalid view-server config", "config", error),
     });
-    yield* verifyKafkaSourceTopics(normalized, options);
+    const sourceSupervisor = new KafkaSourceSupervisor(normalized, {
+      kafkaConsumerFactory: options.kafkaConsumerFactory,
+      kafkaTopicVerifier: options.kafkaTopicVerifier,
+    });
+    yield* sourceSupervisor.verifyTopics();
     const workers = new Map<string, TopicWorkerHost>();
     const columnCatalogs = new Map(
       Object.entries(normalized.topics).map(([topic, topicConfig]) => [
@@ -120,9 +112,6 @@ export function makeViewServerRuntime(
         columnCatalogForTopic(topic, topicConfig),
       ]),
     );
-    const kafkaMetricsByTopic = new Map<string, KafkaRuntimeMetrics>();
-    const sourceFailuresByTopic = new Map<string, string>();
-    const sourceFibers: Fiber.Fiber<void, ViewServerError>[] = [];
     const shutdownController = new RuntimeShutdownController();
     const makeTopicWorker = options.topicWorkerFactory ?? makeInProcessTopicWorkerHost;
 
@@ -188,12 +177,11 @@ export function makeViewServerRuntime(
       const topics: Record<string, RuntimeHealthProjectionTopicInput> = {};
       for (const [topic, worker] of workers) {
         const metrics = yield* worker.metrics;
-        const kafkaMetrics = kafkaMetricsByTopic.get(topic) ?? emptyKafkaRuntimeMetrics;
-        const sourceFailed = sourceFailuresByTopic.has(topic);
+        const sourceHealth = sourceSupervisor.topicHealth(topic);
         topics[topic] = {
           worker: metrics,
-          kafka: kafkaMetrics,
-          sourceFailed,
+          kafka: sourceHealth.kafka,
+          sourceFailed: sourceHealth.sourceFailed,
         };
       }
       return projectRuntimeHealth({ closing: shutdownController.isClosing(), topics });
@@ -376,29 +364,9 @@ export function makeViewServerRuntime(
     const closeRuntime = Effect.fn("view-server.runtime.close")(function* () {
       yield* shutdownController.close({
         syncHealth: syncHealthTopicIgnoringErrors,
-        sourceFibers,
+        stopSources: sourceSupervisor.shutdown(),
         workers: workers.values(),
       });
-    });
-
-    const recordKafkaMetrics = Effect.fnUntraced(function* (
-      topic: string,
-      metrics: KafkaBatchMetrics,
-    ) {
-      kafkaMetricsByTopic.set(topic, kafkaRuntimeMetrics(metrics));
-      yield* syncHealthTopic();
-    });
-
-    const recordSourceFailure = Effect.fn("view-server.runtime.source.failed")(function* (
-      topic: string,
-      message: string,
-    ) {
-      yield* Effect.annotateCurrentSpan({
-        "view_server.topic": topic,
-      });
-      sourceFailuresByTopic.set(topic, message);
-      yield* Effect.logWarning(`view-server source degraded topic=${topic} reason=${message}`);
-      yield* syncHealthTopicIgnoringErrors;
     });
 
     const runtime: ViewServerRuntimeShape = {
@@ -423,14 +391,12 @@ export function makeViewServerRuntime(
     };
 
     yield* syncHealthTopic();
-    const startedSourceFibers = yield* startTopicSources(normalized, options, {
+    yield* sourceSupervisor.start({
       publish: (topic, row) => publishWithTransport(topic, row, "internal"),
       deltaPublish: (topic, patch) => deltaPublishWithTransport(topic, patch, "internal"),
       deleteById: (topic, id) => deleteByIdWithTransport(topic, id, "internal"),
-      recordKafkaMetrics,
-      recordSourceFailure,
+      syncHealth: syncHealthTopicIgnoringErrors,
     });
-    sourceFibers.push(...startedSourceFibers);
 
     return runtime;
   })();
@@ -477,84 +443,6 @@ export const layerViewServerRuntime = (
   options?: ViewServerRuntimeOptions,
 ): Layer.Layer<ViewServerRuntime, ViewServerError> =>
   Layer.effect(ViewServerRuntime, makeViewServerRuntime(config, options));
-
-type KafkaSourceForVerification = {
-  readonly viewTopic: string;
-  readonly brokers: readonly string[];
-  readonly kafkaTopic: string;
-};
-
-function verifyKafkaSourceTopics(
-  config: NormalizedViewServerConfig,
-  options: ViewServerRuntimeOptions,
-): Effect.Effect<void, ViewServerError> {
-  return Effect.fn("view-server.kafka.verify_topics")(function* () {
-    const sources = collectKafkaSources(config);
-    yield* Effect.annotateCurrentSpan({
-      "view_server.batch_size": sources.length,
-    });
-    if (sources.length === 0) {
-      return;
-    }
-    const verifier = options.kafkaTopicVerifier;
-    if (verifier === undefined) {
-      return yield* Effect.fail(
-        kafkaIngestFailed(
-          sources[0].viewTopic,
-          new Error("KafkaSource requires a kafkaTopicVerifier runtime option"),
-        ),
-      );
-    }
-    yield* Effect.forEach(
-      kafkaVerificationGroups(sources),
-      ({ brokers, topics }) => verifier.verifyTopics({ brokers, topics }),
-      { discard: true },
-    );
-  })();
-}
-
-function collectKafkaSources(
-  config: NormalizedViewServerConfig,
-): readonly KafkaSourceForVerification[] {
-  const sources: KafkaSourceForVerification[] = [];
-  for (const [viewTopic, topicConfig] of Object.entries(config.topics)) {
-    const source = topicConfig.source;
-    if (viewTopic !== VIEW_SERVER_HEALTH_TOPIC && source?._tag === "KafkaSource") {
-      sources.push({
-        viewTopic,
-        brokers: source.brokers,
-        kafkaTopic: source.topic,
-      });
-    }
-  }
-  return sources;
-}
-
-function kafkaVerificationGroups(sources: readonly KafkaSourceForVerification[]) {
-  const groups = new Map<
-    string,
-    {
-      readonly brokers: readonly string[];
-      readonly topicSet: Set<string>;
-    }
-  >();
-  for (const source of sources) {
-    const key = JSON.stringify(source.brokers);
-    const group = groups.get(key);
-    if (group === undefined) {
-      groups.set(key, {
-        brokers: source.brokers,
-        topicSet: new Set([source.kafkaTopic]),
-      });
-    } else {
-      group.topicSet.add(source.kafkaTopic);
-    }
-  }
-  return Array.from(groups.values(), ({ brokers, topicSet }) => ({
-    brokers,
-    topics: Array.from(topicSet),
-  }));
-}
 
 type RuntimeQueryLimits = NormalizedViewServerConfig["limits"];
 
@@ -649,108 +537,4 @@ function runtimeFilterStats(node: RuntimeFilterNode | undefined): {
     };
   }
   return { depth: 1, conditions: 1 };
-}
-
-function startTopicSources(
-  config: NormalizedViewServerConfig,
-  options: ViewServerRuntimeOptions,
-  runtime: {
-    readonly publish: (topic: string, row: unknown) => Effect.Effect<void, ViewServerError>;
-    readonly deltaPublish: (
-      topic: string,
-      patch: RuntimeRow,
-    ) => Effect.Effect<void, ViewServerError>;
-    readonly deleteById: (
-      topic: string,
-      id: string | number,
-    ) => Effect.Effect<void, ViewServerError>;
-    readonly recordKafkaMetrics: (
-      topic: string,
-      metrics: KafkaBatchMetrics,
-    ) => Effect.Effect<void, ViewServerError>;
-    readonly recordSourceFailure: (
-      topic: string,
-      message: string,
-    ) => Effect.Effect<void, ViewServerError>;
-  },
-): Effect.Effect<
-  readonly Fiber.Fiber<void, ViewServerError>[],
-  ViewServerError,
-  import("effect/Scope").Scope
-> {
-  return Effect.fn("view-server.runtime.sources.start")(function* () {
-    const entries = Object.entries(config.topics);
-    const fibers: Fiber.Fiber<void, ViewServerError>[] = [];
-    yield* Effect.annotateCurrentSpan({
-      "view_server.batch_size": entries.length,
-    });
-    yield* Effect.forEach(
-      entries,
-      ([topic, topicConfig]) =>
-        Effect.gen(function* () {
-          yield* Effect.annotateCurrentSpan({
-            "view_server.topic": topic,
-          });
-          if (topic === VIEW_SERVER_HEALTH_TOPIC || topicConfig.source === undefined) {
-            return;
-          }
-          const context: EffectSourceContext<RowObject, string> = {
-            topic,
-            idField: topicConfig.id,
-            publish: (row) => runtime.publish(topic, row),
-            deltaPublish: (patch) => runtime.deltaPublish(topic, patch),
-            deleteById: (id) => runtime.deleteById(topic, id),
-          };
-          if (topicConfig.source._tag === "EffectSource") {
-            const fiber = yield* monitorSource(
-              topic,
-              topicConfig.source.run(context),
-              runtime.recordSourceFailure,
-            ).pipe(Effect.forkScoped({ startImmediately: true }));
-            fibers.push(fiber);
-            return;
-          }
-          const source = topicConfig.source;
-          const consumer = options.kafkaConsumerFactory?.(source);
-          if (consumer === undefined) {
-            return yield* Effect.fail(
-              kafkaIngestFailed(
-                topic,
-                new Error("KafkaSource requires a kafkaConsumerFactory runtime option"),
-              ),
-            );
-          }
-          const fiber = yield* monitorSource(
-            topic,
-            runKafkaSource({
-              viewTopic: topic,
-              idField: topicConfig.id,
-              source,
-              consumer,
-              runtime: context,
-              onBatchMetrics: (metrics) => runtime.recordKafkaMetrics(topic, metrics),
-            }),
-            runtime.recordSourceFailure,
-          ).pipe(Effect.forkScoped({ startImmediately: true }));
-          fibers.push(fiber);
-        }).pipe(Effect.withSpan("view-server.runtime.source.start")),
-      { discard: true },
-    );
-    return fibers;
-  })();
-}
-
-function monitorSource(
-  topic: string,
-  source: Effect.Effect<void, ViewServerError>,
-  recordSourceFailure: (topic: string, message: string) => Effect.Effect<void, ViewServerError>,
-): Effect.Effect<void, ViewServerError> {
-  return source.pipe(
-    Effect.exit,
-    Effect.flatMap((exit) =>
-      Exit.isSuccess(exit)
-        ? recordSourceFailure(topic, "Source exited")
-        : recordSourceFailure(topic, Cause.pretty(exit.cause)),
-    ),
-  );
 }

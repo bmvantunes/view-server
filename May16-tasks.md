@@ -48,6 +48,8 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 8: GroupedRefreshCoordinator extraction.
 - [x] Task 19: RuntimeHealthProjection extraction.
 - [x] Task 32: RuntimeShutdownController extraction.
+- [x] Task 21: KafkaSourceSupervisor extraction for topic verification, source fibers,
+      lag metrics, degraded source state, and source shutdown.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
 - [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [x] Task 39: chDB SQL compiler contract tests and internal compiler module.

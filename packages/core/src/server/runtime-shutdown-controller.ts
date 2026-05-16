@@ -1,5 +1,4 @@
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import { serverShutdown, type ViewServerError } from "../errors.ts";
 import type { TopicWorkerHost } from "../worker/index.ts";
 
@@ -26,7 +25,7 @@ export class RuntimeShutdownController {
 
   readonly close = (args: {
     readonly syncHealth: Effect.Effect<void>;
-    readonly sourceFibers: readonly Fiber.Fiber<void, ViewServerError>[];
+    readonly stopSources: Effect.Effect<void, ViewServerError>;
     readonly workers: Iterable<TopicWorkerHost>;
   }): Effect.Effect<void, ViewServerError> =>
     Effect.suspend(() => {
@@ -36,9 +35,7 @@ export class RuntimeShutdownController {
       this.#closing = true;
       return Effect.fn("view-server.runtime.shutdown")(function* () {
         yield* args.syncHealth;
-        yield* Effect.forEach(args.sourceFibers, (fiber) => Fiber.interrupt(fiber), {
-          discard: true,
-        }).pipe(Effect.ignore);
+        yield* args.stopSources.pipe(Effect.ignore);
         yield* Effect.forEach(args.workers, (worker) => worker.shutdown, { discard: true });
       })();
     });

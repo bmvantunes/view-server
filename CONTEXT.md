@@ -26,6 +26,7 @@ This document is the compact domain map for future agents. `plan.md` is the hist
 - `packages/core/src/client/live-query-lifecycle.ts`: AsyncResult transition semantics for connecting, live, stale, reconnecting, failure with previous, and closed states.
 - `packages/core/src/rpc`: Effect RPC group, websocket NDJSON transport, wire codecs.
 - `packages/core/src/server`: runtime orchestration, HTTP health/readiness, runtime health projection, shutdown controller.
+- `packages/core/src/server/kafka-source-supervisor.ts`: Kafka/Effect source topic verification, source fibers, lag metrics, source degraded state, and source shutdown.
 - `packages/core/src/worker/mutation-store.ts`: row array, id index, version counter, mutation log, replay.
 - `packages/core/src/worker/snapshot-reconciler.ts`: version-fenced backend query, replay, memory fallback.
 - `packages/core/src/worker/active-plan-coordinator.ts`: active raw plan cache, admission, build lifecycle, ref counts.
@@ -47,7 +48,7 @@ This document is the compact domain map for future agents. `plan.md` is the hist
 ## Load-Bearing Invariants
 
 - `defineConfig` is the only topic source of truth. Worker threads import the user config module by URL/path and select their topic.
-- Topic boundaries are hard runtime boundaries. No query or subscription may span topics, which is what lets each topic worker own its own memory, active plans, grouped refresh state, and chDB mirror independently.
+- Topic boundaries are hard runtime boundaries. No query or subscription may span topics, which is what lets each topic worker own its own memory, active plans, grouped refresh state, and chDB mirror independently. This is why a topic is a self-contained runtime slice instead of one participant in a shared cross-topic query engine.
 - Per-topic worker + per-topic chDB is therefore an architectural invariant, not an incidental optimization. If a future design adds cross-topic reads, it must introduce an explicit new architecture instead of quietly sharing the current chDB mirrors.
 - No user topic may start with `__`; system topics are private.
 - Production runtime uses chDB. Memory backend is internal test infrastructure only.

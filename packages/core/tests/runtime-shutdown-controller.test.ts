@@ -19,14 +19,14 @@ describe("RuntimeShutdownController", () => {
         syncHealth: Effect.sync(() => {
           healthSyncs += 1;
         }),
-        sourceFibers: [],
+        stopSources: Effect.void,
         workers: [worker],
       });
       yield* controller.close({
         syncHealth: Effect.sync(() => {
           healthSyncs += 1;
         }),
-        sourceFibers: [],
+        stopSources: Effect.void,
         workers: [worker],
       });
       const closed = yield* Effect.exit(controller.ensureOpen("query", "orders", "request"));
