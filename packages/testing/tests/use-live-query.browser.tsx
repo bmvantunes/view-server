@@ -1,25 +1,33 @@
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { AsyncResult } from "effect/unstable/reactivity";
 import React from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import type { LiveQueryInitialData } from "@view-server/core/client";
+import type { ViewServerRpcTransport } from "@view-server/core/client";
 import { defineConfig } from "@view-server/core/config";
 import type {
   InferQueryResult,
   RawQuery,
+  RuntimeQuery,
   RuntimeRow,
   SubscriptionEvent,
 } from "@view-server/core/query";
+import { fromWireRow, wireQueryResponse } from "@view-server/core/rpc";
 import {
   inMemoryViewServer,
   isolatedInMemoryViewServer,
   type InMemoryViewServer,
   type IsolatedInMemoryViewServer,
 } from "../src/index.ts";
+import {
+  createTestingViewServerClientFromTransport,
+  validateTestingIsolationId,
+} from "../src/testing-isolation.ts";
 
 type OrderRow = {
   readonly id: string;
@@ -380,6 +388,42 @@ describe("useLiveQuery browser mode", () => {
       ),
     );
   });
+
+  test("testing isolation scopes two clients over one transport", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const rows: RuntimeRow[] = [];
+        const transport = fakeIsolatedTransport(rows);
+        const clientA = createTestingViewServerClientFromTransport(
+          transport,
+          isolatedConfig,
+          "test-a",
+        ).client;
+        const clientB = createTestingViewServerClientFromTransport(
+          transport,
+          isolatedConfig,
+          "test-b",
+        ).client;
+
+        yield* clientA.publish("orders", { id: "a-1", symbol: "AAPL", price: 100 });
+        yield* clientB.publish("orders", { id: "b-1", symbol: "MSFT", price: 200 });
+        yield* clientA.deltaPublish("orders", { id: "a-1", price: 125 });
+
+        const a = yield* clientA.query("orders", isolatedQuery);
+        const b = yield* clientB.query("orders", isolatedQuery);
+
+        expect(rows).toEqual([
+          { id: "a-1", symbol: "AAPL", price: 125, isolationId: "test-a" },
+          { id: "b-1", symbol: "MSFT", price: 200, isolationId: "test-b" },
+        ]);
+        expect(a.rows).toEqual([{ id: "a-1", price: 125 }]);
+        expect(a.totalRows).toBe(1);
+        expect(b.rows).toEqual([{ id: "b-1", price: 200 }]);
+        expect(b.totalRows).toBe(1);
+        expect(() => validateTestingIsolationId(" ")).toThrow(/isolationId is required/);
+      }),
+    );
+  });
 });
 
 function renderGrid(
@@ -423,6 +467,69 @@ function renderIsolatedGrid(server: IsolatedInMemoryViewServer<typeof isolatedCo
   const root = createRoot(host);
   roots.push(root);
   flushSync(() => root.render(<IsolatedOrdersGrid server={server} />));
+}
+
+function fakeIsolatedTransport(rows: RuntimeRow[]): ViewServerRpcTransport {
+  return {
+    Query: (payload) =>
+      Effect.succeed(
+        wireQueryResponse({
+          rows: projectRows(rows, isolationIdFromQuery(payload.query)),
+          totalRows: projectRows(rows, isolationIdFromQuery(payload.query)).length,
+          version: "0",
+        }),
+      ),
+    Subscribe: () => Stream.empty,
+    Unsubscribe: () => Effect.void,
+    Publish: (payload) =>
+      Effect.sync(() => {
+        rows.push(fromWireRow(payload.row));
+      }),
+    DeltaPublish: (payload) =>
+      Effect.sync(() => {
+        const patch = fromWireRow(payload.patch);
+        const id = patch.id;
+        const index = rows.findIndex(
+          (row) => row.id === id && row.isolationId === patch.isolationId,
+        );
+        if (index >= 0) {
+          rows[index] = { ...rows[index], ...patch };
+        }
+      }),
+    DeleteById: () => Effect.void,
+    Health: () => Effect.succeed({ ok: true, topics: {} }),
+  };
+}
+
+function projectRows(rows: readonly RuntimeRow[], isolationId: string | undefined): RuntimeRow[] {
+  return rows
+    .filter((row) => row.isolationId === isolationId)
+    .map((row) => ({
+      id: row.id,
+      price: row.price,
+    }));
+}
+
+function isolationIdFromQuery(query: RuntimeQuery): string | undefined {
+  return isolationIdFromWhere(query.where);
+}
+
+function isolationIdFromWhere(where: RuntimeQuery["where"]): string | undefined {
+  if (where === undefined) {
+    return undefined;
+  }
+  if ("conditions" in where) {
+    for (const condition of where.conditions) {
+      const isolationId = isolationIdFromWhere(condition);
+      if (isolationId !== undefined) {
+        return isolationId;
+      }
+    }
+    return undefined;
+  }
+  return where.field === "isolationId" && where.comparator === "equals"
+    ? String(where.value)
+    : undefined;
 }
 
 function OrdersGrid(props: {

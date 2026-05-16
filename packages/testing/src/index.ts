@@ -17,8 +17,7 @@ import type {
   TopicRowFromConfig,
   ViewServerConfig,
 } from "@view-server/core/config";
-import { VIEW_SERVER_HEALTH_TOPIC } from "@view-server/core/config";
-import { isViewServerError, transportError, type ViewServerError } from "@view-server/core/errors";
+import type { ViewServerError } from "@view-server/core/errors";
 import type {
   InferReadableQueryResult,
   QueryForReadableTopic,
@@ -32,8 +31,6 @@ import {
 } from "@view-server/core/runtime";
 import {
   fromWireRow,
-  toWireRow,
-  type RpcQueryPayload,
   ViewServerRpcs,
   wireQueryResponse,
   wireSubscriptionEvent,
@@ -51,6 +48,24 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import {
+  createTestingViewServerClientFromTransport,
+  normalizeTestingInitialRows,
+  validateTestingIsolationId,
+  type MissingIsolationTopics,
+  type RequireIsolationId,
+  type TestingViewServerClient,
+  type TopicPatchWithoutIsolation,
+  type TopicRowWithoutIsolation,
+} from "./testing-isolation.ts";
+
+export type {
+  MissingIsolationTopics,
+  RequireIsolationId,
+  TestingViewServerClient,
+  TopicPatchWithoutIsolation,
+  TopicRowWithoutIsolation,
+} from "./testing-isolation.ts";
 
 export type InMemoryViewServer<TConfig extends ViewServerConfig> = {
   readonly client: ViewServerClient<TConfig>;
@@ -92,49 +107,6 @@ export type InMemoryViewServerOptions<TConfig extends ViewServerConfig> = {
         readonly [TTopic in TopicName<TConfig>]: readonly TopicRowFromConfig<TConfig, TTopic>[];
       }>
     | undefined;
-};
-
-type TopicRowWithoutIsolation<
-  TConfig extends ViewServerConfig,
-  TTopic extends TopicName<TConfig>,
-> = Omit<TopicRowFromConfig<TConfig, TTopic>, "isolationId">;
-
-type TopicPatchWithoutIsolation<
-  TConfig extends ViewServerConfig,
-  TTopic extends TopicName<TConfig>,
-> = Omit<TopicPatchFromConfig<TConfig, TTopic>, "isolationId">;
-
-type MissingIsolationTopics<TConfig extends ViewServerConfig> = {
-  readonly [TTopic in TopicName<TConfig>]: TopicRowFromConfig<TConfig, TTopic> extends {
-    readonly isolationId: string;
-  }
-    ? never
-    : TTopic;
-}[TopicName<TConfig>];
-
-type RequireIsolationId<TConfig extends ViewServerConfig> =
-  MissingIsolationTopics<TConfig> extends never
-    ? unknown
-    : {
-        readonly "Each test-isolated topic schema must include isolationId": MissingIsolationTopics<TConfig>;
-      };
-
-export type TestingViewServerClient<TConfig extends ViewServerConfig> = {
-  readonly query: ViewServerClient<TConfig>["query"];
-  readonly subscribe: ViewServerClient<TConfig>["subscribe"];
-  readonly health: ViewServerClient<TConfig>["health"];
-  readonly createStore: ViewServerClient<TConfig>["createStore"];
-  readonly deleteById: ViewServerClient<TConfig>["deleteById"];
-  readonly publish: <TTopic extends TopicName<TConfig>>(
-    topic: TTopic,
-    rows:
-      | TopicRowWithoutIsolation<TConfig, TTopic>
-      | readonly TopicRowWithoutIsolation<TConfig, TTopic>[],
-  ) => Effect.Effect<void, ViewServerError>;
-  readonly deltaPublish: <TTopic extends TopicName<TConfig>>(
-    topic: TTopic,
-    patch: TopicPatchWithoutIsolation<TConfig, TTopic>,
-  ) => Effect.Effect<void, ViewServerError>;
 };
 
 export type IsolatedInMemoryViewServer<TConfig extends ViewServerConfig> = {
@@ -226,15 +198,16 @@ export function isolatedInMemoryViewServer<const TConfig extends ViewServerConfi
   import("effect/Scope").Scope
 > {
   return Effect.fn("view-server.testing.in_memory.isolated.make")(function* () {
+    const isolationId = validateTestingIsolationId(options.isolationId);
     const runtime = yield* makeViewServerRuntime(config, {
-      initialRows: normalizeIsolatedInitialRows(options.initialRows, options.isolationId),
+      initialRows: normalizeTestingInitialRows(options.initialRows, isolationId),
       __testingUseMemorySnapshotBackend: true,
     });
     const baseTransport = runtimeTransport(runtime);
     const { client, liveClient } = createTestingViewServerClientFromTransport(
       baseTransport,
       config,
-      options.isolationId,
+      isolationId,
     );
     const hooks = createViewServerHooks(liveClient, config);
 
@@ -295,7 +268,7 @@ export function createTestingViewServerReact<const TConfig extends ViewServerCon
           createTestingViewServerClientFromTransport(
             browserWebsocketTransport(props.url),
             config,
-            props.isolationId,
+            validateTestingIsolationId(props.isolationId),
           ),
         ),
       ).then(
@@ -367,22 +340,6 @@ function normalizeInitialRows<TConfig extends ViewServerConfig>(
   return normalized;
 }
 
-function normalizeIsolatedInitialRows<TConfig extends ViewServerConfig>(
-  initialRows: IsolatedInMemoryViewServerOptions<TConfig>["initialRows"],
-  isolationId: string,
-): Readonly<Record<string, readonly RuntimeRow[]>> | undefined {
-  if (initialRows === undefined) {
-    return undefined;
-  }
-  const normalized: Record<string, readonly RuntimeRow[]> = {};
-  for (const [topic, rows] of Object.entries(initialRows)) {
-    if (rows !== undefined) {
-      normalized[topic] = rows.map((row) => ({ ...row, isolationId }));
-    }
-  }
-  return normalized;
-}
-
 function runtimeTransport(runtime: ViewServerRuntimeShape): ViewServerRpcTransport {
   return {
     Query: (payload) =>
@@ -427,99 +384,4 @@ function browserWebsocketTransport(url: string): ViewServerRpcTransport {
     DeleteById: (payload) => runRpc((rpcClient) => rpcClient.DeleteById(payload)),
     Health: (payload) => runRpc((rpcClient) => rpcClient.Health(payload)),
   };
-}
-
-function createTestingViewServerClientFromTransport<TConfig extends ViewServerConfig>(
-  transport: ViewServerRpcTransport,
-  config: TConfig,
-  isolationId: string,
-): {
-  readonly client: TestingViewServerClient<TConfig>;
-  readonly liveClient: ViewServerClient<TConfig>;
-} {
-  const isolatedTransport = isolateTransport(transport, isolationId);
-  const liveClient = createViewServerClient<TConfig>(isolatedTransport, config);
-  const client: TestingViewServerClient<TConfig> = {
-    query: liveClient.query,
-    subscribe: liveClient.subscribe,
-    health: liveClient.health,
-    createStore: liveClient.createStore,
-    deleteById: liveClient.deleteById,
-    publish: (topic, rows) =>
-      Effect.forEach(Array.isArray(rows) ? rows : [rows], (row) =>
-        transport.Publish({
-          topic,
-          row: toWireRow({ ...row, isolationId }),
-        }),
-      ).pipe(Effect.asVoid, Effect.mapError(toViewServerError)),
-    deltaPublish: (topic, patch) =>
-      transport
-        .DeltaPublish({
-          topic,
-          patch: toWireRow({ ...patch, isolationId }),
-        })
-        .pipe(Effect.mapError(toViewServerError)),
-  };
-  return { client, liveClient };
-}
-
-function isolateTransport(
-  transport: ViewServerRpcTransport,
-  isolationId: string,
-): ViewServerRpcTransport {
-  return {
-    Query: (payload) =>
-      transport.Query({
-        ...payload,
-        query: isolateQuery(payload.topic, payload.query, isolationId),
-      }),
-    Subscribe: (payload) =>
-      transport.Subscribe({
-        ...payload,
-        query: isolateQuery(payload.topic, payload.query, isolationId),
-      }),
-    Unsubscribe: transport.Unsubscribe,
-    Publish: (payload) =>
-      transport.Publish({
-        ...payload,
-        row: { ...payload.row, isolationId },
-      }),
-    DeltaPublish: (payload) =>
-      transport.DeltaPublish({
-        ...payload,
-        patch: { ...payload.patch, isolationId },
-      }),
-    DeleteById: transport.DeleteById,
-    Health: transport.Health,
-  };
-}
-
-function isolateQuery(
-  topic: string,
-  query: RpcQueryPayload["query"],
-  isolationId: string,
-): RpcQueryPayload["query"] {
-  if (topic === VIEW_SERVER_HEALTH_TOPIC) {
-    return query;
-  }
-  const isolationFilter = {
-    field: "isolationId",
-    comparator: "equals",
-    value: isolationId,
-  } satisfies RpcQueryPayload["query"]["where"];
-  const where =
-    query.where === undefined
-      ? isolationFilter
-      : ({
-          op: "and",
-          conditions: [isolationFilter, query.where],
-        } satisfies RpcQueryPayload["query"]["where"]);
-  return {
-    ...query,
-    where,
-  };
-}
-
-function toViewServerError(error: unknown): ViewServerError {
-  return isViewServerError(error) ? error : transportError(error);
 }

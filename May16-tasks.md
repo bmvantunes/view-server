@@ -51,6 +51,8 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 21: KafkaSourceSupervisor extraction for topic verification, source fibers,
       lag metrics, degraded source state, and source shutdown.
 - [x] Task 22: TopicPlacement extraction for one worker plus one topic-owned backend per topic.
+- [x] Task 23: TestingIsolation extraction for isolationId validation, query scoping,
+      publish/patch injection, and isolated testing clients/providers.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
 - [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [x] Task 39: chDB SQL compiler contract tests and internal compiler module.
