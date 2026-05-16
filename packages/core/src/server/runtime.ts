@@ -11,7 +11,6 @@ import {
   normalizeConfig,
   type NormalizedViewServerConfig,
   type RowObject,
-  type TopicConfig,
   type ViewServerConfig,
   VIEW_SERVER_HEALTH_TOPIC,
 } from "../config/index.ts";
@@ -20,7 +19,6 @@ import {
   invalidConfig,
   invalidQuery,
   missingTopic,
-  snapshotBackendFailed,
   unauthorized,
   type ViewServerError,
 } from "../errors.ts";
@@ -34,12 +32,6 @@ import type {
 } from "../protocol/index.ts";
 import { isRuntimeGroupedQuery } from "../protocol/index.ts";
 import type { KafkaTopicConsumer, KafkaTopicVerifier } from "../kafka/index.ts";
-import { createMemorySnapshotBackend, type SnapshotBackend } from "../snapshot/snapshot-backend.ts";
-import {
-  makeInProcessTopicWorkerHost,
-  type TopicWorkerHost,
-  type TopicWorkerHostFactory,
-} from "../worker/index.ts";
 import { KafkaSourceSupervisor } from "./kafka-source-supervisor.ts";
 import {
   healthRowsFromResponse,
@@ -48,6 +40,7 @@ import {
   type RuntimeHealthProjectionTopicInput,
 } from "./runtime-health-projection.ts";
 import { RuntimeShutdownController } from "./runtime-shutdown-controller.ts";
+import { createTopicPlacements, type TopicPlacementOptions } from "./topic-placement.ts";
 
 export type { HealthResponse } from "./runtime-health-projection.ts";
 
@@ -74,21 +67,11 @@ export class ViewServerRuntime extends Context.Service<ViewServerRuntime, ViewSe
   "@view-server/core/ViewServerRuntime",
 ) {}
 
-export type ViewServerRuntimeOptions = {
-  readonly initialRows?: Readonly<Record<string, readonly RuntimeRow[]>> | undefined;
+export type ViewServerRuntimeOptions = TopicPlacementOptions & {
   readonly kafkaConsumerFactory?:
     | ((source: KafkaSourceConfig<RowObject, string>) => KafkaTopicConsumer)
     | undefined;
   readonly kafkaTopicVerifier?: KafkaTopicVerifier | undefined;
-  readonly topicWorkerFactory?: TopicWorkerHostFactory | undefined;
-  /** @internal Test-only backend injection for fault and fallback coverage. */
-  readonly __testingSnapshotBackends?: Readonly<Record<string, SnapshotBackend>> | undefined;
-  /** @internal Test-only backend factory for fault and fallback coverage. */
-  readonly __testingSnapshotBackendFactory?:
-    | ((topic: string, config: TopicConfig) => SnapshotBackend)
-    | undefined;
-  /** @internal Browser/package tests only. Production runtime must use chDB. */
-  readonly __testingUseMemorySnapshotBackend?: boolean | undefined;
 };
 
 export function makeViewServerRuntime(
@@ -105,7 +88,8 @@ export function makeViewServerRuntime(
       kafkaTopicVerifier: options.kafkaTopicVerifier,
     });
     yield* sourceSupervisor.verifyTopics();
-    const workers = new Map<string, TopicWorkerHost>();
+    const placementSet = yield* createTopicPlacements(normalized, options);
+    const workers = placementSet.workers;
     const columnCatalogs = new Map(
       Object.entries(normalized.topics).map(([topic, topicConfig]) => [
         topic,
@@ -113,26 +97,6 @@ export function makeViewServerRuntime(
       ]),
     );
     const shutdownController = new RuntimeShutdownController();
-    const makeTopicWorker = options.topicWorkerFactory ?? makeInProcessTopicWorkerHost;
-
-    for (const [topic, topicConfig] of Object.entries(normalized.topics)) {
-      const backend = yield* shouldResolveSnapshotBackend(options)
-        ? resolveSnapshotBackend(topic, topicConfig, options)
-        : Effect.succeed(undefined);
-      const worker = yield* makeTopicWorker(topic, topicConfig, {
-        initialRows: options.initialRows?.[topic],
-        snapshotBackend: backend,
-        maxQueueDepth: normalized.worker.maxQueueDepth,
-        mutationLogSize: normalized.worker.mutationLogSize,
-        deltaCoalescing: normalized.worker.deltaCoalescing,
-        maxActivePlans: normalized.worker.maxActivePlans,
-        maxActivePlanEstimatedBytes: normalized.worker.maxActivePlanEstimatedBytes,
-        activePlanAutoBuildMaxRows: normalized.worker.activePlanAutoBuildMaxRows,
-        activePlanBuildConcurrency: normalized.worker.activePlanBuildConcurrency,
-        groupedRefreshDebounceMs: normalized.worker.groupedRefreshDebounceMs,
-      });
-      workers.set(topic, worker);
-    }
 
     const workerFor = (topic: string) => {
       const worker = workers.get(topic);
@@ -400,42 +364,6 @@ export function makeViewServerRuntime(
 
     return runtime;
   })();
-}
-
-function resolveSnapshotBackend(
-  topic: string,
-  topicConfig: TopicConfig,
-  options: ViewServerRuntimeOptions,
-): Effect.Effect<SnapshotBackend, ViewServerError> {
-  if (topic === VIEW_SERVER_HEALTH_TOPIC) {
-    return Effect.succeed(createMemorySnapshotBackend());
-  }
-  if (options.__testingUseMemorySnapshotBackend === true) {
-    return Effect.succeed(createMemorySnapshotBackend());
-  }
-  const injected = options.__testingSnapshotBackends?.[topic];
-  if (injected !== undefined) {
-    return Effect.succeed(injected);
-  }
-  if (options.__testingSnapshotBackendFactory !== undefined) {
-    return Effect.succeed(options.__testingSnapshotBackendFactory(topic, topicConfig));
-  }
-  return Effect.tryPromise({
-    try: async () => {
-      const { createChdbSnapshotBackend } = await import("../snapshot/chdb-backend.ts");
-      return createChdbSnapshotBackend();
-    },
-    catch: (error) => snapshotBackendFailed(topic, error),
-  });
-}
-
-function shouldResolveSnapshotBackend(options: ViewServerRuntimeOptions): boolean {
-  return (
-    options.topicWorkerFactory === undefined ||
-    options.__testingUseMemorySnapshotBackend === true ||
-    options.__testingSnapshotBackends !== undefined ||
-    options.__testingSnapshotBackendFactory !== undefined
-  );
 }
 
 export const layerViewServerRuntime = (

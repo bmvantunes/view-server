@@ -27,6 +27,7 @@ This document is the compact domain map for future agents. `plan.md` is the hist
 - `packages/core/src/rpc`: Effect RPC group, websocket NDJSON transport, wire codecs.
 - `packages/core/src/server`: runtime orchestration, HTTP health/readiness, runtime health projection, shutdown controller.
 - `packages/core/src/server/kafka-source-supervisor.ts`: Kafka/Effect source topic verification, source fibers, lag metrics, source degraded state, and source shutdown.
+- `packages/core/src/server/topic-placement.ts`: per-topic placement policy for one topic worker plus one topic-owned snapshot backend/chDB mirror.
 - `packages/core/src/worker/mutation-store.ts`: row array, id index, version counter, mutation log, replay.
 - `packages/core/src/worker/snapshot-reconciler.ts`: version-fenced backend query, replay, memory fallback.
 - `packages/core/src/worker/active-plan-coordinator.ts`: active raw plan cache, admission, build lifecycle, ref counts.
