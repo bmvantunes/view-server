@@ -3,7 +3,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { VIEW_SERVER_HEALTH_TOPIC, type ViewServerHealthRow } from "@view-server/core";
+import { VIEW_SERVER_HEALTH_TOPIC, type ViewServerHealthRow } from "@view-server/core/config";
 import {
   ViewServerMetricsDashboard,
   viewServerHealthQuery,

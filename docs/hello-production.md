@@ -8,7 +8,8 @@ It is intentionally a wiring example, not a deployment guide.
 
 ```ts
 import * as Schema from "effect/Schema";
-import { KafkaSource, decodeJsonRecord, defineConfig } from "@view-server/core";
+import { KafkaSource, defineConfig } from "@view-server/core/config";
+import { decodeJsonRecord } from "@view-server/core/kafka";
 
 const Order = Schema.Struct({
   id: Schema.String,
@@ -39,7 +40,6 @@ export const viewServerConfig = defineConfig({
       id: "id",
       schema: Order,
       snapshot: {
-        backend: "chdb",
         flushBatchSize: 10_000,
         flushIntervalMs: 100,
       },
@@ -64,7 +64,6 @@ import { createServer } from "node:http";
 import { createPlatformaticKafkaConsumerFactory } from "@view-server/core/kafka/platformatic";
 import { layerViewServerRuntime } from "@view-server/core";
 import { layerViewServerWebsocketServer } from "@view-server/core/rpc/websocket";
-import { createChdbSnapshotBackendFactory } from "@view-server/core/snapshot/chdb";
 import { viewServerConfig } from "./view-server.config";
 
 const RuntimeLayer = layerViewServerRuntime(viewServerConfig, {
@@ -73,7 +72,6 @@ const RuntimeLayer = layerViewServerRuntime(viewServerConfig, {
     batchSize: 1_000,
     lagMonitoringIntervalMs: 1_000,
   }),
-  snapshotBackendFactory: createChdbSnapshotBackendFactory(),
 });
 
 const ServerLayer = layerViewServerWebsocketServer("/rpc").pipe(

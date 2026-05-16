@@ -9,6 +9,8 @@
     "demo:server": "vp run orders-demo#server",
     "demo:web": "vp run orders-demo#dev",
     "demo:build": "vp run orders-demo#build",
+    "test:server:start": "bash scripts/test-server-start.sh",
+    "test:server:stop": "bash scripts/test-server-stop.sh",
     "smoke:deployment": "bash scripts/deployment-smoke.sh",
     "pack:dry-run": "vp run core#build && vp run react#build && vp run testing#build && pnpm --filter @view-server/core pack --dry-run && pnpm --filter @view-server/react pack --dry-run && pnpm --filter @view-server/testing pack --dry-run",
     "prepare": "vp config"

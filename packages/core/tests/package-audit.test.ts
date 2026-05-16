@@ -107,14 +107,14 @@ describe("release package audit", () => {
     }),
   );
 
-  it.effect("keeps production integrations optional for memory and browser consumers", () =>
+  it.effect("requires chDB for production while keeping unrelated integrations optional", () =>
     Effect.gen(function* () {
       const corePackage = yield* readPackageJson("packages/core/package.json");
       expect(corePackage.peerDependencies?.["@effect/platform-node"]).toBe("4.0.0-beta.65");
       expect(corePackage.peerDependencies?.chdb).toBe("1.6.0");
       expect(corePackage.peerDependencies?.["@platformatic/kafka"]).toBe("2.0.1");
       expect(corePackage.peerDependenciesMeta?.["@effect/platform-node"]?.optional).toBe(true);
-      expect(corePackage.peerDependenciesMeta?.chdb?.optional).toBe(true);
+      expect(corePackage.peerDependenciesMeta?.chdb).toBeUndefined();
       expect(corePackage.peerDependenciesMeta?.["@platformatic/kafka"]?.optional).toBe(true);
     }),
   );

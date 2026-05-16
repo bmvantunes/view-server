@@ -6,7 +6,9 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import { HttpServer } from "effect/unstable/http";
-import { defineConfig, layerViewServerRuntime, type RawQuery } from "@view-server/core";
+import { defineConfig } from "@view-server/core/config";
+import type { RawQuery } from "@view-server/core/query";
+import { layerViewServerRuntime } from "@view-server/core/runtime";
 import {
   layerViewServerWebsocketServer,
   makeNodeWebsocketClient,

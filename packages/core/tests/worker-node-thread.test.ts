@@ -27,7 +27,6 @@ describe("node topic worker host", () => {
       const makeWorker = makeNodeThreadTopicWorkerHostFactory({
         configModuleUrl: new URL("./fixtures/node-worker-config.ts", import.meta.url),
         workerEntryUrl: new URL("../src/worker/topic-worker-node-entry.ts", import.meta.url),
-        snapshotBackend: "memory",
       });
       const worker = yield* makeWorker("orders", config.topics.orders, {
         initialRows: [

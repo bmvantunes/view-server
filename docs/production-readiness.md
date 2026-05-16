@@ -1,6 +1,6 @@
 # Production Readiness
 
-This is the deployment checklist for the current alpha runtime. Worker memory is authoritative. chDB and active plans are accelerators behind version fences.
+This is the deployment checklist for the current alpha runtime. Worker memory is authoritative. chDB is mandatory for production startup, and chDB plus active plans are accelerators behind version fences.
 
 ## Runtime Versions
 
@@ -29,6 +29,7 @@ VIEW_SERVER_CONFIG_MODULE=./view-server.config.ts
 
 The production loader validates:
 
+- chDB can initialize
 - required env vars
 - config module export shape
 - Kafka source topics through the runtime topic verifier
@@ -38,6 +39,8 @@ The production loader validates:
 - query limit config is sane
 
 Private system topics are reserved. User topics must not start with `__`.
+
+There is no public runtime config for choosing a memory snapshot backend. Memory is reserved for internal tests and browser package tests.
 
 ## Memory Sizing
 

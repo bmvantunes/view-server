@@ -6,20 +6,29 @@ import React from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, test } from "vite-plus/test";
+import type { LiveQueryInitialData } from "@view-server/core/client";
+import { defineConfig } from "@view-server/core/config";
+import type {
+  InferQueryResult,
+  RawQuery,
+  RuntimeRow,
+  SubscriptionEvent,
+} from "@view-server/core/query";
 import {
-  defineConfig,
-  type InferQueryResult,
-  type LiveQueryInitialData,
-  type RawQuery,
-  type RuntimeRow,
-  type SubscriptionEvent,
-} from "@view-server/core";
-import { inMemoryViewServer, type InMemoryViewServer } from "../src/index.ts";
+  inMemoryViewServer,
+  isolatedInMemoryViewServer,
+  type InMemoryViewServer,
+  type IsolatedInMemoryViewServer,
+} from "../src/index.ts";
 
 type OrderRow = {
   readonly id: string;
   readonly symbol: string;
   readonly price: number;
+};
+
+type IsolatedOrderRow = OrderRow & {
+  readonly isolationId: string;
 };
 
 type TradeRow = {
@@ -33,6 +42,13 @@ const Order = Schema.Struct({
   id: Schema.String,
   symbol: Schema.String,
   price: Schema.Number,
+});
+
+const IsolatedOrder = Schema.Struct({
+  id: Schema.String,
+  symbol: Schema.String,
+  price: Schema.Number,
+  isolationId: Schema.String,
 });
 
 const Trade = Schema.Struct({
@@ -51,6 +67,15 @@ const config = defineConfig({
     trades: {
       id: "id",
       schema: Trade,
+    },
+  },
+});
+
+const isolatedConfig = defineConfig({
+  topics: {
+    orders: {
+      id: "id",
+      schema: IsolatedOrder,
     },
   },
 });
@@ -115,6 +140,15 @@ const groupedQuery = {
     totalQty: { aggFunc: "sum"; field: "qty" };
   }
 >;
+
+const isolatedQuery = {
+  fields: {
+    id: true,
+    price: true,
+  },
+  orderBy: [{ field: "price", direction: "desc" }],
+  limit: 5,
+} satisfies RawQuery<IsolatedOrderRow, { id: true; price: true }>;
 
 const roots: Root[] = [];
 const rowRenderCounts = new Map<string, number>();
@@ -319,6 +353,33 @@ describe("useLiveQuery browser mode", () => {
       ),
     );
   });
+
+  test("testing isolation injects isolationId into publishes and live queries", async () => {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const server = yield* isolatedInMemoryViewServer(isolatedConfig, {
+            isolationId: "test-a",
+          });
+
+          yield* Effect.promise(() =>
+            server.publish("orders", { id: "o-1", symbol: "AAPL", price: 100 }),
+          );
+          const initial = yield* Effect.promise(() => server.query("orders", isolatedQuery));
+          expect(initial.rows).toEqual([{ id: "o-1", price: 100 }]);
+          expect(initial.totalRows).toBe(1);
+
+          renderIsolatedGrid(server);
+          yield* Effect.promise(() => waitForText("o-1:100"));
+          expect(document.body.textContent).toContain("rows=1");
+
+          yield* Effect.promise(() => server.deltaPublish("orders", { id: "o-1", price: 125 }));
+          yield* Effect.promise(() => waitForText("o-1:125"));
+          expect(document.body.textContent).toContain("rows=1");
+        }),
+      ),
+    );
+  });
 });
 
 function renderGrid(
@@ -354,6 +415,14 @@ function renderGroupedGrid(server: InMemoryViewServer<typeof config>) {
   const root = createRoot(host);
   roots.push(root);
   flushSync(() => root.render(<GroupedTradesGrid server={server} />));
+}
+
+function renderIsolatedGrid(server: IsolatedInMemoryViewServer<typeof isolatedConfig>) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.push(root);
+  flushSync(() => root.render(<IsolatedOrdersGrid server={server} />));
 }
 
 function OrdersGrid(props: {
@@ -457,6 +526,32 @@ function GroupedTradesGrid(props: { readonly server: InMemoryViewServer<typeof c
         {value.rows.map((row) => (
           <div key={row.region} data-grouped-row="">
             {row.region}:{row.trades}:{row.traders}:{row.totalQty}
+          </div>
+        ))}
+      </div>
+    ),
+  });
+}
+
+function IsolatedOrdersGrid(props: {
+  readonly server: IsolatedInMemoryViewServer<typeof isolatedConfig>;
+}) {
+  const result = props.server.hooks.useLiveQuery("orders", isolatedQuery);
+  return AsyncResult.match(result, {
+    onInitial: () => (
+      <div>
+        <div>connecting</div>
+        <div>rows=0</div>
+      </div>
+    ),
+    onFailure: () => <div>error</div>,
+    onSuccess: ({ value }) => (
+      <div>
+        <div>{value.status}</div>
+        <div>rows={value.totalRows}</div>
+        {value.rows.map((row) => (
+          <div key={row.id}>
+            {row.id}:{row.price}
           </div>
         ))}
       </div>

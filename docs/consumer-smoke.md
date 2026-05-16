@@ -82,16 +82,15 @@ allowBuilds:
   - msgpackr-extract
 ```
 
-`msgpackr-extract` comes from the Effect dependency graph. Memory/runtime, React, and testing consumers should not need to install `chdb`, `@platformatic/kafka`, or `@effect/platform-node`.
+`msgpackr-extract` comes from the Effect dependency graph. Browser bundles should not import `chdb`, `@platformatic/kafka`, or `@effect/platform-node`. Production server/runtime consumers must install `chdb`; browser-only and internal memory testing paths must not bundle chDB into client assets.
 
 ```bash
 pnpm install --config.confirmModulesPurge=false
-pnpm why chdb
 pnpm why @platformatic/kafka
 pnpm why @effect/platform-node
 ```
 
-The three `pnpm why` commands should print nothing for the memory/browser smoke.
+The Kafka and platform-node `pnpm why` commands should print nothing for the browser/testing smoke unless the temp project intentionally exercises node websocket server helpers. `chdb` is expected when the temp project exercises a real server runtime.
 
 ## Shared Consumer Config
 
@@ -163,7 +162,7 @@ The Node smoke should import only public package entrypoints:
 
 It should:
 
-- create an in-memory runtime with two topics
+- create a runtime with two topics
 - publish `orders` and `trades`
 - query `orders`
 - subscribe to `orders`
@@ -245,6 +244,8 @@ Expected result: Vite builds successfully and the grep exits 0.
 
 The testing smoke should import `@view-server/testing` from the tarball and run a browser-mode test against `inMemoryViewServer`. It should not require production chDB or Kafka dependencies.
 
+For app-level UI/E2E tests, prefer a real View Server process plus the testing-only `TestingViewServerProvider` from `@view-server/testing`. It requires an `isolationId`, injects `where isolationId == current isolationId` into live queries, and adds `isolationId` to rows and patches sent through testing helpers. Each test topic schema must include `isolationId: Schema.String`.
+
 Run:
 
 ```bash
@@ -255,10 +256,10 @@ Expected result: the browser-mode test passes.
 
 ## Known Limitations
 
-- This smoke uses the in-memory runtime path. It does not prove a production websocket server, Kafka consumer, or chDB backend.
+- Browser bundle checks do not prove a production websocket server, Kafka consumer, or chDB backend. Use `docs/deployment-smoke.md` for the real server artifact smoke.
 - Node-only subpaths have explicit optional peers:
   - `@view-server/core/rpc/websocket` and `@view-server/core/worker/node` require `@effect/platform-node`.
-  - `@view-server/core/snapshot/chdb` requires `chdb`.
+  - production runtime and `@view-server/core/snapshot/chdb` require `chdb`.
   - `@view-server/core/kafka/platformatic` requires `@platformatic/kafka`.
 - The browser bundle grep is a coarse artifact check. It is useful for catching accidental server imports, but package export tests and Vite build errors are still the stronger checks.
 - The temp app should never import from monorepo source paths. Any source-path import means the package surface is incomplete.

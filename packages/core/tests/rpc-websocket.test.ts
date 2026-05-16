@@ -62,9 +62,6 @@ const chdbConfig = defineConfig({
     orders: {
       id: "id",
       schema: Order,
-      snapshot: {
-        backend: "chdb",
-      },
     },
   },
 });
@@ -1191,7 +1188,7 @@ describe("Effect RPC websocket", () => {
       const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
         Layer.provide(
           layerViewServerRuntime(chdbConfig, {
-            snapshotBackendFactory: createChdbSnapshotBackendFactory(),
+            __testingSnapshotBackendFactory: createChdbSnapshotBackendFactory(),
             initialRows: {
               orders: [
                 { id: "o-1", symbol: "AAPL", price: 100 },

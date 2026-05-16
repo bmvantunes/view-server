@@ -151,16 +151,13 @@ Effect.runFork(
 
 function makeSnapshotBackend(
   initialMessage: TopicWorkerInitialMessageType,
-  topicConfig: TopicConfig,
+  _topicConfig: TopicConfig,
 ): SnapshotBackend {
-  const mode = initialMessage.snapshotBackend ?? "config";
+  const mode = initialMessage.snapshotBackend ?? "chdb";
   if (mode === "memory") {
     return createMemorySnapshotBackend();
   }
-  if (mode === "chdb" || topicConfig.snapshot?.backend === "chdb") {
-    return createChdbSnapshotBackend();
-  }
-  return createMemorySnapshotBackend();
+  return createChdbSnapshotBackend();
 }
 
 function loadConfig(

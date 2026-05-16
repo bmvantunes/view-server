@@ -291,7 +291,7 @@ Type exports:
 
 Runtime exports:
 
-- `createMemorySnapshotBackend`
+- none
 
 Type exports:
 
@@ -335,11 +335,17 @@ The React package imports public core subpaths only. It must not import Node-onl
 Runtime exports:
 
 - `inMemoryViewServer`
+- `isolatedInMemoryViewServer`
+- `makeTestingBrowserWebsocketClient`
+- `createTestingViewServerReact`
 
 Type exports:
 
 - `InMemoryViewServer`
 - `InMemoryViewServerOptions`
+- `IsolatedInMemoryViewServer`
+- `IsolatedInMemoryViewServerOptions`
+- `TestingViewServerClient`
 
 The testing package is intentionally separate from `@view-server/core`; test helpers must not leak through the core root export.
 
@@ -353,4 +359,5 @@ Public packages must have:
 - explicit `exports`
 - `files` including `dist` and `src`
 - peer dependencies for shared runtime libraries (`effect`, `react`, `@view-server/core`, `@view-server/react`) instead of bundling duplicate copies
-- optional peer dependencies for Node-only integrations (`@effect/platform-node`, `chdb`, `@platformatic/kafka`) so memory/testing/browser consumers are not forced to install production integrations
+- required `chdb` peer dependency for production runtime
+- optional peer dependencies for unrelated Node-only integrations (`@effect/platform-node`, `@platformatic/kafka`) so browser consumers are not forced to install websocket server or Kafka integrations

@@ -1,4 +1,4 @@
-import { defineConfig } from "@view-server/core";
+import { defineConfig } from "@view-server/core/config";
 
 export const metricsViewServerConfig = defineConfig({
   topics: {},

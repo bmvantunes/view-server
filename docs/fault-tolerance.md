@@ -12,9 +12,9 @@ Shutdown interrupts source fibers and should complete even when a source is stuc
 
 ## chDB Behind Or Down
 
-chDB is a snapshot accelerator, not the source of truth. Worker memory and the mutation log remain authoritative.
+chDB is mandatory for production runtime startup, but it is not the source of truth. Worker memory and the mutation log remain authoritative.
 
-If snapshot, grouped refresh, or mirror writes fail, the topic reports degraded and falls back to worker memory. A later successful backend operation can return the topic to ready.
+If chDB cannot initialize during startup, production runtime startup fails fast. If snapshot, grouped refresh, or mirror writes fail after startup, the topic reports degraded and falls back to worker memory. A later successful backend operation can return the topic to ready.
 
 Snapshots are accepted from chDB only when the version fence proves correctness. Grouped chDB refreshes require an exact backend version match; stale or failed refreshes are discarded and recomputed from memory.
 

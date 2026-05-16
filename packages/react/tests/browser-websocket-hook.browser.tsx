@@ -5,13 +5,9 @@ import React from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, inject, test } from "vite-plus/test";
-import {
-  defineConfig,
-  type RawQuery,
-  type RuntimeRow,
-  type SubscriptionEvent,
-  type ViewServerClient,
-} from "@view-server/core";
+import type { ViewServerClient } from "@view-server/core/client";
+import { defineConfig } from "@view-server/core/config";
+import type { RawQuery, RuntimeRow, SubscriptionEvent } from "@view-server/core/query";
 import {
   createViewServerReact,
   createViewServerHooks,

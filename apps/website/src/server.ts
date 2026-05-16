@@ -2,12 +2,12 @@ import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { createServer } from "node:http";
+import type { ViewServerError } from "@view-server/core/errors";
 import {
   layerViewServerRuntime,
   ViewServerRuntime,
-  type ViewServerError,
   type ViewServerRuntimeShape,
-} from "@view-server/core";
+} from "@view-server/core/runtime";
 import { layerViewServerWebsocketServer } from "@view-server/core/rpc/websocket";
 import { initialOrders, makeOrder, ordersDemoConfig, symbols } from "./view-server.ts";
 
@@ -20,7 +20,6 @@ const RuntimeLayer = layerViewServerRuntime(ordersDemoConfig, {
   initialRows: {
     orders: initialOrders(seedRows),
   },
-  useMemorySnapshotBackend: true,
 });
 
 const PublisherLayer = Layer.effectDiscard(

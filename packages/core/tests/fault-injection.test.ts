@@ -257,7 +257,7 @@ describe("fault injection", () => {
             initialRows: {
               orders: [orderRow(1, 100), orderRow(2, 200)],
             },
-            snapshotBackends: {
+            __testingSnapshotBackends: {
               orders: backend,
             },
           },

@@ -17,7 +17,7 @@ import { rowKeyForQuery } from "@view-server/core/query";
 import { ViewServerRpcs } from "@view-server/core/rpc";
 import { layerViewServerWebsocketServer } from "@view-server/core/rpc/websocket";
 import { makeViewServerRuntime } from "@view-server/core/runtime";
-import { createMemorySnapshotBackend } from "@view-server/core/snapshot";
+import type { SnapshotBackend } from "@view-server/core/snapshot";
 import { createChdbSnapshotBackendFactory } from "@view-server/core/snapshot/chdb";
 import { makeNodeThreadTopicWorkerHostFactory } from "@view-server/core/worker/node";
 
@@ -58,7 +58,8 @@ describe("public package API smoke", () => {
       expect(typeof ViewServerRpcs).toBe("function");
       expect(typeof decodeJsonRecord).toBe("function");
       expect(typeof KafkaSource).toBe("function");
-      expect(typeof createMemorySnapshotBackend).toBe("function");
+      const _snapshotBackendTypeOnly: SnapshotBackend | undefined = undefined;
+      expect(_snapshotBackendTypeOnly).toBeUndefined();
       expect(typeof layerViewServerWebsocketServer).toBe("function");
       expect(typeof createPlatformaticKafkaConsumerFactory).toBe("function");
       expect(typeof createChdbSnapshotBackendFactory).toBe("function");

@@ -6,12 +6,9 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { defineConfig } from "../src/config/index.ts";
-import type { ViewServerError } from "../src/errors.ts";
+import { snapshotBackendFailed, type ViewServerError } from "../src/errors.ts";
 import type { RuntimeQuery, RuntimeRow } from "../src/protocol/index.ts";
-import {
-  createChdbSnapshotBackend,
-  createChdbSnapshotBackendFactory,
-} from "../src/snapshot/chdb-backend.ts";
+import { createChdbSnapshotBackend } from "../src/snapshot/chdb-backend.ts";
 import type { SnapshotBackend } from "../src/snapshot/index.ts";
 import { makeViewServerRuntime } from "../src/server/index.ts";
 import { makeTopicWorkerCore } from "../src/worker/index.ts";
@@ -727,22 +724,17 @@ describe("chDB snapshot backend", () => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect("honors snapshot.backend chdb through the runtime backend factory", () =>
+  it.effect("uses chDB snapshots by default in the production runtime", () =>
     Effect.gen(function* () {
       const config = defineConfig({
         topics: {
           orders: {
             id: "id",
             schema: Order,
-            snapshot: {
-              backend: "chdb",
-            },
           },
         },
       });
-      const runtime = yield* makeViewServerRuntime(config, {
-        snapshotBackendFactory: createChdbSnapshotBackendFactory(),
-      });
+      const runtime = yield* makeViewServerRuntime(config);
 
       yield* runtime.publish("orders", { id: "o-1", symbol: "AAPL", price: 100 });
       yield* runtime.publish("orders", { id: "o-2", symbol: "MSFT", price: 200 });
@@ -760,21 +752,20 @@ describe("chDB snapshot backend", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("fails fast when config requests chDB without Node backend wiring", () =>
+  it.effect("fails fast when the required snapshot backend cannot initialize", () =>
     Effect.gen(function* () {
       const config = defineConfig({
         topics: {
           orders: {
             id: "id",
             schema: Order,
-            snapshot: {
-              backend: "chdb",
-            },
           },
         },
       });
 
-      const error = yield* makeViewServerRuntime(config).pipe(Effect.flip);
+      const error = yield* makeViewServerRuntime(config, {
+        __testingSnapshotBackendFactory: () => failingInitBackend(),
+      }).pipe(Effect.flip);
 
       expect(error._tag).toBe("SnapshotBackendFailed");
     }).pipe(Effect.scoped),
@@ -787,6 +778,15 @@ function versionedRows(rows: readonly RuntimeRow[]) {
 
 function flushChdb() {
   return Effect.promise<void>(() => new Promise((resolve) => queueMicrotask(resolve)));
+}
+
+function failingInitBackend(): SnapshotBackend {
+  return {
+    init: () => Effect.fail(snapshotBackendFailed("orders", new Error("init failed"))),
+    applyBatch: () => Effect.void,
+    snapshot: () => Effect.fail(snapshotBackendFailed("orders", new Error("snapshot failed"))),
+    close: () => Effect.void,
+  };
 }
 
 function expectBigDecimal(value: unknown): BigDecimal.BigDecimal {

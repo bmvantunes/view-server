@@ -383,7 +383,7 @@ describe("production readiness", () => {
           initialRows: {
             orders: Array.from({ length: 500 }, (_, index) => orderRow(index)),
           },
-          snapshotBackends: {
+          __testingSnapshotBackends: {
             orders: backend,
           },
         });

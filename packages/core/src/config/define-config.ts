@@ -80,7 +80,6 @@ export type TopicConfig<
   readonly source?: TopicSource<TRow, TId> | undefined;
   readonly snapshot?:
     | {
-        readonly backend?: "chdb" | "memory" | undefined;
         readonly flushBatchSize?: number | undefined;
         readonly flushIntervalMs?: number | undefined;
         readonly maxVersionLagBeforeMemoryFallback?: number | undefined;
@@ -280,9 +279,6 @@ export type ViewServerHealthRow = typeof ViewServerHealthRowSchema.Type;
 const healthTopic = {
   id: "id",
   schema: ViewServerHealthRowSchema,
-  snapshot: {
-    backend: "memory",
-  },
 } satisfies TopicConfig<ViewServerHealthRow, "id">;
 
 export function normalizeConfig(config: ViewServerConfig): NormalizedViewServerConfig {

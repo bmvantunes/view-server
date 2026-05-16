@@ -10,13 +10,9 @@ import type {
   RuntimeRow,
 } from "../protocol/index.ts";
 import type { MutationLogEntry, WorkerVersion } from "../worker/mutation-log.ts";
-import {
-  createMemorySnapshotBackend,
-  type SnapshotBackend,
-  type SnapshotBackendResult,
-  type VersionedRow,
-} from "./snapshot-backend.ts";
-import { Worker as NodeThreadWorker } from "node:worker_threads";
+import type { SnapshotBackend, SnapshotBackendResult, VersionedRow } from "./snapshot-backend.ts";
+import { fork, type ChildProcess } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type {
   ChdbQueryWorkerRequest,
   ChdbQueryWorkerResponse,
@@ -40,11 +36,15 @@ type Column = {
   readonly type: ColumnType;
 };
 
-const TABLE_NAME = "topic_rows";
 const DELETED_COLUMN = "__view_server_deleted";
 const VERSION_COLUMN = "__view_server_version";
-const JSON_DECIMAL_SETTINGS = "SETTINGS output_format_json_quote_decimals=1";
+const JSON_FORMAT_SETTINGS =
+  "SETTINGS output_format_json_quote_decimals=1, output_format_json_quote_64bit_integers=1";
 const WORKER_INIT_CHUNK_SIZE = 25_000;
+
+let sharedSession: Session | undefined;
+let sharedSessionReferences = 0;
+let nextBackendTableId = 0;
 
 export type ChdbSnapshotBackendOptions = {
   readonly groupedRefreshWorker?: boolean | undefined;
@@ -63,10 +63,7 @@ export function createChdbSnapshotBackendFactory(): (
   topic: string,
   config: TopicConfig,
 ) => SnapshotBackend {
-  return (_topic, config) =>
-    config.snapshot?.backend === "chdb"
-      ? createChdbSnapshotBackend()
-      : createMemorySnapshotBackend();
+  return () => createChdbSnapshotBackend();
 }
 
 type ChdbWorkerPending = {
@@ -75,7 +72,7 @@ type ChdbWorkerPending = {
 };
 
 class ChdbGroupedSnapshotWorkerClient {
-  readonly #worker: NodeThreadWorker;
+  readonly #worker: ChildProcess;
   #topic = "chdb";
   #nextId = 0;
   #pending = new Map<number, ChdbWorkerPending>();
@@ -83,12 +80,17 @@ class ChdbGroupedSnapshotWorkerClient {
 
   constructor(workerEntryUrl: string | URL | undefined) {
     const entryUrl = resolveChdbQueryWorkerEntryUrl(workerEntryUrl);
-    this.#worker = new NodeThreadWorker(entryUrl, {
-      name: "view-server-chdb-grouped-refresh",
+    this.#worker = fork(fileURLToPath(entryUrl), [], {
       execArgv: defaultExecArgv(entryUrl),
+      serialization: "advanced",
+      stdio: ["ignore", "inherit", "inherit", "ipc"],
     });
-    this.#worker.on("message", (response: ChdbQueryWorkerResponse) => {
-      this.#handleResponse(response);
+    this.#worker.on("message", (response: unknown) => {
+      if (isChdbQueryWorkerResponse(response)) {
+        this.#handleResponse(response);
+        return;
+      }
+      this.#failPending(new Error("chDB worker returned an invalid response"));
     });
     this.#worker.on("error", (error) => {
       this.#failPending(error);
@@ -152,12 +154,7 @@ class ChdbGroupedSnapshotWorkerClient {
       id: this.#requestId(),
       type: "close",
     }).pipe(
-      Effect.flatMap(() =>
-        Effect.tryPromise({
-          try: () => this.#worker.terminate(),
-          catch: (error) => snapshotBackendFailed(this.#topic, error),
-        }),
-      ),
+      Effect.flatMap(() => this.#terminate()),
       Effect.asVoid,
     );
   }
@@ -197,7 +194,11 @@ class ChdbGroupedSnapshotWorkerClient {
       try: () =>
         new Promise<ChdbQueryWorkerResponse>((resolve, reject) => {
           this.#pending.set(request.id, { resolve, reject });
-          this.#worker.postMessage(request);
+          const sent = this.#worker.send(request);
+          if (!sent) {
+            this.#pending.delete(request.id);
+            reject(new Error("chDB worker IPC channel is not writable"));
+          }
         }).then((response) => {
           if (response.success) {
             return response;
@@ -228,6 +229,23 @@ class ChdbGroupedSnapshotWorkerClient {
       this.#pending.delete(id);
       pending.reject(error);
     }
+  }
+
+  #terminate(): Effect.Effect<void, ViewServerError> {
+    return Effect.tryPromise({
+      try: () =>
+        new Promise<void>((resolve) => {
+          if (this.#worker.exitCode !== null || this.#worker.killed) {
+            resolve();
+            return;
+          }
+          this.#worker.once("exit", () => {
+            resolve();
+          });
+          this.#worker.kill();
+        }),
+      catch: (error) => snapshotBackendFailed(this.#topic, error),
+    });
   }
 }
 
@@ -272,7 +290,8 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
 }
 
 class ChdbSnapshotBackend implements SnapshotBackend {
-  readonly #session = new Session();
+  readonly #session: Session;
+  readonly #tableName: string;
   #groupedRefreshWorker: ChdbGroupedSnapshotWorkerClient | undefined;
   #topic = "";
   #idField = "id";
@@ -284,8 +303,12 @@ class ChdbSnapshotBackend implements SnapshotBackend {
   #closed = false;
   #lastFlushError: unknown;
   #tableReady = false;
+  #sessionReleased = false;
 
   constructor(options: ChdbSnapshotBackendOptions = {}) {
+    this.#session = acquireSharedSession();
+    this.#tableName = `topic_rows_${nextBackendTableId}`;
+    nextBackendTableId++;
     if (options.groupedRefreshWorker !== false) {
       this.#groupedRefreshWorker = new ChdbGroupedSnapshotWorkerClient(
         options.groupedRefreshWorkerEntryUrl,
@@ -323,7 +346,7 @@ class ChdbSnapshotBackend implements SnapshotBackend {
           backend.#lastFlushError = undefined;
           backend.#tableReady = false;
           backend.#columns = inferColumns(initialRows, backend.#idField);
-          backend.#session.query(`DROP TABLE IF EXISTS ${TABLE_NAME}`);
+          backend.#session.query(`DROP TABLE IF EXISTS ${quoteIdentifier(backend.#tableName)}`);
           if (backend.#columns.length > 0) {
             backend.#createTable();
             backend.#insertEvents(
@@ -410,10 +433,13 @@ class ChdbSnapshotBackend implements SnapshotBackend {
             backend.#idField,
             backend.#columns,
             backend.#literalStringFields,
+            backend.#tableName,
           );
           const rows = parseJsonEachRow(
             backend.#session.query(withJsonSettings(sql.rowsSql), "JSONEachRow"),
             sql.decimalFields,
+            sql.integerFields,
+            sql.numberFields,
           );
           const totalRows = parseCount(
             backend.#session.query(withJsonSettings(sql.countSql), "JSONEachRow"),
@@ -466,7 +492,11 @@ class ChdbSnapshotBackend implements SnapshotBackend {
         yield* groupedRefreshWorker.close().pipe(Effect.ignore);
       }
       yield* Effect.sync(() => {
-        backend.#session.cleanup();
+        try {
+          backend.#session.query(`DROP TABLE IF EXISTS ${quoteIdentifier(backend.#tableName)}`);
+        } finally {
+          backend.#releaseSession();
+        }
       });
     })(this);
   }
@@ -551,7 +581,7 @@ class ChdbSnapshotBackend implements SnapshotBackend {
     }
     for (const column of addedColumns) {
       this.#session.query(
-        `ALTER TABLE ${TABLE_NAME} ADD COLUMN ${quoteIdentifier(column.name)} ${column.type}`,
+        `ALTER TABLE ${quoteIdentifier(this.#tableName)} ADD COLUMN ${quoteIdentifier(column.name)} ${column.type}`,
       );
     }
     this.#columns = nextColumns;
@@ -559,7 +589,7 @@ class ChdbSnapshotBackend implements SnapshotBackend {
 
   #createTable(): void {
     this.#session.query(
-      `CREATE TABLE ${TABLE_NAME} (${[
+      `CREATE TABLE ${quoteIdentifier(this.#tableName)} (${[
         ...this.#columns.map((column) => `${quoteIdentifier(column.name)} ${column.type}`),
         `${DELETED_COLUMN} UInt8`,
         `${VERSION_COLUMN} Int64`,
@@ -581,7 +611,17 @@ class ChdbSnapshotBackend implements SnapshotBackend {
         }),
       )
       .join("\n");
-    this.#session.query(`INSERT INTO ${TABLE_NAME} FORMAT JSONEachRow ${payload}`);
+    this.#session.query(
+      `INSERT INTO ${quoteIdentifier(this.#tableName)} FORMAT JSONEachRow ${payload}`,
+    );
+  }
+
+  #releaseSession(): void {
+    if (this.#sessionReleased) {
+      return;
+    }
+    this.#sessionReleased = true;
+    releaseSharedSession(this.#session);
   }
 }
 
@@ -602,6 +642,43 @@ function toWorkerUrl(value: string | URL): URL {
 
 function defaultExecArgv(workerEntryUrl: URL): string[] {
   return workerEntryUrl.pathname.endsWith(".ts") ? ["--experimental-strip-types"] : [];
+}
+
+function acquireSharedSession(): Session {
+  if (sharedSession === undefined) {
+    sharedSession = new Session();
+  }
+  sharedSessionReferences++;
+  return sharedSession;
+}
+
+function releaseSharedSession(session: Session): void {
+  if (session !== sharedSession) {
+    return;
+  }
+  sharedSessionReferences = Math.max(0, sharedSessionReferences - 1);
+  if (sharedSessionReferences > 0) {
+    return;
+  }
+  sharedSession = undefined;
+  session.cleanup();
+}
+
+function isChdbQueryWorkerResponse(value: unknown): value is ChdbQueryWorkerResponse {
+  if (!isReadonlyRecord(value)) {
+    return false;
+  }
+  if (typeof value.id !== "number" || typeof value.success !== "boolean") {
+    return false;
+  }
+  if (value.success) {
+    return value.result === undefined || isReadonlyRecord(value.result);
+  }
+  return typeof value.error === "string";
+}
+
+function isReadonlyRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null;
 }
 
 type ChdbEvent = {
@@ -718,10 +795,10 @@ function isScalar(value: unknown): boolean {
   );
 }
 
-function latestRowsSql(columns: readonly Column[], idField: string): string {
+function latestRowsSql(columns: readonly Column[], idField: string, tableName: string): string {
   const selected = columns.map((column) => quoteIdentifier(column.name)).join(", ");
   const id = quoteIdentifier(idField);
-  return `SELECT ${selected} FROM (SELECT ${selected}, ${DELETED_COLUMN}, ${VERSION_COLUMN} FROM ${TABLE_NAME} ORDER BY ${id}, ${VERSION_COLUMN} DESC LIMIT 1 BY ${id}) WHERE ${DELETED_COLUMN} = 0`;
+  return `SELECT ${selected} FROM (SELECT ${selected}, ${DELETED_COLUMN}, ${VERSION_COLUMN} FROM ${quoteIdentifier(tableName)} ORDER BY ${id}, ${VERSION_COLUMN} DESC LIMIT 1 BY ${id}) WHERE ${DELETED_COLUMN} = 0`;
 }
 
 function compileQuerySql(
@@ -729,12 +806,15 @@ function compileQuerySql(
   idField: string,
   columns: readonly Column[],
   literalStringFields: ReadonlySet<string>,
+  tableName: string,
 ): {
   readonly rowsSql: string;
   readonly countSql: string;
   readonly decimalFields: ReadonlySet<string>;
+  readonly integerFields: ReadonlySet<string>;
+  readonly numberFields: ReadonlySet<string>;
 } {
-  const source = latestRowsSql(columns, idField);
+  const source = latestRowsSql(columns, idField, tableName);
   if (isGroupedQuery(query)) {
     const where = query.where ? `WHERE ${compileFilter(query.where, literalStringFields)}` : "";
     const groupBy = query.groupBy.map(quoteIdentifier).join(", ");
@@ -750,6 +830,8 @@ function compileQuerySql(
       rowsSql: `SELECT * FROM (${grouped}) ${compileOrderBy(query.orderBy ?? [], columns)} ${compileLimit(query)}`,
       countSql: `SELECT count() AS totalRows FROM (${grouped})`,
       decimalFields: groupedDecimalFields(query, columns),
+      integerFields: groupedIntegerFields(query, columns),
+      numberFields: groupedNumberFields(query),
     };
   }
 
@@ -770,6 +852,8 @@ function compileQuerySql(
     rowsSql: `SELECT ${Array.from(selected).map(quoteIdentifier).join(", ")} FROM (${source}) ${where} ${compileOrderBy(orderBy, columns)} ${compileLimit(query)}`,
     countSql: `SELECT count() AS totalRows FROM (${source}) ${where}`,
     decimalFields: selectedDecimalFields(Array.from(selected), columns),
+    integerFields: selectedIntegerFields(Array.from(selected), columns),
+    numberFields: new Set(),
   };
 }
 
@@ -783,6 +867,16 @@ function selectedDecimalFields(
       .map((column) => column.name),
   );
   return new Set(selected.filter((field) => decimalColumns.has(field)));
+}
+
+function selectedIntegerFields(
+  selected: readonly string[],
+  columns: readonly Column[],
+): ReadonlySet<string> {
+  const integerColumns = new Set(
+    columns.filter((column) => column.type === "Int64").map((column) => column.name),
+  );
+  return new Set(selected.filter((field) => integerColumns.has(field)));
 }
 
 function groupedDecimalFields(
@@ -803,6 +897,35 @@ function groupedDecimalFields(
         aggregate.aggFunc === "min" ||
         aggregate.aggFunc === "max")
     ) {
+      fields.add(alias);
+    }
+  }
+  return fields;
+}
+
+function groupedIntegerFields(
+  query: RuntimeGroupedQuery,
+  columns: readonly Column[],
+): ReadonlySet<string> {
+  const integerColumns = new Set(
+    columns.filter((column) => column.type === "Int64").map((column) => column.name),
+  );
+  const fields = new Set(query.groupBy.filter((field) => integerColumns.has(field)));
+  for (const [alias, aggregate] of Object.entries(query.aggregates)) {
+    if (
+      integerColumns.has(aggregate.field) &&
+      (aggregate.aggFunc === "sum" || aggregate.aggFunc === "min" || aggregate.aggFunc === "max")
+    ) {
+      fields.add(alias);
+    }
+  }
+  return fields;
+}
+
+function groupedNumberFields(query: RuntimeGroupedQuery): ReadonlySet<string> {
+  const fields = new Set<string>();
+  for (const [alias, aggregate] of Object.entries(query.aggregates)) {
+    if (aggregate.aggFunc === "count" || aggregate.aggFunc === "count_distinct") {
       fields.add(alias);
     }
   }
@@ -975,26 +1098,47 @@ function literal(value: string): string {
 }
 
 function withJsonSettings(sql: string): string {
-  return `${sql} ${JSON_DECIMAL_SETTINGS}`;
+  return `${sql} ${JSON_FORMAT_SETTINGS}`;
 }
 
 function parseJsonEachRow(
   output: string,
   decimalFields: ReadonlySet<string> = new Set(),
+  integerFields: ReadonlySet<string> = new Set(),
+  numberFields: ReadonlySet<string> = new Set(),
 ): RuntimeRow[] {
   const trimmed = output.trim();
   if (trimmed.length === 0) {
     return [];
   }
-  return trimmed.split("\n").map((line) => parseJsonRow(line, decimalFields));
+  return trimmed
+    .split("\n")
+    .map((line) => parseJsonRow(line, decimalFields, integerFields, numberFields));
 }
 
-function parseJsonRow(line: string, decimalFields: ReadonlySet<string>): RuntimeRow {
+function parseJsonRow(
+  line: string,
+  decimalFields: ReadonlySet<string>,
+  integerFields: ReadonlySet<string>,
+  numberFields: ReadonlySet<string>,
+): RuntimeRow {
   const row = JSON.parse(line);
+  for (const field of numberFields) {
+    const value = row[field];
+    if (typeof value === "string") {
+      row[field] = Number(value);
+    }
+  }
   for (const field of decimalFields) {
     const value = row[field];
     if (typeof value === "string") {
       row[field] = BigDecimal.fromStringUnsafe(value);
+    }
+  }
+  for (const field of integerFields) {
+    const value = row[field];
+    if (typeof value === "string" || typeof value === "number") {
+      row[field] = BigInt(value);
     }
   }
   return row;

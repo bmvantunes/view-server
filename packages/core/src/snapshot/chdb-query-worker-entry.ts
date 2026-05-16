@@ -16,8 +16,17 @@ import type {
 import type { VersionedRow } from "./snapshot-backend.ts";
 
 const port = parentPort;
-if (port === null) {
-  throw new Error("chDB query worker requires parentPort");
+const sendResponse =
+  port === null
+    ? (response: ChdbQueryWorkerResponse): void => {
+        process.send?.(response);
+      }
+    : (response: ChdbQueryWorkerResponse): void => {
+        port.postMessage(response);
+      };
+
+if (port === null && process.send === undefined) {
+  throw new Error("chDB query worker requires worker_threads parentPort or child_process IPC");
 }
 
 const backend = createChdbSnapshotBackend({ groupedRefreshWorker: false });
@@ -27,20 +36,26 @@ type PendingInit = ChdbQueryWorkerInitStartRequest["args"] & {
   readonly rows: VersionedRow[];
 };
 
-port.on("message", (request: ChdbQueryWorkerRequest) => {
+const onMessage = (request: ChdbQueryWorkerRequest): void => {
   void Effect.runPromise(handleRequest(request)).then(
     (response) => {
-      port.postMessage(response);
+      sendResponse(response);
     },
     (error: unknown) => {
-      port.postMessage({
+      sendResponse({
         id: request.id,
         success: false,
         error: error instanceof Error ? error.message : String(error),
       } satisfies ChdbQueryWorkerResponse);
     },
   );
-});
+};
+
+if (port === null) {
+  process.on("message", onMessage);
+} else {
+  port.on("message", onMessage);
+}
 
 function handleRequest(
   request: ChdbQueryWorkerRequest,

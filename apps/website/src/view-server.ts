@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
-import { defineConfig, type GroupedQuery, type RawQuery } from "@view-server/core";
+import { defineConfig } from "@view-server/core/config";
+import type { GroupedQuery, RawQuery } from "@view-server/core/query";
 
 export const Order = Schema.Struct({
   id: Schema.String,
@@ -25,9 +26,6 @@ export const ordersDemoConfig = defineConfig({
     orders: {
       id: "id",
       schema: Order,
-      snapshot: {
-        backend: "memory",
-      },
     },
   },
 });

@@ -21,11 +21,12 @@ import {
 } from "./topic-worker-rpcs.ts";
 import type { TopicWorkerHost, TopicWorkerHostFactory } from "./topic-worker-host.ts";
 
-export type TopicWorkerSnapshotBackendMode = "config" | "memory" | "chdb";
+export type TopicWorkerSnapshotBackendMode = "memory" | "chdb";
 
 export type NodeThreadTopicWorkerHostFactoryOptions = {
   readonly configModuleUrl: string | URL;
   readonly workerEntryUrl?: string | URL | undefined;
+  /** @internal Test-only override. Production node workers use chDB. */
   readonly snapshotBackend?: TopicWorkerSnapshotBackendMode | undefined;
   readonly rpcConcurrency?: number | undefined;
   readonly workerNamePrefix?: string | undefined;
@@ -42,7 +43,7 @@ export const makeNodeThreadTopicWorkerHostFactory = (
   options: NodeThreadTopicWorkerHostFactoryOptions,
 ): TopicWorkerHostFactory => {
   const configModuleUrl = toImportUrl(options.configModuleUrl);
-  const snapshotBackend = options.snapshotBackend ?? "config";
+  const snapshotBackend = options.snapshotBackend ?? "chdb";
   const rpcConcurrency = options.rpcConcurrency ?? 64;
   const workerNamePrefix = options.workerNamePrefix ?? "view-server-topic";
   return (topic, config, hostOptions) =>

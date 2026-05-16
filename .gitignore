@@ -12,6 +12,7 @@ dist
 dist-ssr
 coverage
 *.local
+.view-server-test-server.pid
 .vitest-attachments
 __screenshots__
 packages/core/bench/.artifacts

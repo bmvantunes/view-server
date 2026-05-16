@@ -2,12 +2,8 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { describe, expect, inject, test } from "vite-plus/test";
-import {
-  defineConfig,
-  type RawQuery,
-  type RuntimeRow,
-  type SubscriptionEvent,
-} from "@view-server/core";
+import { defineConfig } from "@view-server/core/config";
+import type { RawQuery, RuntimeRow, SubscriptionEvent } from "@view-server/core/query";
 import { makeBrowserWebsocketClient } from "../src/index.ts";
 
 type OrderRow = {

@@ -9,7 +9,7 @@ This smoke proves the repo can build a deployable demo server container and serv
 - publish, deltaPublish, deleteById
 - clean shutdown through Docker Compose
 
-It does not add Kafka or chDB. The demo server uses the in-memory snapshot backend so the container smoke stays deterministic and does not require external services.
+It does not add Kafka. The demo server uses chDB because chDB is mandatory for production runtime startup.
 
 ## Files
 
@@ -24,9 +24,7 @@ It does not add Kafka or chDB. The demo server uses the in-memory snapshot backe
 docker compose -f docker-compose.production-smoke.yml build
 ```
 
-Expected result: Docker builds with Node 26, installs the official Corepack package, prepares pnpm 11.0.9 through `corepack prepare`, installs with `pnpm install --frozen-lockfile --ignore-scripts`, builds `@view-server/core`, builds `@view-server/react`, and builds `orders-demo`.
-
-Lifecycle scripts are disabled because this smoke intentionally uses the memory-only demo server and should not build optional native integrations such as chDB. A production chDB image should install the chDB system/build requirements explicitly and omit `--ignore-scripts`.
+Expected result: Docker builds with Node 26, installs the native build/runtime tools required by chDB plus `git` for workspace prepare hooks, installs the official Corepack package, prepares pnpm 11.0.9 through `corepack prepare`, installs with `pnpm install --frozen-lockfile`, builds `@view-server/core`, builds `@view-server/react`, and builds `orders-demo`.
 
 ## Run The Smoke
 
@@ -106,7 +104,7 @@ docker compose -f docker-compose.production-smoke.yml down --remove-orphans
 ## Known Limitations
 
 - This is a deployment artifact smoke, not a production topology test.
-- Kafka and chDB are intentionally absent here. Production Kafka/chDB behavior is covered by runtime tests, fault-injection tests, and the production wiring docs.
-- Dependency lifecycle scripts are disabled in this image to avoid optional native integration builds in the memory-only smoke.
+- Kafka is intentionally absent here. Production Kafka behavior is covered by runtime tests, fault-injection tests, and the production wiring docs.
+- chDB install/runtime requirements are intentionally present because production runtime requires chDB.
 - The image is optimized for smoke confidence, not final image size. It keeps the workspace install and source tree so the demo server can run through Node 26's TypeScript stripping path.
 - Docker must be available locally and able to pull the Node 26 base image.

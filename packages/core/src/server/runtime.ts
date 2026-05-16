@@ -44,7 +44,7 @@ import {
   type KafkaTopicConsumer,
   type KafkaTopicVerifier,
 } from "../kafka/index.ts";
-import { createMemorySnapshotBackend, type SnapshotBackend } from "../snapshot/index.ts";
+import { createMemorySnapshotBackend, type SnapshotBackend } from "../snapshot/snapshot-backend.ts";
 import {
   makeInProcessTopicWorkerHost,
   type TopicWorkerHost,
@@ -110,16 +110,19 @@ export class ViewServerRuntime extends Context.Service<ViewServerRuntime, ViewSe
 
 export type ViewServerRuntimeOptions = {
   readonly initialRows?: Readonly<Record<string, readonly RuntimeRow[]>> | undefined;
-  readonly snapshotBackends?: Readonly<Record<string, SnapshotBackend>> | undefined;
-  readonly useMemorySnapshotBackend?: boolean | undefined;
   readonly kafkaConsumerFactory?:
     | ((source: KafkaSourceConfig<RowObject, string>) => KafkaTopicConsumer)
     | undefined;
   readonly kafkaTopicVerifier?: KafkaTopicVerifier | undefined;
-  readonly snapshotBackendFactory?:
+  readonly topicWorkerFactory?: TopicWorkerHostFactory | undefined;
+  /** @internal Test-only backend injection for fault and fallback coverage. */
+  readonly __testingSnapshotBackends?: Readonly<Record<string, SnapshotBackend>> | undefined;
+  /** @internal Test-only backend factory for fault and fallback coverage. */
+  readonly __testingSnapshotBackendFactory?:
     | ((topic: string, config: TopicConfig) => SnapshotBackend)
     | undefined;
-  readonly topicWorkerFactory?: TopicWorkerHostFactory | undefined;
+  /** @internal Browser/package tests only. Production runtime must use chDB. */
+  readonly __testingUseMemorySnapshotBackend?: boolean | undefined;
 };
 
 export function makeViewServerRuntime(
@@ -499,33 +502,34 @@ function resolveSnapshotBackend(
   topicConfig: TopicConfig,
   options: ViewServerRuntimeOptions,
 ): Effect.Effect<SnapshotBackend, ViewServerError> {
-  if (options.useMemorySnapshotBackend === true) {
+  if (topic === VIEW_SERVER_HEALTH_TOPIC) {
     return Effect.succeed(createMemorySnapshotBackend());
   }
-  const injected = options.snapshotBackends?.[topic];
+  if (options.__testingUseMemorySnapshotBackend === true) {
+    return Effect.succeed(createMemorySnapshotBackend());
+  }
+  const injected = options.__testingSnapshotBackends?.[topic];
   if (injected !== undefined) {
     return Effect.succeed(injected);
   }
-  if (options.snapshotBackendFactory !== undefined) {
-    return Effect.succeed(options.snapshotBackendFactory(topic, topicConfig));
+  if (options.__testingSnapshotBackendFactory !== undefined) {
+    return Effect.succeed(options.__testingSnapshotBackendFactory(topic, topicConfig));
   }
-  if (topicConfig.snapshot?.backend === "chdb") {
-    return Effect.fail(
-      snapshotBackendFailed(
-        topic,
-        new Error("snapshot.backend chdb requires a snapshotBackendFactory runtime option"),
-      ),
-    );
-  }
-  return Effect.succeed(createMemorySnapshotBackend());
+  return Effect.tryPromise({
+    try: async () => {
+      const { createChdbSnapshotBackend } = await import("../snapshot/chdb-backend.ts");
+      return createChdbSnapshotBackend();
+    },
+    catch: (error) => snapshotBackendFailed(topic, error),
+  });
 }
 
 function shouldResolveSnapshotBackend(options: ViewServerRuntimeOptions): boolean {
   return (
     options.topicWorkerFactory === undefined ||
-    options.useMemorySnapshotBackend === true ||
-    options.snapshotBackends !== undefined ||
-    options.snapshotBackendFactory !== undefined
+    options.__testingUseMemorySnapshotBackend === true ||
+    options.__testingSnapshotBackends !== undefined ||
+    options.__testingSnapshotBackendFactory !== undefined
   );
 }
 

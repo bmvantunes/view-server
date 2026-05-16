@@ -1,5 +1,6 @@
 import { AsyncResult } from "effect/unstable/reactivity";
-import type { InferReadableQueryResult, LiveQueryResult } from "@view-server/core";
+import type { LiveQueryResult } from "@view-server/core/client";
+import type { InferReadableQueryResult } from "@view-server/core/query";
 import { createViewServerReact } from "@view-server/react";
 import {
   ordersByDeskQuery,

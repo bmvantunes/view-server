@@ -98,9 +98,6 @@
     },
     "@platformatic/kafka": {
       "optional": true
-    },
-    "chdb": {
-      "optional": true
     }
   },
   "engines": {

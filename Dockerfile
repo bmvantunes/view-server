@@ -8,6 +8,10 @@ ENV VIEW_SERVER_PORT=3000
 
 WORKDIR /app
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends bash ca-certificates curl g++ git make python3 \
+  && rm -rf /var/lib/apt/lists/*
+
 RUN npm install --global corepack@latest \
   && corepack enable \
   && corepack prepare pnpm@11.0.9 --activate
@@ -17,7 +21,7 @@ COPY .node-version .nvmrc ./
 COPY apps ./apps
 COPY packages ./packages
 
-RUN pnpm install --frozen-lockfile --ignore-scripts
+RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @view-server/core build \
   && pnpm --filter @view-server/react build \
   && pnpm --filter orders-demo build

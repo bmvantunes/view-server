@@ -41,9 +41,9 @@ This is the fence that prevents snapshot/delta gaps.
 
 ## chDB Role
 
-chDB accelerates initial snapshots, one-shot queries, and grouped refresh snapshots. It is not the source of truth.
+chDB is mandatory for production runtime startup and accelerates initial snapshots, one-shot queries, and grouped refresh snapshots. It is not the source of truth.
 
-The worker hot path never waits for chDB flushes. chDB writes are serialized behind a contiguous backend-version fence, and grouped chDB refresh can run in a worker thread. If chDB is behind or unavailable, subscriptions continue from memory.
+The worker hot path never waits for chDB flushes. chDB writes are serialized behind a contiguous backend-version fence, and grouped chDB refresh can run in a worker thread. If chDB cannot initialize at startup, production runtime startup fails fast. If chDB is temporarily behind or failing after startup, worker memory remains authoritative and subscriptions can continue from memory fallback while health reports degraded.
 
 ## Active Raw Views
 
@@ -126,7 +126,7 @@ If a subscription appears stuck:
 
 If chDB seems stale:
 
-1. Verify snapshots still return from memory fallback.
+1. Verify the process passed chDB startup initialization.
 2. Check backend version annotations/spans.
 3. Confirm grouped chDB refresh is exact-version accepted, not silently trusted.
 

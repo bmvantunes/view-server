@@ -2,6 +2,8 @@
 
 This is the shortest local loop: define one topic, start the Effect RPC websocket server, publish rows, and render a browser grid with `useLiveQuery`.
 
+Production/runtime startup requires chDB. There is no public memory-vs-chDB backend choice; memory is only used by private package testing helpers.
+
 ## Run The Demo
 
 Terminal 1:
@@ -24,7 +26,8 @@ The server listens on `ws://127.0.0.1:3000/rpc` by default. The browser app read
 
 ```ts
 import * as Schema from "effect/Schema";
-import { defineConfig, type RawQuery } from "@view-server/core";
+import { defineConfig } from "@view-server/core/config";
+import type { RawQuery } from "@view-server/core/query";
 
 export const Order = Schema.Struct({
   id: Schema.String,
@@ -78,7 +81,6 @@ const RuntimeLayer = layerViewServerRuntime(config, {
   initialRows: {
     orders: [{ id: "o-1", symbol: "AAPL", price: 210, quantity: 20 }],
   },
-  useMemorySnapshotBackend: true,
 });
 
 const ServerLayer = layerViewServerWebsocketServer("/rpc").pipe(
@@ -88,6 +90,8 @@ const ServerLayer = layerViewServerWebsocketServer("/rpc").pipe(
 
 Layer.launch(ServerLayer).pipe(NodeRuntime.runMain);
 ```
+
+If chDB cannot initialize, runtime startup fails before the websocket server is ready.
 
 ## Publish Rows
 
