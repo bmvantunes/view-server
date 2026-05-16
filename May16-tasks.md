@@ -552,6 +552,8 @@ Tests / acceptance:
 
 Priority: P1
 
+Status: Done in `packages/core/src/config/column-catalog.ts`.
+
 Problem:
 
 Schema-derived columns, id fields, literal string fields, BigDecimal columns, and query validation should share one source of truth.

@@ -7,7 +7,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import type * as Scope from "effect/Scope";
 import type { TopicConfig } from "../config/index.ts";
-import { literalStringFieldsForSchema } from "../config/index.ts";
+import { columnCatalogForTopic } from "../config/index.ts";
 import {
   backpressureExceeded,
   invalidPublish,
@@ -128,7 +128,8 @@ export function makeTopicWorkerCore(
       "view_server.rows": options.initialRows?.length ?? 0,
     });
     const idField = config.id;
-    const literalStringFields = literalStringFieldsForSchema(config.schema);
+    const columnCatalog = columnCatalogForTopic(topic, config);
+    const literalStringFields = columnCatalog.literalStringFields;
     const backend = options.snapshotBackend ?? createMemorySnapshotBackend();
     const maxQueueDepth = options.maxQueueDepth ?? 100_000;
     const deltaCoalescing = options.deltaCoalescing ?? true;

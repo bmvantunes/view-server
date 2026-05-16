@@ -332,9 +332,17 @@ describe("production readiness", () => {
             },
           })
           .pipe(Effect.flip),
+        runtime
+          .query("orders", {
+            fields: {
+              missing: true,
+            },
+            limit: 1,
+          })
+          .pipe(Effect.flip),
       ]);
 
-      expect(errors).toHaveLength(5);
+      expect(errors).toHaveLength(6);
       for (const error of errors) {
         expect(error._tag).toBe("InvalidQuery");
       }

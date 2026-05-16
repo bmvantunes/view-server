@@ -7,6 +7,8 @@ import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import {
   type AuthorizationContext,
+  columnCatalogForTopic,
+  type ColumnCatalog,
   type EffectSourceContext,
   type KafkaSourceConfig,
   isReservedTopic,
@@ -112,6 +114,12 @@ export function makeViewServerRuntime(
     });
     yield* verifyKafkaSourceTopics(normalized, options);
     const workers = new Map<string, TopicWorkerHost>();
+    const columnCatalogs = new Map(
+      Object.entries(normalized.topics).map(([topic, topicConfig]) => [
+        topic,
+        columnCatalogForTopic(topic, topicConfig),
+      ]),
+    );
     const kafkaMetricsByTopic = new Map<string, KafkaRuntimeMetrics>();
     const sourceFailuresByTopic = new Map<string, string>();
     const sourceFibers: Fiber.Fiber<void, ViewServerError>[] = [];
@@ -306,7 +314,12 @@ export function makeViewServerRuntime(
       });
       yield* ensureRuntimeOpen("query", topic);
       yield* ensureReadableTopic(topic, "query");
-      const guardedQuery = yield* validateRuntimeQueryLimits(topic, query, normalized.limits);
+      const guardedQuery = yield* validateRuntimeQuery(
+        topic,
+        query,
+        normalized.limits,
+        columnCatalogs.get(topic),
+      );
       yield* authorizeQuery(topic, "query", guardedQuery);
       if (topic === VIEW_SERVER_HEALTH_TOPIC) {
         yield* syncHealthTopicIgnoringErrors;
@@ -333,7 +346,12 @@ export function makeViewServerRuntime(
       });
       yield* ensureRuntimeOpen("subscribe", topic, requestId);
       yield* ensureReadableTopic(topic, "subscribe");
-      const guardedQuery = yield* validateRuntimeQueryLimits(topic, query, normalized.limits);
+      const guardedQuery = yield* validateRuntimeQuery(
+        topic,
+        query,
+        normalized.limits,
+        columnCatalogs.get(topic),
+      );
       yield* authorizeQuery(topic, "subscribe", guardedQuery);
       const worker = yield* workerFor(topic);
       return worker.subscribe(requestId, guardedQuery).pipe(
@@ -540,10 +558,11 @@ function kafkaVerificationGroups(sources: readonly KafkaSourceForVerification[])
 
 type RuntimeQueryLimits = NormalizedViewServerConfig["limits"];
 
-function validateRuntimeQueryLimits(
+function validateRuntimeQuery(
   topic: string,
   query: RuntimeQuery,
   limits: RuntimeQueryLimits,
+  catalog: ColumnCatalog | undefined,
 ): Effect.Effect<RuntimeQuery, ViewServerError> {
   return Effect.fnUntraced(function* () {
     if (query.offset !== undefined && (!Number.isInteger(query.offset) || query.offset < 0)) {
@@ -581,6 +600,9 @@ function validateRuntimeQueryLimits(
           `Query filter conditions ${filterStats.conditions} exceeds maxFilterConditions ${limits.maxFilterConditions}`,
         ),
       );
+    }
+    if (catalog !== undefined) {
+      return yield* catalog.validateQuery(limitedQuery);
     }
     return limitedQuery;
   })();

@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type { ViewServerError } from "../errors.ts";
-import { schemaHasField } from "./schema-introspection.ts";
+import { columnCatalogForTopic } from "./column-catalog.ts";
 
 export const VIEW_SERVER_HEALTH_TOPIC = "__view_server_health";
 export const RESERVED_TOPIC_PREFIX = "__";
@@ -295,7 +295,7 @@ export function normalizeConfig(config: ViewServerConfig): NormalizedViewServerC
     if (topic.startsWith(RESERVED_TOPIC_PREFIX)) {
       throw new Error(`User-defined topic ${topic} uses reserved prefix ${RESERVED_TOPIC_PREFIX}`);
     }
-    const idExists = schemaHasField(topicConfig.schema, topicConfig.id);
+    const idExists = columnCatalogForTopic(topic, topicConfig).hasField(topicConfig.id);
     if (idExists === false) {
       throw new Error(`Topic ${topic} id field ${topicConfig.id} is not present in the schema`);
     }

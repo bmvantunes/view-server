@@ -18,7 +18,8 @@ This document is the compact domain map for future agents. `plan.md` is the hist
 
 ## Module Map
 
-- `packages/core/src/config`: `defineConfig`, schema-derived topic typing, literal-string introspection, startup validation.
+- `packages/core/src/config`: `defineConfig`, schema-derived topic typing, column catalog, literal-string introspection, startup validation.
+- `packages/core/src/config/column-catalog.ts`: schema-derived id, field, literal-string, runtime-query validation, and SQL column metadata.
 - `packages/core/src/protocol`: query protocol, runtime rows, subscription events, row keys, stable stringify.
 - `packages/core/src/errors`: Effect `TaggedError` taxonomy.
 - `packages/core/src/client`: typed RPC boundary, live query store, visible-row delta application, generated client shape.
