@@ -7,9 +7,9 @@
     "#/*": "./src/*"
   },
   "scripts": {
-    "dev": "vite dev --host 127.0.0.1 --port 3000",
-    "build": "vite build",
-    "preview": "vite preview",
+    "dev": "vp dev --host 127.0.0.1 --port 3000",
+    "build": "vp build",
+    "preview": "vp preview",
     "test": "vitest run --config vitest.browser.config.ts"
   },
   "dependencies": {
