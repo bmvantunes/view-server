@@ -118,6 +118,14 @@ pnpm exec vitest run --config packages/core/vitest.config.ts packages/core/tests
 
 Use a later forced-GC variant with `node --expose-gc` when retained heap is the question.
 
+For serious production rollout raw-view capacity, run the manual 10M profile:
+
+```bash
+pnpm run soak:10m
+```
+
+This is manual/nightly only and defaults grouped subscriptions to `0`. Save the summary artifact and inspect lag, cleanup, active-plan, heap/RSS, retry, backpressure, and reconnect fields. For grouped capacity, use the chDB grouped refresh benchmark. See `docs/capacity-soak.md`.
+
 ## Troubleshooting
 
 If a subscription appears stuck:

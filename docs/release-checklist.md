@@ -108,6 +108,16 @@ VS_WORKER_SOAK_SUMMARY_PATH=/private/tmp/view-server-worker-soak-1m-summary.json
 vp run core#test -- tests/worker-soak.test.ts
 ```
 
+Manual/nightly 10M raw capacity soak:
+
+```bash
+pnpm run soak:10m
+```
+
+This is not a CI gate. The script defaults grouped subscriptions to `0` because the direct worker soak uses memory fallback, not production chDB grouped refresh. Save the JSON summary artifact and review subscribers, queue depth, subscription lag, active plans, heap/RSS, event counts, retries, backpressure, and reconnects. See `docs/capacity-soak.md`.
+
+For 10M grouped capacity, run the chDB grouped refresh overlap benchmark from `docs/capacity-soak.md`.
+
 Optional retained-memory sentinel:
 
 ```bash

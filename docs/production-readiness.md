@@ -172,6 +172,14 @@ VS_WORKER_SOAK_TIMEOUT_MS=900000 \
 pnpm exec vitest run --config packages/core/vitest.config.ts packages/core/tests/worker-soak.test.ts
 ```
 
+Manual/nightly 10M raw capacity soak:
+
+```bash
+pnpm run soak:10m
+```
+
+Keep this out of normal CI. The script defaults grouped subscriptions to `0`; use the chDB grouped refresh overlap benchmark for 10M grouped capacity. Save and compare the JSON summary artifact before serious production rollout. See `docs/capacity-soak.md`.
+
 ## Safe Rollout Checklist
 
 1. Run `vp check`.

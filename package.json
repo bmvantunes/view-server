@@ -12,6 +12,7 @@
     "test:server:start": "bash scripts/test-server-start.sh",
     "test:server:stop": "bash scripts/test-server-stop.sh",
     "smoke:deployment": "bash scripts/deployment-smoke.sh",
+    "soak:10m": "bash scripts/worker-soak-10m.sh",
     "pack:dry-run": "vp run core#build && vp run react#build && vp run testing#build && pnpm --filter @view-server/core pack --dry-run && pnpm --filter @view-server/react pack --dry-run && pnpm --filter @view-server/testing pack --dry-run",
     "prepare": "vp config"
   },

@@ -49,6 +49,14 @@ pnpm exec vitest run --config vitest.config.ts tests/worker-soak.test.ts
 
 The 1M/250/20/10k shape is intentionally heavy. On the current local machine it completed in roughly 10 minutes after grouped refresh work was shared by grouped-query key.
 
+For a manual/nightly 10M raw capacity profile:
+
+```bash
+pnpm run soak:10m
+```
+
+Save the generated JSON summary artifact. Do not add this profile to PR CI. The script defaults grouped subscriptions to `0`; grouped 10M capacity should be validated through the chDB grouped refresh overlap benchmark, not this memory-fallback worker soak.
+
 The soak asserts:
 
 - no queued lag leak,
