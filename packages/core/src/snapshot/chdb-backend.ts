@@ -11,13 +11,8 @@ import type {
   SnapshotBackendResult,
   VersionedRow,
 } from "./snapshot-backend.ts";
-import { fork, type ChildProcess } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import type {
-  ChdbQueryWorkerRequest,
-  ChdbQueryWorkerResponse,
-  ChdbQueryWorkerSuccessResponse,
-} from "./chdb-query-worker-protocol.ts";
+import { ChdbProcessClient } from "./chdb-process-client.ts";
+import type { ChdbQueryWorkerRequest } from "./chdb-query-worker-protocol.ts";
 import {
   decodeSnapshotBackendResult,
   encodeMutationLogEntry,
@@ -77,168 +72,101 @@ export function createChdbSnapshotBackendFactory(): (
   return () => createChdbSnapshotBackend();
 }
 
-type ChdbWorkerPending = {
-  readonly resolve: (response: ChdbQueryWorkerResponse) => void;
-  readonly reject: (error: unknown) => void;
-};
-
-type ChdbWorkerClientOptions = Pick<
-  ChdbSnapshotBackendOptions,
-  "groupedRefreshWorkerEntryUrl" | "onWorkerExit" | "onWorkerRequest" | "onWorkerSpawn"
->;
-
 class ChdbGroupedSnapshotWorkerClient {
-  readonly #worker: ChildProcess;
-  readonly #onWorkerExit: ChdbWorkerClientOptions["onWorkerExit"];
-  readonly #onWorkerRequest: ChdbWorkerClientOptions["onWorkerRequest"];
+  readonly #process: ChdbProcessClient;
   #topic = "chdb";
-  #nextId = 0;
-  #pending = new Map<number, ChdbWorkerPending>();
-  #closed = false;
-  #exitMessage: string | undefined;
 
-  constructor(options: ChdbWorkerClientOptions = {}) {
-    const entryUrl = resolveChdbQueryWorkerEntryUrl(options.groupedRefreshWorkerEntryUrl);
-    this.#onWorkerExit = options.onWorkerExit;
-    this.#onWorkerRequest = options.onWorkerRequest;
-    this.#worker = fork(fileURLToPath(entryUrl), [], {
-      execArgv: defaultExecArgv(entryUrl),
-      serialization: "advanced",
-      stdio: ["ignore", "inherit", "inherit", "ipc"],
-    });
-    options.onWorkerSpawn?.(this.#worker.pid);
-    this.#worker.on("message", (response: unknown) => {
-      if (isChdbQueryWorkerResponse(response)) {
-        this.#handleResponse(response);
-        return;
-      }
-      this.#failPending(new Error("chDB worker returned an invalid response"));
-    });
-    this.#worker.on("error", (error) => {
-      this.#failPending(error);
-    });
-    this.#worker.on("exit", (code, signal) => {
-      const message =
-        signal === null
-          ? `chDB worker exited with code ${String(code)}`
-          : `chDB worker exited from signal ${signal}`;
-      if (!this.#closed) {
-        this.#exitMessage = message;
-        this.#onWorkerExit?.({ pid: this.#worker.pid, message });
-      }
-      this.#failPending(new Error(message));
+  constructor(options: ChdbSnapshotBackendOptions = {}) {
+    this.#process = new ChdbProcessClient({
+      workerEntryUrl: options.groupedRefreshWorkerEntryUrl,
+      onWorkerExit: options.onWorkerExit,
+      onWorkerRequest: options.onWorkerRequest,
+      onWorkerSpawn: options.onWorkerSpawn,
     });
   }
 
   get pid(): number | undefined {
-    return this.#worker.pid;
+    return this.#process.pid;
   }
 
   get pendingRequests(): number {
-    return this.#pending.size;
+    return this.#process.pendingRequests;
   }
 
   get health(): SnapshotBackendHealth {
-    if (this.#closed) {
-      return {
-        status: "stopped",
-        pid: this.#worker.pid ?? 0,
-        restarts: 0,
-        pendingRequests: this.#pending.size,
-        lastError: this.#exitMessage ?? "",
-      };
-    }
-    return this.#exitMessage === undefined
-      ? {
-          status: "ready",
-          pid: this.#worker.pid ?? 0,
-          restarts: 0,
-          pendingRequests: this.#pending.size,
-          lastError: "",
-        }
-      : {
-          status: "degraded",
-          message: this.#exitMessage,
-          pid: this.#worker.pid ?? 0,
-          restarts: 0,
-          pendingRequests: this.#pending.size,
-          lastError: this.#exitMessage,
-        };
+    return this.#process.health;
   }
 
   get exitedUnexpectedly(): boolean {
-    return this.#exitMessage !== undefined;
+    return this.#process.exitedUnexpectedly;
   }
 
   kill(signal: NodeJS.Signals = "SIGTERM"): void {
-    this.#worker.kill(signal);
+    this.#process.kill(signal);
   }
 
   init(args: Parameters<SnapshotBackend["init"]>[0]): Effect.Effect<void, ViewServerError> {
     this.#topic = args.topic;
+    this.#process.setTopic(args.topic);
     if (args.rows.length > WORKER_INIT_CHUNK_SIZE) {
       return this.#chunkedInit(args);
     }
-    return this.#request({
-      id: this.#requestId(),
-      type: "init",
-      args: {
-        ...args,
-        rows: args.rows.map(encodeVersionedRow),
-      },
-    }).pipe(Effect.asVoid);
+    return this.#process
+      .request({
+        id: this.#process.nextRequestId(),
+        type: "init",
+        args: {
+          ...args,
+          rows: args.rows.map(encodeVersionedRow),
+        },
+      })
+      .pipe(Effect.asVoid);
   }
 
   applyBatch(
     args: Parameters<SnapshotBackend["applyBatch"]>[0],
   ): Effect.Effect<void, ViewServerError> {
-    return this.#request({
-      id: this.#requestId(),
-      type: "applyBatch",
-      args: {
-        mutations: args.mutations.map(encodeMutationLogEntry),
-        highestVersion: args.highestVersion,
-      },
-    }).pipe(Effect.asVoid);
+    return this.#process
+      .request({
+        id: this.#process.nextRequestId(),
+        type: "applyBatch",
+        args: {
+          mutations: args.mutations.map(encodeMutationLogEntry),
+          highestVersion: args.highestVersion,
+        },
+      })
+      .pipe(Effect.asVoid);
   }
 
   snapshot(
     args: Parameters<SnapshotBackend["snapshot"]>[0],
   ): Effect.Effect<SnapshotBackendResult, ViewServerError> {
-    return this.#request({
-      id: this.#requestId(),
-      type: "snapshot",
-      args: {
-        query: encodeRuntimeQuery(args.query),
-        targetVersion: args.targetVersion,
-      },
-    }).pipe(
-      Effect.flatMap((response) =>
-        response.result === undefined
-          ? Effect.fail(snapshotBackendFailed(this.#topic, "chDB worker returned no snapshot"))
-          : Effect.succeed(decodeSnapshotBackendResult(response.result)),
-      ),
-    );
+    return this.#process
+      .request({
+        id: this.#process.nextRequestId(),
+        type: "snapshot",
+        args: {
+          query: encodeRuntimeQuery(args.query),
+          targetVersion: args.targetVersion,
+        },
+      })
+      .pipe(
+        Effect.flatMap((response) =>
+          response.result === undefined
+            ? Effect.fail(snapshotBackendFailed(this.#topic, "chDB worker returned no snapshot"))
+            : Effect.succeed(decodeSnapshotBackendResult(response.result)),
+        ),
+      );
   }
 
   close(): Effect.Effect<void, ViewServerError> {
-    if (this.#closed) {
-      return this.#terminate();
-    }
-    this.#closed = true;
-    if (this.#worker.exitCode !== null || this.#worker.killed || !this.#worker.connected) {
-      return this.#terminate();
-    }
-    return this.#requestClose(250).pipe(
-      Effect.flatMap(() => this.#terminate()),
-      Effect.asVoid,
-    );
+    return this.#process.shutdown();
   }
 
   #chunkedInit(args: Parameters<SnapshotBackend["init"]>[0]): Effect.Effect<void, ViewServerError> {
     return Effect.fnUntraced(function* (worker: ChdbGroupedSnapshotWorkerClient) {
-      yield* worker.#request({
-        id: worker.#requestId(),
+      yield* worker.#process.request({
+        id: worker.#process.nextRequestId(),
         type: "initStart",
         args: {
           topic: args.topic,
@@ -250,161 +178,17 @@ class ChdbGroupedSnapshotWorkerClient {
         },
       });
       for (let offset = 0; offset < args.rows.length; offset += WORKER_INIT_CHUNK_SIZE) {
-        yield* worker.#request({
-          id: worker.#requestId(),
+        yield* worker.#process.request({
+          id: worker.#process.nextRequestId(),
           type: "initRows",
           rows: args.rows.slice(offset, offset + WORKER_INIT_CHUNK_SIZE).map(encodeVersionedRow),
         });
       }
-      yield* worker.#request({
-        id: worker.#requestId(),
+      yield* worker.#process.request({
+        id: worker.#process.nextRequestId(),
         type: "initCommit",
       });
     })(this);
-  }
-
-  #request(
-    request: ChdbQueryWorkerRequest,
-  ): Effect.Effect<ChdbQueryWorkerSuccessResponse, ViewServerError> {
-    return Effect.tryPromise({
-      try: () =>
-        new Promise<ChdbQueryWorkerResponse>((resolve, reject) => {
-          if (this.#exitMessage !== undefined) {
-            reject(new Error(this.#exitMessage));
-            return;
-          }
-          if (this.#worker.exitCode !== null || this.#worker.killed || !this.#worker.connected) {
-            reject(new Error("chDB worker IPC channel is closed"));
-            return;
-          }
-          this.#pending.set(request.id, { resolve, reject });
-          let sent = false;
-          try {
-            sent = this.#worker.send(request, (error) => {
-              if (error === null) {
-                return;
-              }
-              const pending = this.#pending.get(request.id);
-              if (pending === undefined) {
-                return;
-              }
-              this.#pending.delete(request.id);
-              pending.reject(error);
-            });
-          } catch (error) {
-            this.#pending.delete(request.id);
-            reject(error);
-            return;
-          }
-          if (!sent) {
-            this.#pending.delete(request.id);
-            reject(new Error("chDB worker IPC channel is not writable"));
-            return;
-          }
-          this.#onWorkerRequest?.({ pid: this.#worker.pid, type: request.type });
-        }).then((response) => {
-          if (response.success) {
-            return response;
-          }
-          throw new Error(response.error);
-        }),
-      catch: (error) => snapshotBackendFailed(this.#topic, error),
-    });
-  }
-
-  #requestId(): number {
-    const id = this.#nextId;
-    this.#nextId++;
-    return id;
-  }
-
-  #requestClose(deadlineMs: number): Effect.Effect<void, ViewServerError> {
-    return Effect.tryPromise({
-      try: () =>
-        new Promise<void>((resolve) => {
-          const id = this.#requestId();
-          let settled = false;
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          const settle = () => {
-            if (settled) {
-              return;
-            }
-            settled = true;
-            if (timer !== undefined) {
-              clearTimeout(timer);
-            }
-            this.#pending.delete(id);
-            resolve();
-          };
-          timer = setTimeout(settle, deadlineMs);
-          this.#pending.set(id, {
-            resolve: settle,
-            reject: settle,
-          });
-          try {
-            const sent = this.#worker.send({ id, type: "close" });
-            if (!sent) {
-              settle();
-            }
-          } catch {
-            settle();
-          }
-        }),
-      catch: (error) => snapshotBackendFailed(this.#topic, error),
-    });
-  }
-
-  #handleResponse(response: ChdbQueryWorkerResponse): void {
-    const pending = this.#pending.get(response.id);
-    if (pending === undefined) {
-      return;
-    }
-    this.#pending.delete(response.id);
-    pending.resolve(response);
-  }
-
-  #failPending(error: unknown): void {
-    for (const [id, pending] of this.#pending) {
-      this.#pending.delete(id);
-      pending.reject(error);
-    }
-  }
-
-  #terminate(): Effect.Effect<void, ViewServerError> {
-    return Effect.tryPromise({
-      try: () =>
-        new Promise<void>((resolve) => {
-          if (this.#worker.exitCode !== null || this.#worker.killed) {
-            resolve();
-            return;
-          }
-          let settled = false;
-          let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
-          let giveUpTimer: ReturnType<typeof setTimeout> | undefined;
-          const settle = () => {
-            if (settled) {
-              return;
-            }
-            settled = true;
-            if (forceKillTimer !== undefined) {
-              clearTimeout(forceKillTimer);
-            }
-            if (giveUpTimer !== undefined) {
-              clearTimeout(giveUpTimer);
-            }
-            resolve();
-          };
-          this.#worker.once("exit", () => {
-            settle();
-          });
-          forceKillTimer = setTimeout(() => {
-            this.#worker.kill("SIGKILL");
-          }, 250);
-          giveUpTimer = setTimeout(settle, 2_000);
-          this.#worker.kill("SIGTERM");
-        }),
-      catch: (error) => snapshotBackendFailed(this.#topic, error),
-    });
   }
 }
 
@@ -991,25 +775,6 @@ class ChdbSnapshotBackend implements SnapshotBackend {
   }
 }
 
-function resolveChdbQueryWorkerEntryUrl(workerEntryUrl: string | URL | undefined): URL {
-  if (workerEntryUrl !== undefined) {
-    return toWorkerUrl(workerEntryUrl);
-  }
-  const currentUrl = new URL(import.meta.url);
-  if (currentUrl.pathname.endsWith("/src/snapshot/chdb-backend.ts")) {
-    return new URL("./chdb-query-worker-entry.ts", import.meta.url);
-  }
-  return new URL("./snapshot/chdb-query-worker-entry.mjs", import.meta.url);
-}
-
-function toWorkerUrl(value: string | URL): URL {
-  return value instanceof URL ? value : new URL(value);
-}
-
-function defaultExecArgv(workerEntryUrl: URL): string[] {
-  return workerEntryUrl.pathname.endsWith(".ts") ? ["--experimental-strip-types"] : [];
-}
-
 function acquireSharedSession(): Session {
   if (sharedSession === undefined) {
     sharedSession = new Session();
@@ -1028,23 +793,6 @@ function releaseSharedSession(session: Session): void {
   }
   sharedSession = undefined;
   session.cleanup();
-}
-
-function isChdbQueryWorkerResponse(value: unknown): value is ChdbQueryWorkerResponse {
-  if (!isReadonlyRecord(value)) {
-    return false;
-  }
-  if (typeof value.id !== "number" || typeof value.success !== "boolean") {
-    return false;
-  }
-  if (value.success) {
-    return value.result === undefined || isReadonlyRecord(value.result);
-  }
-  return typeof value.error === "string";
-}
-
-function isReadonlyRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null;
 }
 
 function errorMessage(error: unknown): string {

@@ -34,7 +34,8 @@ This document is the compact domain map for future agents. `plan.md` is the hist
 - `packages/core/src/worker/subscription-registry.ts`: subscription ownership, duplicate ids, cleanup hooks.
 - `packages/core/src/worker/worker-health-projection.ts`: worker metrics, pressure degradation, chDB health projection.
 - `packages/core/src/worker/topic-worker-core.ts`: orchestration glue for the modules above.
-- `packages/core/src/snapshot/chdb-backend.ts`: per-topic chDB backend supervision and storage.
+- `packages/core/src/snapshot/chdb-backend.ts`: per-topic chDB backend mirror/restart policy and storage.
+- `packages/core/src/snapshot/chdb-process-client.ts`: private child-process IPC, pending request failure, health, restart, and shutdown contract for the chDB worker.
 - `packages/core/src/snapshot/chdb-sql-compiler.ts`: internal SQL compiler contract for chDB snapshots.
 - `packages/react`: factory-created provider/hooks; browser package must stay server-dependency-free.
 - `packages/testing`: test helpers only. Production correctness should be proven through real server tests where possible.

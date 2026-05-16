@@ -497,6 +497,8 @@ Tests / acceptance:
 
 Priority: P0
 
+Status: Done in `packages/core/src/snapshot/chdb-process-client.ts`.
+
 Problem:
 
 chDB child process supervision is load-bearing: pending requests, restart, shutdown, SIGTERM/SIGKILL, health, pending request failure.
