@@ -72,14 +72,14 @@ export function writeBenchmarkArtifact(
 ): Effect.Effect<BenchmarkArtifactResult> {
   return Effect.fn("view-server.bench.artifact.write")(function* () {
     const generatedAt = DateTime.formatIso(yield* DateTime.now);
+    const artifactConfig = benchmarkConfigWithProfile(config);
+    const artifactNotes = benchmarkNotesWithProfile(options.notes);
     const artifact: BenchmarkArtifact = {
       schemaVersion: 1,
       benchmark,
       generatedAt,
-      config,
-      ...(options.notes === undefined || options.notes.length === 0
-        ? {}
-        : { notes: options.notes }),
+      config: artifactConfig,
+      ...(artifactNotes.length === 0 ? {} : { notes: artifactNotes }),
       results,
     };
     const artifactPath = benchmarkArtifactPath(benchmark, artifact.generatedAt);
@@ -144,6 +144,33 @@ export function writeBenchmarkArtifact(
       ...(summaryPath === undefined ? {} : { summaryPath }),
     };
   })();
+}
+
+function benchmarkConfigWithProfile(
+  config: Readonly<Record<string, BenchmarkPrimitive>>,
+): Readonly<Record<string, BenchmarkPrimitive>> {
+  const profile = process.env.VS_BENCH_PROFILE;
+  const profileBenchmark = process.env.VS_BENCH_PROFILE_BENCHMARK;
+  return {
+    ...config,
+    ...(profile === undefined || profile.length === 0 ? {} : { profile }),
+    ...(profileBenchmark === undefined || profileBenchmark.length === 0
+      ? {}
+      : { profileBenchmark }),
+  };
+}
+
+function benchmarkNotesWithProfile(notes: readonly string[] | undefined): readonly string[] {
+  const profileCoverageGaps = process.env.VS_BENCH_PROFILE_COVERAGE_GAPS;
+  const gaps =
+    profileCoverageGaps === undefined || profileCoverageGaps.length === 0
+      ? []
+      : profileCoverageGaps
+          .split("\n")
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0)
+          .map((entry) => `coverage gap: ${entry}`);
+  return [...(notes ?? []), ...gaps];
 }
 
 function benchmarkArtifactPath(benchmark: string, generatedAt: string): string {

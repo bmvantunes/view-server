@@ -67,6 +67,8 @@
     "bench:compare": "node --experimental-strip-types bench/ci-smoke.ts",
     "bench:client-delta": "node --experimental-strip-types bench/client-delta.bench.ts",
     "bench:grouped-aggregation": "node --experimental-strip-types bench/grouped-aggregation.bench.ts",
+    "bench:profile": "node --experimental-strip-types bench/benchmark-profile.ts",
+    "bench:profiles": "node --experimental-strip-types bench/benchmark-profile.ts --list",
     "bench:query-engine": "node --experimental-strip-types bench/query-engine.bench.ts",
     "bench:refresh-baselines": "node --experimental-strip-types bench/ci-smoke.ts --refresh-baselines",
     "bench:worker-replay": "node --experimental-strip-types bench/worker-replay.bench.ts",

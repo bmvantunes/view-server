@@ -79,6 +79,52 @@ describe("benchmark artifacts", () => {
     ),
   );
 
+  it.effect("adds benchmark profile metadata and coverage gaps to artifacts", () =>
+    withBenchmarkEnv(
+      {
+        VS_BENCH_ARTIFACT: undefined,
+        VS_BENCH_BASELINE: undefined,
+        VS_BENCH_PROFILE: "ci-smoke",
+        VS_BENCH_PROFILE_BENCHMARK: "active-view",
+        VS_BENCH_PROFILE_COVERAGE_GAPS: "smoke profile gap\nanother gap",
+        VS_BENCH_REGRESSION_MIN_DELTA_MS: undefined,
+        VS_BENCH_REGRESSION_REPORT_ONLY: undefined,
+        VS_BENCH_REGRESSION_TOLERANCE: undefined,
+        VS_BENCH_REGRESSION_METRICS: undefined,
+        GITHUB_STEP_SUMMARY: undefined,
+      },
+      Effect.gen(function* () {
+        const artifactPath = yield* tempArtifactPath("current.json");
+        process.env.VS_BENCH_ARTIFACT = artifactPath;
+
+        const result = yield* writeBenchmarkArtifact(
+          "active-view",
+          { rows: 1_000, subscriptions: 5 },
+          [
+            {
+              case: { scenario: "hot-key", pageSize: 50 },
+              metrics: [{ name: "operationP99Ms", value: 3.5, unit: "ms" }],
+            },
+          ],
+          { notes: ["explicit note"] },
+        );
+
+        const artifact = yield* readArtifact(result.artifactPath);
+        expect(artifact.config).toMatchObject({
+          rows: 1_000,
+          subscriptions: 5,
+          profile: "ci-smoke",
+          profileBenchmark: "active-view",
+        });
+        expect(artifact.notes).toEqual([
+          "explicit note",
+          "coverage gap: smoke profile gap",
+          "coverage gap: another gap",
+        ]);
+      }),
+    ),
+  );
+
   it.effect("fails when a selected lower-is-better metric exceeds tolerance", () =>
     withBenchmarkEnv(
       {

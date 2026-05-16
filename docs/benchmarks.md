@@ -16,6 +16,39 @@ Set `VS_BENCH_BLOCKING=1` in `.github/workflows/benchmarks.yml` when the smoke b
 
 ## Refreshing Baselines
 
+List the curated benchmark profiles:
+
+```bash
+vp run core#bench:profiles
+```
+
+Dry-run a named profile to see the exact scripts and environment parameters without running the
+work:
+
+```bash
+vp run core#bench:profile -- --profile ci-smoke --dry-run
+```
+
+Run a named profile:
+
+```bash
+vp run core#bench:profile -- --profile dev-fast
+```
+
+The current profiles are:
+
+- `ci-smoke`: tiny reporting-only CI visibility.
+- `dev-fast`: local 100k-ish active/grouped checks.
+- `rc-1m`: manual 1M release-candidate responsiveness checks.
+- `soak-10m`: manual/nightly raw 10M worker soak wrapper.
+- `grouped-heavy`: grouped accumulator and 10M chDB refresh stress.
+- `active-plan-startup`: active raw plan startup/build and memory shapes.
+- `chdb-worker-overlap`: chDB worker-isolated grouped refresh overlap.
+
+Profile-run artifacts include `config.profile`, `config.profileBenchmark`, and the benchmark's exact
+shape parameters. CI summaries also include declared profile coverage gaps so smoke results are not
+mistaken for full capacity proof.
+
 Run the same smoke shapes locally from the repo root:
 
 ```bash

@@ -60,6 +60,9 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 26: Public API type matrix covers config-derived topic names, client
       publish/delta/query typing, raw/grouped query fields, BigDecimal values,
       literal unions, and AsyncResult live-query rows/initialData.
+- [x] Task 27: Benchmark profile registry added for CI smoke, dev-fast, rc-1m,
+      10M soak, grouped-heavy, active-plan-startup, and chDB overlap profiles with
+      list/run commands, artifact profile metadata, and CI summary coverage gaps.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
 - [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [x] Task 39: chDB SQL compiler contract tests and internal compiler module.
