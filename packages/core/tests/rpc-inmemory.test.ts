@@ -2432,7 +2432,7 @@ describe("Effect RPC in-memory", () => {
           row: { id: "external", rows: 1 },
         })
         .pipe(Effect.flip);
-      expect(reservedTopicError._tag).toBe("InvalidPublish");
+      expect(reservedTopicError._tag).toBe("UnauthorizedSystemTopic");
 
       const schemaError = yield* client
         .Publish({

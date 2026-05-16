@@ -33,6 +33,15 @@ export class Unauthorized extends Schema.TaggedErrorClass<Unauthorized>()("Unaut
   message: Schema.String,
 }) {}
 
+export class UnauthorizedSystemTopic extends Schema.TaggedErrorClass<UnauthorizedSystemTopic>()(
+  "UnauthorizedSystemTopic",
+  {
+    topic: Schema.String,
+    operation: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
 export class WorkerUnavailable extends Schema.TaggedErrorClass<WorkerUnavailable>()(
   "WorkerUnavailable",
   {
@@ -60,6 +69,25 @@ export class SnapshotBackendFailed extends Schema.TaggedErrorClass<SnapshotBacke
   },
 ) {}
 
+export class SnapshotBackendUnavailable extends Schema.TaggedErrorClass<SnapshotBackendUnavailable>()(
+  "SnapshotBackendUnavailable",
+  {
+    topic: Schema.String,
+    message: Schema.String,
+    cause: Schema.optional(Schema.Defect),
+  },
+) {}
+
+export class SnapshotReplayGap extends Schema.TaggedErrorClass<SnapshotReplayGap>()(
+  "SnapshotReplayGap",
+  {
+    topic: Schema.String,
+    backendVersion: Schema.String,
+    targetVersion: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
 export class KafkaIngestFailed extends Schema.TaggedErrorClass<KafkaIngestFailed>()(
   "KafkaIngestFailed",
   {
@@ -68,6 +96,13 @@ export class KafkaIngestFailed extends Schema.TaggedErrorClass<KafkaIngestFailed
     cause: Schema.optional(Schema.Defect),
   },
 ) {}
+
+export class SourceFailed extends Schema.TaggedErrorClass<SourceFailed>()("SourceFailed", {
+  topic: Schema.String,
+  source: Schema.String,
+  message: Schema.String,
+  cause: Schema.optional(Schema.Defect),
+}) {}
 
 export class SchemaDecodeFailed extends Schema.TaggedErrorClass<SchemaDecodeFailed>()(
   "SchemaDecodeFailed",
@@ -115,6 +150,17 @@ export class InvalidStartupEnv extends Schema.TaggedErrorClass<InvalidStartupEnv
   },
 ) {}
 
+export class QueryLimitExceeded extends Schema.TaggedErrorClass<QueryLimitExceeded>()(
+  "QueryLimitExceeded",
+  {
+    topic: Schema.String,
+    field: Schema.String,
+    limit: Schema.Number,
+    actual: Schema.Number,
+    message: Schema.String,
+  },
+) {}
+
 export class InvalidConfig extends Schema.TaggedErrorClass<InvalidConfig>()("InvalidConfig", {
   field: Schema.optional(Schema.String),
   message: Schema.String,
@@ -127,6 +173,14 @@ export class ServerShutdown extends Schema.TaggedErrorClass<ServerShutdown>()("S
   message: Schema.String,
 }) {}
 
+export class ChdbChildExited extends Schema.TaggedErrorClass<ChdbChildExited>()("ChdbChildExited", {
+  topic: Schema.String,
+  message: Schema.String,
+  pid: Schema.optional(Schema.Number),
+  code: Schema.optional(Schema.Number),
+  signal: Schema.optional(Schema.String),
+}) {}
+
 export const ViewServerError = Schema.Union([
   MissingTopic,
   MissingTopicId,
@@ -134,18 +188,24 @@ export const ViewServerError = Schema.Union([
   InvalidFilter,
   InvalidPublish,
   Unauthorized,
+  UnauthorizedSystemTopic,
   WorkerUnavailable,
   SnapshotBackendLagExceeded,
   SnapshotBackendFailed,
+  SnapshotBackendUnavailable,
+  SnapshotReplayGap,
   KafkaIngestFailed,
+  SourceFailed,
   SchemaDecodeFailed,
   VersionGap,
   SubscriptionClosed,
   TransportError,
   BackpressureExceeded,
   InvalidStartupEnv,
+  QueryLimitExceeded,
   InvalidConfig,
   ServerShutdown,
+  ChdbChildExited,
 ]);
 
 export type ViewServerError = typeof ViewServerError.Type;
@@ -176,6 +236,16 @@ export const unauthorized = (topic: string, operation: string): Unauthorized =>
     message: `Unauthorized ${operation} for topic ${topic}`,
   });
 
+export const unauthorizedSystemTopic = (
+  topic: string,
+  operation: string,
+): UnauthorizedSystemTopic =>
+  new UnauthorizedSystemTopic({
+    topic,
+    operation,
+    message: `System topic ${topic} is private for ${operation}`,
+  });
+
 export const workerUnavailable = (topic: string): WorkerUnavailable =>
   new WorkerUnavailable({ topic, message: `Worker unavailable for topic ${topic}` });
 
@@ -186,9 +256,39 @@ export const snapshotBackendFailed = (topic: string, error: unknown): SnapshotBa
     cause: error,
   });
 
+export const snapshotBackendUnavailable = (
+  topic: string,
+  error: unknown,
+): SnapshotBackendUnavailable =>
+  new SnapshotBackendUnavailable({
+    topic,
+    message: error instanceof Error ? error.message : String(error),
+    cause: error,
+  });
+
+export const snapshotReplayGap = (
+  topic: string,
+  backendVersion: bigint | string,
+  targetVersion: bigint | string,
+): SnapshotReplayGap =>
+  new SnapshotReplayGap({
+    topic,
+    backendVersion: String(backendVersion),
+    targetVersion: String(targetVersion),
+    message: `Snapshot replay gap for topic ${topic}: backend ${String(backendVersion)} cannot catch up to ${String(targetVersion)}`,
+  });
+
 export const kafkaIngestFailed = (topic: string, error: unknown): KafkaIngestFailed =>
   new KafkaIngestFailed({
     topic,
+    message: error instanceof Error ? error.message : String(error),
+    cause: error,
+  });
+
+export const sourceFailed = (topic: string, source: string, error: unknown): SourceFailed =>
+  new SourceFailed({
+    topic,
+    source,
     message: error instanceof Error ? error.message : String(error),
     cause: error,
   });
@@ -224,6 +324,20 @@ export const backpressureExceeded = (requestId: string, message: string): Backpr
     message,
   });
 
+export const queryLimitExceeded = (
+  topic: string,
+  field: string,
+  limit: number,
+  actual: number,
+): QueryLimitExceeded =>
+  new QueryLimitExceeded({
+    topic,
+    field,
+    limit,
+    actual,
+    message: `Query ${field} ${actual} exceeds configured limit ${limit}`,
+  });
+
 export const invalidStartupEnv = (
   message: string,
   error?: unknown,
@@ -253,6 +367,38 @@ export const serverShutdown = (
     ...(requestId === undefined ? {} : { requestId }),
   });
 
+export const chdbChildExited = (args: {
+  readonly topic: string;
+  readonly message: string;
+  readonly pid?: number | undefined;
+  readonly code?: number | undefined;
+  readonly signal?: string | undefined;
+}): ChdbChildExited =>
+  new ChdbChildExited({
+    topic: args.topic,
+    message: args.message,
+    ...(args.pid === undefined ? {} : { pid: args.pid }),
+    ...(args.code === undefined ? {} : { code: args.code }),
+    ...(args.signal === undefined ? {} : { signal: args.signal }),
+  });
+
+export type ViewServerErrorRetryAction = "fail" | "retry" | "resubscribe";
+
+export function viewServerErrorRetryAction(error: ViewServerError): ViewServerErrorRetryAction {
+  switch (error._tag) {
+    case "TransportError":
+      return "retry";
+    case "BackpressureExceeded":
+      return "resubscribe";
+    default:
+      return "fail";
+  }
+}
+
+export function isRetryableViewServerError(error: ViewServerError): boolean {
+  return viewServerErrorRetryAction(error) !== "fail";
+}
+
 export function isViewServerError(error: unknown): error is ViewServerError {
   return (
     typeof error === "object" &&
@@ -270,16 +416,22 @@ const viewServerErrorTags = new Set([
   "InvalidFilter",
   "InvalidPublish",
   "Unauthorized",
+  "UnauthorizedSystemTopic",
   "WorkerUnavailable",
   "SnapshotBackendLagExceeded",
   "SnapshotBackendFailed",
+  "SnapshotBackendUnavailable",
+  "SnapshotReplayGap",
   "KafkaIngestFailed",
+  "SourceFailed",
   "SchemaDecodeFailed",
   "VersionGap",
   "SubscriptionClosed",
   "TransportError",
   "BackpressureExceeded",
   "InvalidStartupEnv",
+  "QueryLimitExceeded",
   "InvalidConfig",
   "ServerShutdown",
+  "ChdbChildExited",
 ]);

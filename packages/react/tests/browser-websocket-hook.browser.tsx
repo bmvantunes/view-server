@@ -7,6 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, inject, test } from "vite-plus/test";
 import type { ViewServerClient } from "@view-server/core/client";
 import { defineConfig } from "@view-server/core/config";
+import { transportError, type ViewServerError } from "@view-server/core/errors";
 import type { RawQuery, RuntimeRow, SubscriptionEvent } from "@view-server/core/query";
 import {
   createViewServerReact,
@@ -37,7 +38,7 @@ const config = defineConfig({
 });
 
 const viewServerReact = createViewServerReact(config);
-const { ViewServerProvider, useLiveQuery } = viewServerReact;
+const { ViewServerProvider, ViewServerClientProvider, useLiveQuery } = viewServerReact;
 
 const roots: Root[] = [];
 const scriptedQuery = makeQuery("SCRIPTED", 2);
@@ -172,6 +173,13 @@ describe("browser useLiveQuery", () => {
     expect(document.body.textContent).toContain("scripted:SCRIPTED-1:SCRIPTED-A:100");
     expect(document.body.textContent).not.toContain("scripted:SCRIPTED-3:SCRIPTED-C:50");
   });
+
+  test("surfaces typed subscription failures through AsyncResult", async () => {
+    const error = transportError("subscription denied");
+    renderFailureGrid(failingSubscribeClient(error), makeQuery("FAILURE", 1));
+
+    await waitForText("failure:TransportError:subscription denied");
+  });
 });
 
 function makeQuery(prefix: string, limit: number) {
@@ -233,6 +241,23 @@ function renderScriptedGrid(hooks: ViewServerHooks<typeof config>) {
   const root = createRoot(host);
   roots.push(root);
   flushSync(() => root.render(<ScriptedOrdersGrid hooks={hooks} />));
+}
+
+function renderFailureGrid(
+  client: ViewServerClient<typeof config>,
+  query: ReturnType<typeof makeQuery>,
+) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.push(root);
+  flushSync(() =>
+    root.render(
+      <ViewServerClientProvider client={client}>
+        <FailureOrdersGrid query={query} />
+      </ViewServerClientProvider>,
+    ),
+  );
 }
 
 function ProviderOrdersGrid(props: { readonly query: ReturnType<typeof makeQuery> }) {
@@ -324,6 +349,32 @@ function ScriptedOrdersGrid(props: { readonly hooks: ViewServerHooks<typeof conf
       </div>
     ),
   });
+}
+
+function FailureOrdersGrid(props: { readonly query: ReturnType<typeof makeQuery> }) {
+  const result = useLiveQuery("orders", props.query);
+  return AsyncResult.matchWithError(result, {
+    onInitial: () => <div>failure:status=connecting</div>,
+    onError: (error) => (
+      <div>
+        failure:{error._tag}:{error.message}
+      </div>
+    ),
+    onDefect: () => <div>failure:status=defect</div>,
+    onSuccess: () => <div>failure:status=success</div>,
+  });
+}
+
+function failingSubscribeClient(error: ViewServerError): ViewServerClient<typeof config> {
+  return {
+    query: () => Effect.fail(error),
+    subscribe: () => Effect.fail(error),
+    publish: () => Effect.fail(error),
+    deltaPublish: () => Effect.fail(error),
+    deleteById: () => Effect.fail(error),
+    health: () => Effect.fail(error),
+    createStore: () => Effect.fail(error),
+  };
 }
 
 function scriptedLiveQueryClient(): ViewServerClient<typeof config> {

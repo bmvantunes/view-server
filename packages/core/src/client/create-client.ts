@@ -14,7 +14,12 @@ import type {
   ViewServerConfig,
 } from "../config/index.ts";
 import { VIEW_SERVER_HEALTH_TOPIC } from "../config/index.ts";
-import { isViewServerError, transportError, type ViewServerError } from "../errors.ts";
+import {
+  isViewServerError,
+  transportError,
+  viewServerErrorRetryAction,
+  type ViewServerError,
+} from "../errors.ts";
 import {
   type InferReadableQueryResult,
   type QueryForReadableTopic,
@@ -232,39 +237,36 @@ export function createViewServerClient<TConfig extends ViewServerConfig>(
           );
         });
         const scope = yield* Effect.scope;
+        const retrySubscription = (error: ViewServerError) => {
+          const retryAction = viewServerErrorRetryAction(error);
+          if (closed) {
+            return Effect.void;
+          }
+          if (retryAction === "fail") {
+            return Effect.fail(error);
+          }
+          const retryLifecycle =
+            onLifecycle?.({
+              type: "retry",
+              requestId: currentRequestId,
+              attempt,
+              error,
+            }) ?? Effect.void;
+          return retryAction === "resubscribe"
+            ? retryLifecycle.pipe(
+                Effect.flatMap(() => rpcClient.Unsubscribe({ requestId: currentRequestId })),
+                Effect.ignore,
+                Effect.flatMap(() => Effect.sleep("250 millis")),
+              )
+            : retryLifecycle.pipe(Effect.flatMap(() => Effect.sleep("250 millis")));
+        };
         const subscriptionLoop = Effect.whileLoop({
           while: () => !closed,
           body: () =>
             runAttempt().pipe(
               Effect.catchTags({
-                TransportError: (error) =>
-                  !closed
-                    ? (
-                        onLifecycle?.({
-                          type: "retry",
-                          requestId: currentRequestId,
-                          attempt,
-                          error,
-                        }) ?? Effect.void
-                      ).pipe(Effect.flatMap(() => Effect.sleep("250 millis")))
-                    : Effect.void,
-                BackpressureExceeded: (error) =>
-                  !closed
-                    ? (
-                        onLifecycle?.({
-                          type: "retry",
-                          requestId: currentRequestId,
-                          attempt,
-                          error,
-                        }) ?? Effect.void
-                      ).pipe(
-                        Effect.flatMap(() =>
-                          rpcClient.Unsubscribe({ requestId: currentRequestId }),
-                        ),
-                        Effect.ignore,
-                        Effect.flatMap(() => Effect.sleep("250 millis")),
-                      )
-                    : Effect.void,
+                TransportError: retrySubscription,
+                BackpressureExceeded: retrySubscription,
               }),
             ),
           step: () => undefined,

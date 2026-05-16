@@ -243,10 +243,10 @@ describe("production readiness", () => {
       const deltaError = yield* runtime.deltaPublish("__private", { id: "x" }).pipe(Effect.flip);
       const deleteError = yield* runtime.deleteById("__private", "x").pipe(Effect.flip);
       const readError = yield* runtime.query("__private", rawOrderQuery).pipe(Effect.flip);
-      expect(publishError._tag).toBe("InvalidPublish");
-      expect(deltaError._tag).toBe("InvalidPublish");
-      expect(deleteError._tag).toBe("InvalidPublish");
-      expect(readError._tag).toBe("Unauthorized");
+      expect(publishError._tag).toBe("UnauthorizedSystemTopic");
+      expect(deltaError._tag).toBe("UnauthorizedSystemTopic");
+      expect(deleteError._tag).toBe("UnauthorizedSystemTopic");
+      expect(readError._tag).toBe("UnauthorizedSystemTopic");
 
       const guardedRuntime = yield* makeViewServerRuntime(
         defineConfig({
@@ -343,9 +343,14 @@ describe("production readiness", () => {
       ]);
 
       expect(errors).toHaveLength(6);
-      for (const error of errors) {
-        expect(error._tag).toBe("InvalidQuery");
-      }
+      expect(errors.map((error) => error._tag)).toEqual([
+        "QueryLimitExceeded",
+        "QueryLimitExceeded",
+        "QueryLimitExceeded",
+        "QueryLimitExceeded",
+        "QueryLimitExceeded",
+        "InvalidQuery",
+      ]);
     }).pipe(Effect.scoped),
   );
 

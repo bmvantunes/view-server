@@ -15,11 +15,12 @@ import {
   VIEW_SERVER_HEALTH_TOPIC,
 } from "../config/index.ts";
 import {
-  invalidPublish,
   invalidConfig,
   invalidQuery,
   missingTopic,
+  queryLimitExceeded,
   unauthorized,
+  unauthorizedSystemTopic,
   type ViewServerError,
 } from "../errors.ts";
 import type {
@@ -111,7 +112,7 @@ export function makeViewServerRuntime(
 
     const ensureReadableTopic = (topic: string, operation: "subscribe" | "query") =>
       isReservedTopic(topic) && topic !== VIEW_SERVER_HEALTH_TOPIC
-        ? Effect.fail(unauthorized(topic, operation))
+        ? Effect.fail(unauthorizedSystemTopic(topic, operation))
         : Effect.void;
 
     const authorizeQuery = (topic: string, operation: "subscribe" | "query", payload: unknown) =>
@@ -170,7 +171,7 @@ export function makeViewServerRuntime(
       transport: AuthorizationContext["transport"],
     ) {
       if (isReservedTopic(topic) && transport !== "internal") {
-        return yield* Effect.fail(invalidPublish(topic, "Cannot publish to reserved topics"));
+        return yield* Effect.fail(unauthorizedSystemTopic(topic, "publish"));
       }
       yield* ensureRuntimeOpen("publish", topic);
       yield* authorizePublish(topic, "publish", row, transport);
@@ -201,7 +202,7 @@ export function makeViewServerRuntime(
       transport: AuthorizationContext["transport"],
     ) {
       if (isReservedTopic(topic) && transport !== "internal") {
-        return yield* Effect.fail(invalidPublish(topic, "Cannot publish to reserved topics"));
+        return yield* Effect.fail(unauthorizedSystemTopic(topic, "delta-publish"));
       }
       yield* ensureRuntimeOpen("delta-publish", topic);
       yield* authorizePublish(topic, "delta-publish", patch, transport);
@@ -232,7 +233,7 @@ export function makeViewServerRuntime(
       transport: AuthorizationContext["transport"],
     ) {
       if (isReservedTopic(topic) && transport !== "internal") {
-        return yield* Effect.fail(invalidPublish(topic, "Cannot publish to reserved topics"));
+        return yield* Effect.fail(unauthorizedSystemTopic(topic, "delete"));
       }
       yield* ensureRuntimeOpen("delete", topic);
       yield* authorizePublish(topic, "delete", id, transport);
@@ -391,10 +392,7 @@ function validateRuntimeQuery(
       query.limit === undefined ? { ...query, limit: limits.maxPageSize } : query;
     if (limitedQuery.limit !== undefined && limitedQuery.limit > limits.maxPageSize) {
       return yield* Effect.fail(
-        invalidQuery(
-          topic,
-          `Query limit ${limitedQuery.limit} exceeds maxPageSize ${limits.maxPageSize}`,
-        ),
+        queryLimitExceeded(topic, "maxPageSize", limits.maxPageSize, limitedQuery.limit),
       );
     }
     if (isRuntimeGroupedQuery(limitedQuery)) {
@@ -403,17 +401,16 @@ function validateRuntimeQuery(
     const filterStats = runtimeFilterStats(limitedQuery.where);
     if (filterStats.depth > limits.maxFilterDepth) {
       return yield* Effect.fail(
-        invalidQuery(
-          topic,
-          `Query filter depth ${filterStats.depth} exceeds maxFilterDepth ${limits.maxFilterDepth}`,
-        ),
+        queryLimitExceeded(topic, "maxFilterDepth", limits.maxFilterDepth, filterStats.depth),
       );
     }
     if (filterStats.conditions > limits.maxFilterConditions) {
       return yield* Effect.fail(
-        invalidQuery(
+        queryLimitExceeded(
           topic,
-          `Query filter conditions ${filterStats.conditions} exceeds maxFilterConditions ${limits.maxFilterConditions}`,
+          "maxFilterConditions",
+          limits.maxFilterConditions,
+          filterStats.conditions,
         ),
       );
     }
@@ -432,19 +429,18 @@ function validateGroupedQueryLimits(
   return Effect.fnUntraced(function* () {
     if (query.groupBy.length > limits.maxGroupByFields) {
       return yield* Effect.fail(
-        invalidQuery(
+        queryLimitExceeded(
           topic,
-          `Query groupBy field count ${query.groupBy.length} exceeds maxGroupByFields ${limits.maxGroupByFields}`,
+          "maxGroupByFields",
+          limits.maxGroupByFields,
+          query.groupBy.length,
         ),
       );
     }
     const aggregateCount = Object.keys(query.aggregates).length;
     if (aggregateCount > limits.maxAggregateCount) {
       return yield* Effect.fail(
-        invalidQuery(
-          topic,
-          `Query aggregate count ${aggregateCount} exceeds maxAggregateCount ${limits.maxAggregateCount}`,
-        ),
+        queryLimitExceeded(topic, "maxAggregateCount", limits.maxAggregateCount, aggregateCount),
       );
     }
   })();

@@ -63,6 +63,9 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 27: Benchmark profile registry added for CI smoke, dev-fast, rc-1m,
       10M soak, grouped-heavy, active-plan-startup, and chDB overlap profiles with
       list/run commands, artifact profile metadata, and CI summary coverage gaps.
+- [x] Task 29: Error taxonomy contract covers explicit public error tags,
+      RPC schema roundtrip, subscription retry actions, system-topic/query-limit
+      runtime failures, and browser AsyncResult failure rendering.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
 - [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [x] Task 39: chDB SQL compiler contract tests and internal compiler module.
