@@ -5,7 +5,6 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import type * as Cause from "effect/Cause";
 import type * as Scope from "effect/Scope";
 import type { TopicConfig } from "../config/index.ts";
 import { literalStringFieldsForSchema } from "../config/index.ts";
@@ -25,30 +24,23 @@ import type {
   RuntimeGroupedQuery,
   RuntimeRawQuery,
   RuntimeRow,
-  LiveQueryStatusEvent,
   SnapshotEvent,
   SubscriptionEvent,
 } from "../protocol/index.ts";
-import type {
-  SnapshotBackend,
-  SnapshotBackendHealth,
-  SnapshotBackendResult,
-} from "../snapshot/index.ts";
+import type { SnapshotBackend, SnapshotBackendHealth } from "../snapshot/index.ts";
 import { createMemorySnapshotBackend } from "../snapshot/index.ts";
 import {
-  activeRawPlanKey,
-  estimateActiveRawPlanIndexBytes,
   estimateActiveRawPlanIndexBytesEffect,
   makeActiveRawPlanEffect,
-  makeActiveRawViewFromPlan,
   stableStringify,
   type ActiveRawPlan,
-  type ActiveRawView,
-  type ActiveRawViewChange,
 } from "./active-view.ts";
-import { MutationLog, type MutationLogEntry, type WorkerVersion } from "./mutation-log.ts";
+import { ActivePlanCoordinator, type ActivePlanBuildSnapshot } from "./active-plan-coordinator.ts";
+import type { ActiveRawViewChange } from "./active-view.ts";
+import { makeFanoutQueue } from "./fanout-queue.ts";
+import { type MutationLogEntry, type WorkerVersion } from "./mutation-log.ts";
+import { MutationStore, type MutationStoreChange } from "./mutation-store.ts";
 import {
-  changedFields,
   collectDependencyFields,
   diffVisibleRows,
   executeGroupedQueryEffect,
@@ -57,8 +49,13 @@ import {
   matchesFilter,
   type QueryExecutionResult,
   rowKeyForMemoryQuery,
-  rowId,
 } from "./query-engine.ts";
+import { makeSnapshotReconciler } from "./snapshot-reconciler.ts";
+import {
+  SubscriptionRegistry,
+  type ActiveSubscription,
+  type ShutdownSubscription,
+} from "./subscription-registry.ts";
 
 export type TopicWorkerMetrics = {
   readonly rows: number;
@@ -108,53 +105,10 @@ export type TopicWorkerCore = {
   readonly shutdown: Effect.Effect<void, ViewServerError>;
 };
 
-type ActiveSubscription = {
-  readonly requestId: string;
-  readonly query: RuntimeQuery;
-  readonly dependencyFields: ReadonlySet<string>;
-  readonly queue: Queue.Queue<
-    SubscriptionEvent<readonly RuntimeRow[]>,
-    ViewServerError | Cause.Done
-  >;
-  lastRows: readonly RuntimeRow[];
-  lastTotalRows: number;
-  lastVersion: WorkerVersion;
-  pendingLagVersions: bigint;
-  activeView?: ActiveRawView | undefined;
-  activePlanKey?: string | undefined;
-  activePlanBuildKey?: string | undefined;
-  activePlanFallback?: boolean | undefined;
-  activePlanAutoBuildSkipped?: boolean | undefined;
-  dirtyTargetVersion?: WorkerVersion | undefined;
-  groupedRefreshScheduled?: boolean | undefined;
-  groupedRefreshInFlight?: boolean | undefined;
-};
-
 type MaterializedSubscriptionChange = {
   readonly operations: readonly DeltaOperation<RuntimeRow>[];
   readonly nextRows?: readonly RuntimeRow[] | undefined;
   readonly totalRows: number;
-};
-
-type ActiveRawPlanEntry = {
-  readonly plan: ActiveRawPlan;
-  readonly buildMs: number;
-  subscribers: number;
-};
-
-type ActivePlanBuildEntry = {
-  readonly key: string;
-  readonly query: RuntimeRawQuery;
-  readonly requestIds: Set<string>;
-  state: "queued" | "building";
-};
-
-type ActivePlanBuildSnapshot = {
-  readonly key: string;
-  readonly query: RuntimeRawQuery;
-  readonly rows: readonly RuntimeRow[];
-  readonly version: WorkerVersion;
-  readonly remainingEstimatedBytes: number | undefined;
 };
 
 type GroupedRefreshSnapshot = {
@@ -172,11 +126,6 @@ type GroupedRefreshEntry = {
   readonly requestIds: Set<string>;
   readonly pendingRequestIds: Set<string>;
   state: "queued" | "running";
-};
-
-type ShutdownSubscription = {
-  readonly requestId: string;
-  readonly queue: ActiveSubscription["queue"];
 };
 
 type ShutdownState = {
@@ -214,6 +163,7 @@ export function makeTopicWorkerCore(
     const backend = options.snapshotBackend ?? createMemorySnapshotBackend();
     const maxQueueDepth = options.maxQueueDepth ?? 100_000;
     const deltaCoalescing = options.deltaCoalescing ?? true;
+    const fanoutQueue = makeFanoutQueue({ maxQueueDepth, deltaCoalescing });
     const maxActivePlans = options.maxActivePlans;
     const maxActivePlanEstimatedBytes = options.maxActivePlanEstimatedBytes;
     const activePlanAutoBuildMaxRows = options.activePlanAutoBuildMaxRows ?? 1_000_000;
@@ -221,20 +171,28 @@ export function makeTopicWorkerCore(
     const activePlanBuildChunkSize = options.activePlanBuildChunkSize;
     const groupedRefreshDebounceMs = Math.max(0, options.groupedRefreshDebounceMs ?? 50);
     const groupedRefreshChunkSize = options.groupedRefreshChunkSize;
-    const mutationLog = new MutationLog(options.mutationLogSize ?? 10_000);
+    const mutationStore = new MutationStore({
+      idField,
+      mutationLogSize: options.mutationLogSize ?? 10_000,
+    });
     const gate = yield* Semaphore.make(1);
     const activePlanBuildQueue = yield* Queue.unbounded<string>();
     const scope = yield* Effect.scope;
     const activePlanBuildFibers: Fiber.Fiber<void, unknown>[] = [];
     const groupedRefreshFibers = new Set<Fiber.Fiber<void, unknown>>();
-    const subscriptions = new Map<string, ActiveSubscription>();
-    const activePlans = new Map<string, ActiveRawPlanEntry>();
-    const activePlanBuilds = new Map<string, ActivePlanBuildEntry>();
+    const subscriptions = new SubscriptionRegistry({
+      releaseActivePlan: (key) => releaseActivePlan(key),
+      releaseActivePlanBuild: (key, requestId) => releaseActivePlanBuild(key, requestId),
+      releaseGroupedRefresh: (requestId) => releaseGroupedRefresh(requestId),
+    });
+    const activePlanCoordinator = new ActivePlanCoordinator({
+      idField,
+      literalStringFields,
+      maxActivePlans,
+      maxActivePlanEstimatedBytes,
+      activePlanAutoBuildMaxRows,
+    });
     const groupedRefreshes = new Map<string, GroupedRefreshEntry>();
-    let rows: RuntimeRow[] = [];
-    let idIndex = new Map<string | number, number>();
-    let version: WorkerVersion = 0n;
-    let lastActivePlanBuildMs = 0;
     let status: TopicWorkerMetrics["status"] = "ready";
 
     const decodeRow = (input: unknown) =>
@@ -249,49 +207,34 @@ export function makeTopicWorkerCore(
         : Effect.fail(missingTopicId(topic, idField));
     };
 
-    const replaceIndexes = () => {
-      idIndex = new Map();
-      rows.forEach((row, index) => {
-        const id = row[idField];
-        if (typeof id === "string" || typeof id === "number") {
-          idIndex.set(id, index);
-        }
-      });
-    };
-
     const memoryQuery = (query: RuntimeQuery) =>
-      executeMemoryQuery(rows, query, idField, { literalStringFields });
+      executeMemoryQuery(mutationStore.rows(), query, idField, { literalStringFields });
+
+    const snapshotReconciler = makeSnapshotReconciler({
+      topic,
+      idField,
+      backend,
+      rows: () => mutationStore.rows(),
+      canReplay: (fromVersion, toVersion) => mutationStore.canReplay(fromVersion, toVersion),
+      replayRowsFrom: (baseRows, fromVersion, toVersion) =>
+        mutationStore.replayRowsFrom(baseRows, fromVersion, toVersion),
+      queryOptions: { literalStringFields },
+    });
 
     const fencedQuery = Effect.fn("view-server.worker.snapshot.query")(function* (
       query: RuntimeQuery,
     ) {
       yield* Effect.annotateCurrentSpan({
         "view_server.topic": topic,
-        "view_server.worker_version": version.toString(),
+        "view_server.worker_version": mutationStore.version().toString(),
       });
-      const targetVersion = version;
-      const memorySnapshot = () => ({
-        ...memoryQuery(query),
-        backendVersion: undefined,
-      });
-      const result = yield* backend.snapshot({ query, targetVersion }).pipe(
-        Effect.tap(() =>
-          Effect.sync(() => {
-            if (status === "degraded") {
-              status = "ready";
-            }
-          }),
-        ),
-        Effect.map(
-          (candidate) => reconcileSnapshot(candidate, query, targetVersion) ?? memorySnapshot(),
-        ),
-        Effect.catchTag("SnapshotBackendFailed", () =>
-          Effect.sync(() => {
-            status = "degraded";
-            return memorySnapshot();
-          }),
-        ),
-      );
+      const targetVersion = mutationStore.version();
+      const result = yield* snapshotReconciler.query({ query, targetVersion });
+      if (result.backendFailed) {
+        status = "degraded";
+      } else if (status === "degraded") {
+        status = "ready";
+      }
       yield* Effect.annotateCurrentSpan({
         "view_server.rows": result.rows.length,
         "view_server.total_rows": result.totalRows,
@@ -302,35 +245,6 @@ export function makeTopicWorkerCore(
       });
       return { result, targetVersion };
     });
-
-    const reconcileSnapshot = (
-      candidate: SnapshotBackendResult,
-      query: RuntimeQuery,
-      targetVersion: WorkerVersion,
-    ): (QueryExecutionResult & { readonly backendVersion: WorkerVersion }) | undefined => {
-      if (candidate.backendVersion === targetVersion) {
-        return candidate;
-      }
-      if (candidate.backendVersion > targetVersion) {
-        return undefined;
-      }
-      if (
-        candidate.replayRows === undefined ||
-        !mutationLog.coversExclusive(candidate.backendVersion, targetVersion)
-      ) {
-        return undefined;
-      }
-      const replayedRows = replayMutations(
-        candidate.replayRows,
-        mutationLog.entriesExclusive(candidate.backendVersion, targetVersion),
-        idField,
-      );
-      const replayed = executeMemoryQuery(replayedRows, query, idField, { literalStringFields });
-      return {
-        ...replayed,
-        backendVersion: candidate.backendVersion,
-      };
-    };
 
     const fencedSnapshot = Effect.fn("view-server.worker.snapshot.emit")(function* (
       requestId: string,
@@ -368,9 +282,7 @@ export function makeTopicWorkerCore(
       toVersion: WorkerVersion,
       mutation: MutationLogEntry,
     ) {
-      for (const entry of activePlans.values()) {
-        entry.plan.applyMutation(mutation);
-      }
+      activePlanCoordinator.applyMutation(mutation);
       yield* Effect.forEach(
         subscriptions.values(),
         (subscription) => {
@@ -414,7 +326,7 @@ export function makeTopicWorkerCore(
             }
             subscription.lastTotalRows = materialized.totalRows;
             subscription.lastVersion = toVersion;
-            const offered = yield* offerDelta(subscription, event);
+            const offered = yield* fanoutQueue.offerDelta(subscription.queue, subscription, event);
             if (!offered) {
               removeSubscription(subscription.requestId);
               yield* Queue.fail(
@@ -500,7 +412,7 @@ export function makeTopicWorkerCore(
         subscription.query,
         mutation,
       );
-      const offered = yield* offerStatusEvent(subscription, {
+      const offered = yield* fanoutQueue.offerStatus(subscription.queue, subscription, {
         type: "status",
         requestId: subscription.requestId,
         status: "stale",
@@ -527,7 +439,7 @@ export function makeTopicWorkerCore(
       targetVersion: WorkerVersion,
     ) {
       subscription.dirtyTargetVersion = targetVersion;
-      const offered = yield* offerStatusEvent(subscription, {
+      const offered = yield* fanoutQueue.offerStatus(subscription.queue, subscription, {
         type: "status",
         requestId: subscription.requestId,
         status: "stale",
@@ -701,8 +613,8 @@ export function makeTopicWorkerCore(
         requestId: requestIds[0] ?? key,
         requestIds,
         query: entry.query,
-        rows: rows.slice(),
-        version,
+        rows: mutationStore.rows().slice(),
+        version: mutationStore.version(),
       };
     }
 
@@ -815,80 +727,14 @@ export function makeTopicWorkerCore(
       return total;
     });
 
-    const activePlanStats = (): Pick<
-      TopicWorkerMetrics,
-      | "activePlanCount"
-      | "activeViewCount"
-      | "activePlanRows"
-      | "activePlanIndexEstimatedBytes"
-      | "activePlanBuildQueueDepth"
-      | "activePlanBuildingCount"
-      | "activePlanPendingCount"
-      | "activePlanBuildMs"
-      | "activePlanBuildMsTotal"
-      | "activePlanBuildMsMax"
-      | "activePlanFallbackCount"
-      | "activePlanAutoBuildSkippedCount"
-    > => {
-      let activeViewCount = 0;
-      let activePlanRows = 0;
-      let activePlanIndexEstimatedBytes = 0;
-      let activePlanBuildMsTotal = 0;
-      let activePlanBuildMsMax = 0;
-      let activePlanFallbackCount = 0;
-      let activePlanBuildQueueDepth = 0;
-      let activePlanBuildingCount = 0;
-      let activePlanPendingCount = 0;
-      let activePlanAutoBuildSkippedCount = 0;
-      for (const entry of activePlans.values()) {
-        activeViewCount += entry.subscribers;
-        activePlanRows += entry.plan.totalRows();
-        activePlanIndexEstimatedBytes += entry.plan.estimatedIndexBytes();
-        activePlanBuildMsTotal += entry.buildMs;
-        activePlanBuildMsMax = Math.max(activePlanBuildMsMax, entry.buildMs);
-      }
-      for (const build of activePlanBuilds.values()) {
-        if (build.state === "queued") {
-          activePlanBuildQueueDepth++;
-        } else {
-          activePlanBuildingCount++;
-        }
-        activePlanPendingCount += build.requestIds.size;
-      }
-      for (const subscription of subscriptions.values()) {
-        if (subscription.activePlanFallback === true) {
-          activePlanFallbackCount++;
-        }
-        if (subscription.activePlanAutoBuildSkipped === true) {
-          activePlanAutoBuildSkippedCount++;
-        }
-      }
-      return {
-        activePlanCount: activePlans.size,
-        activeViewCount,
-        activePlanRows,
-        activePlanIndexEstimatedBytes,
-        activePlanBuildQueueDepth,
-        activePlanBuildingCount,
-        activePlanPendingCount,
-        activePlanBuildMs: lastActivePlanBuildMs,
-        activePlanBuildMsTotal,
-        activePlanBuildMsMax,
-        activePlanFallbackCount,
-        activePlanAutoBuildSkippedCount,
-      };
-    };
+    const activePlanStats = () => activePlanCoordinator.metrics(subscriptions.values());
 
     const subscriptionLagStats = Effect.fnUntraced(function* () {
       let maxLag = 0n;
       let totalLag = 0n;
       for (const subscription of subscriptions.values()) {
         const depth = yield* Queue.size(subscription.queue);
-        const queuedLag = subscriptionLagVersionsForQueueDepth(
-          depth,
-          subscription.pendingLagVersions,
-          deltaCoalescing,
-        );
+        const queuedLag = fanoutQueue.lagForDepth(depth, subscription.pendingLagVersions);
         const dirtyLag =
           subscription.dirtyTargetVersion !== undefined &&
           subscription.dirtyTargetVersion > subscription.lastVersion
@@ -906,12 +752,6 @@ export function makeTopicWorkerCore(
       };
     });
 
-    const wouldExceedQueueLimit = (depth: number): boolean =>
-      maxQueueDepth <= 0 ? depth >= 0 : depth >= maxQueueDepth;
-
-    const isQueueAtLimit = (depth: number): boolean =>
-      maxQueueDepth <= 0 ? depth > 0 : depth >= maxQueueDepth;
-
     const backendHealth = (): Effect.Effect<SnapshotBackendHealth> =>
       backend.health ?? Effect.succeed({ status: "stopped" });
 
@@ -923,217 +763,33 @@ export function makeTopicWorkerCore(
       snapshotHealth.status === "degraded" || snapshotHealth.status === "restarting"
         ? "degraded"
         : status === "ready" &&
-            (isQueueAtLimit(depth) ||
+            (fanoutQueue.isQueueAtLimit(depth) ||
               planStats.activePlanFallbackCount > 0 ||
               planStats.activePlanAutoBuildSkippedCount > 0 ||
-              isActivePlanLimitNear(planStats))
+              activePlanCoordinator.isLimitNear(planStats))
           ? "degraded"
           : status;
-
-    const offerDelta = Effect.fnUntraced(function* (
-      subscription: ActiveSubscription,
-      event: DeltaEvent<readonly RuntimeRow[]>,
-    ) {
-      if (!deltaCoalescing) {
-        const depth = yield* Queue.size(subscription.queue);
-        if (wouldExceedQueueLimit(depth)) {
-          return false;
-        }
-        yield* Queue.offer(subscription.queue, event);
-        return true;
-      }
-      const queued = yield* drainQueuedEvents(subscription.queue);
-      const queuedPrefix = queued.filter((queuedEvent) => queuedEvent.type !== "delta");
-      const queuedDeltas = queued.filter((queuedEvent) => queuedEvent.type === "delta");
-      const nextQueued = coalescedQueueEvents(queuedPrefix, queuedDeltas, event);
-      if (
-        nextQueued.length > maxQueueDepth ||
-        (queuedDeltas.length === 0 && wouldExceedQueueLimit(queuedPrefix.length))
-      ) {
-        yield* offerQueuedEvents(subscription.queue, queued);
-        return false;
-      }
-      const coalesced = nextQueued[nextQueued.length - 1];
-      if (
-        coalesced?.type === "delta" &&
-        maxQueueDepth > 0 &&
-        deltaVersionSpan(coalesced) > BigInt(maxQueueDepth)
-      ) {
-        yield* offerQueuedEvents(subscription.queue, queued);
-        return false;
-      }
-      yield* offerQueuedEvents(subscription.queue, nextQueued);
-      subscription.pendingLagVersions = queueEventsVersionLag(nextQueued);
-      return true;
-    });
-
-    const offerStatusEvent = Effect.fnUntraced(function* (
-      subscription: ActiveSubscription,
-      event: LiveQueryStatusEvent,
-    ) {
-      const queued = yield* drainQueuedEvents(subscription.queue);
-      const nextQueued = [...queued.filter((queuedEvent) => queuedEvent.type !== "status"), event];
-      if (nextQueued.length > maxQueueDepth) {
-        yield* offerQueuedEvents(subscription.queue, queued);
-        return false;
-      }
-      yield* offerQueuedEvents(subscription.queue, nextQueued);
-      subscription.pendingLagVersions = queueEventsVersionLag(nextQueued);
-      return true;
-    });
-
-    const offerSnapshotEvent = Effect.fnUntraced(function* (
-      subscription: ActiveSubscription,
-      event: SnapshotEvent<readonly RuntimeRow[]>,
-    ) {
-      const queued = yield* drainQueuedEvents(subscription.queue);
-      const nextQueued = [...queued.filter((queuedEvent) => queuedEvent.type !== "status"), event];
-      if (nextQueued.length > maxQueueDepth) {
-        yield* offerQueuedEvents(subscription.queue, queued);
-        return false;
-      }
-      yield* offerQueuedEvents(subscription.queue, nextQueued);
-      subscription.pendingLagVersions = queueEventsVersionLag(nextQueued);
-      return true;
-    });
-
-    const drainQueuedEvents = Effect.fnUntraced(function* (
-      queue: Queue.Queue<SubscriptionEvent<readonly RuntimeRow[]>, ViewServerError | Cause.Done>,
-    ) {
-      const events: SubscriptionEvent<readonly RuntimeRow[]>[] = [];
-      let polling = true;
-      while (polling) {
-        const next = yield* Queue.poll(queue);
-        if (Option.isSome(next)) {
-          events.push(next.value);
-        } else {
-          polling = false;
-        }
-      }
-      return events;
-    });
-
-    const offerQueuedEvents = Effect.fnUntraced(function* (
-      queue: Queue.Queue<SubscriptionEvent<readonly RuntimeRow[]>, ViewServerError | Cause.Done>,
-      events: readonly SubscriptionEvent<readonly RuntimeRow[]>[],
-    ) {
-      yield* Effect.forEach(events, (event) => Queue.offer(queue, event), { discard: true });
-    });
 
     const prepareActivePlan = Effect.fnUntraced(function* (subscription: ActiveSubscription) {
       if (isGroupedQuery(subscription.query)) {
         return;
       }
-      const rawQuery = subscription.query;
-      const key = activeRawPlanKey(rawQuery, idField);
-      const existing = activePlans.get(key);
-      if (existing !== undefined) {
-        activateSubscriptionWithPlan(subscription, key, rawQuery, existing);
-        return;
+      const decision = activePlanCoordinator.prepareSubscription(
+        subscription,
+        subscription.query,
+        mutationStore.rows().length,
+      );
+      if (decision.type === "queued") {
+        yield* Queue.offer(activePlanBuildQueue, decision.key);
       }
-      subscription.activePlanFallback = false;
-      subscription.activePlanAutoBuildSkipped = false;
-      const pending = activePlanBuilds.get(key);
-      if (pending !== undefined) {
-        pending.requestIds.add(subscription.requestId);
-        subscription.activePlanBuildKey = key;
-        return;
-      }
-      if (rows.length > activePlanAutoBuildMaxRows) {
-        subscription.activePlanAutoBuildSkipped = true;
-        subscription.activePlanBuildKey = undefined;
-        return;
-      }
-      if (wouldExceedActivePlanCountLimitForNewBuild()) {
-        subscription.activePlanFallback = true;
-        subscription.activePlanBuildKey = undefined;
-        return;
-      }
-      const remainingBytes = activePlanEstimatedBytesRemaining();
-      if (
-        remainingBytes !== undefined &&
-        estimateActiveRawPlanIndexBytes([], rawQuery, { literalStringFields }) > remainingBytes
-      ) {
-        subscription.activePlanFallback = true;
-        subscription.activePlanBuildKey = undefined;
-        return;
-      }
-      const build: ActivePlanBuildEntry = {
-        key,
-        query: rawQuery,
-        requestIds: new Set([subscription.requestId]),
-        state: "queued",
-      };
-      activePlanBuilds.set(key, build);
-      subscription.activePlanBuildKey = key;
-      yield* Queue.offer(activePlanBuildQueue, key);
     });
 
-    const activePlanEstimatedBytes = (): number => {
-      let total = 0;
-      for (const entry of activePlans.values()) {
-        total += entry.plan.estimatedIndexBytes();
-      }
-      return total;
-    };
-
-    const activePlanEstimatedBytesRemaining = (): number | undefined =>
-      maxActivePlanEstimatedBytes === undefined
-        ? undefined
-        : maxActivePlanEstimatedBytes - activePlanEstimatedBytes();
-
-    const wouldExceedActivePlanCountLimitForNewBuild = (): boolean =>
-      maxActivePlans !== undefined && activePlans.size + activePlanBuilds.size >= maxActivePlans;
-
-    const wouldExceedActivePlanCountLimitOnInstall = (): boolean =>
-      maxActivePlans !== undefined && activePlans.size + activePlanBuilds.size > maxActivePlans;
-
-    const wouldExceedActivePlanEstimatedBytesLimit = (newPlanBytes: number): boolean =>
-      maxActivePlanEstimatedBytes !== undefined &&
-      activePlanEstimatedBytes() + newPlanBytes > maxActivePlanEstimatedBytes;
-
-    const isActivePlanLimitNear = (planStats: ReturnType<typeof activePlanStats>): boolean =>
-      isNearLimit(
-        planStats.activePlanCount +
-          planStats.activePlanBuildQueueDepth +
-          planStats.activePlanBuildingCount,
-        maxActivePlans,
-      ) || isNearLimit(planStats.activePlanIndexEstimatedBytes, maxActivePlanEstimatedBytes);
-
     const activePlanBuildSnapshot = (key: string): ActivePlanBuildSnapshot | undefined => {
-      const build = activePlanBuilds.get(key);
-      if (build === undefined || build.state === "building") {
-        return undefined;
-      }
-      if (build.requestIds.size === 0) {
-        activePlanBuilds.delete(key);
-        return undefined;
-      }
-      build.state = "building";
-      return {
-        key: build.key,
-        query: build.query,
-        rows: rows.slice(),
-        version,
-        remainingEstimatedBytes: activePlanEstimatedBytesRemaining(),
-      };
-    };
-
-    const activateSubscriptionWithPlan = (
-      subscription: ActiveSubscription,
-      key: string,
-      query: RuntimeRawQuery,
-      entry: ActiveRawPlanEntry,
-    ): void => {
-      if (subscription.activePlanKey === key) {
-        return;
-      }
-      entry.subscribers++;
-      subscription.activePlanKey = key;
-      subscription.activePlanBuildKey = undefined;
-      subscription.activePlanFallback = false;
-      subscription.activePlanAutoBuildSkipped = false;
-      subscription.activeView = makeActiveRawViewFromPlan(entry.plan, query, idField);
+      return activePlanCoordinator.beginBuildSnapshot({
+        key,
+        rows: mutationStore.rows().slice(),
+        version: mutationStore.version(),
+      });
     };
 
     const refreshSubscriptionSnapshot = Effect.fnUntraced(function* (
@@ -1155,7 +811,7 @@ export function makeTopicWorkerCore(
       subscription.lastTotalRows = result.totalRows;
       subscription.lastVersion = targetVersion;
       subscription.dirtyTargetVersion = undefined;
-      const offered = yield* offerSnapshotEvent(subscription, event);
+      const offered = yield* fanoutQueue.offerSnapshot(subscription.queue, subscription, event);
       if (!offered) {
         removeSubscription(subscription.requestId);
         yield* Queue.fail(
@@ -1169,24 +825,13 @@ export function makeTopicWorkerCore(
     });
 
     const discardActivePlanBuild = Effect.fnUntraced(function* (key: string) {
-      const build = activePlanBuilds.get(key);
-      if (build === undefined) {
-        return;
-      }
-      activePlanBuilds.delete(key);
-      for (const requestId of build.requestIds) {
-        const subscription = subscriptions.get(requestId);
-        if (subscription?.activePlanBuildKey === key) {
-          subscription.activePlanBuildKey = undefined;
-          subscription.activePlanFallback = true;
-          if (subscription.dirtyTargetVersion !== undefined) {
-            yield* refreshSubscriptionSnapshot(
-              subscription,
-              memoryQuery(subscription.query),
-              version,
-            );
-          }
-        }
+      const dirtySubscriptions = activePlanCoordinator.discardBuild(key, subscriptions.values());
+      for (const subscription of dirtySubscriptions) {
+        yield* refreshSubscriptionSnapshot(
+          subscription,
+          memoryQuery(subscription.query),
+          mutationStore.version(),
+        );
       }
     });
 
@@ -1195,64 +840,43 @@ export function makeTopicWorkerCore(
       plan: ActiveRawPlan,
       buildMs: number,
     ) {
-      const build = activePlanBuilds.get(snapshot.key);
-      if (build === undefined || build.requestIds.size === 0) {
-        activePlanBuilds.delete(snapshot.key);
-        return;
-      }
       if (!catchUpActivePlan(plan, snapshot.version)) {
         yield* discardActivePlanBuild(snapshot.key);
         return;
       }
-      if (
-        wouldExceedActivePlanCountLimitOnInstall() ||
-        wouldExceedActivePlanEstimatedBytesLimit(plan.estimatedIndexBytes())
-      ) {
+      if (!activePlanCoordinator.canInstallPlan(plan)) {
         yield* discardActivePlanBuild(snapshot.key);
         return;
       }
-      const entry: ActiveRawPlanEntry = {
+      const dirtySubscriptions = activePlanCoordinator.installBuild({
+        snapshot,
         plan,
         buildMs,
-        subscribers: 0,
-      };
-      activePlans.set(snapshot.key, entry);
-      lastActivePlanBuildMs = buildMs;
-      activePlanBuilds.delete(snapshot.key);
-      for (const requestId of build.requestIds) {
-        const subscription = subscriptions.get(requestId);
-        if (
-          subscription === undefined ||
-          subscription.activePlanBuildKey !== snapshot.key ||
-          isGroupedQuery(subscription.query)
-        ) {
-          continue;
-        }
-        activateSubscriptionWithPlan(subscription, snapshot.key, subscription.query, entry);
-        if (
-          subscription.dirtyTargetVersion !== undefined &&
-          subscription.activeView !== undefined
-        ) {
+        subscriptions: subscriptions.values(),
+        isGrouped: isGroupedQuery,
+      });
+      for (const subscription of dirtySubscriptions) {
+        if (subscription.activeView !== undefined) {
           yield* refreshSubscriptionSnapshot(
             subscription,
             subscription.activeView.snapshot(),
-            version,
+            mutationStore.version(),
           );
         }
-      }
-      if (entry.subscribers <= 0) {
-        activePlans.delete(snapshot.key);
       }
     });
 
     const catchUpActivePlan = (plan: ActiveRawPlan, builtVersion: WorkerVersion): boolean => {
-      if (builtVersion === version) {
+      if (builtVersion === mutationStore.version()) {
         return true;
       }
-      if (builtVersion > version || !mutationLog.coversExclusive(builtVersion, version)) {
+      if (
+        builtVersion > mutationStore.version() ||
+        !mutationStore.canReplay(builtVersion, mutationStore.version())
+      ) {
         return false;
       }
-      for (const entry of mutationLog.entriesExclusive(builtVersion, version)) {
+      for (const entry of mutationStore.entriesExclusive(builtVersion, mutationStore.version())) {
         plan.applyMutation(entry);
       }
       return true;
@@ -1307,31 +931,11 @@ export function makeTopicWorkerCore(
     );
 
     const releaseActivePlan = (key: string | undefined): void => {
-      if (key === undefined) {
-        return;
-      }
-      const entry = activePlans.get(key);
-      if (entry === undefined) {
-        return;
-      }
-      entry.subscribers--;
-      if (entry.subscribers <= 0) {
-        activePlans.delete(key);
-      }
+      activePlanCoordinator.releasePlan(key);
     };
 
     const releaseActivePlanBuild = (key: string | undefined, requestId: string): void => {
-      if (key === undefined) {
-        return;
-      }
-      const build = activePlanBuilds.get(key);
-      if (build === undefined) {
-        return;
-      }
-      build.requestIds.delete(requestId);
-      if (build.requestIds.size === 0) {
-        activePlanBuilds.delete(key);
-      }
+      activePlanCoordinator.releaseBuild(key, requestId);
     };
 
     const releaseGroupedRefresh = (requestId: string): void => {
@@ -1349,41 +953,21 @@ export function makeTopicWorkerCore(
     };
 
     const removeSubscription = (requestId: string): ActiveSubscription | undefined => {
-      const subscription = subscriptions.get(requestId);
-      if (subscription === undefined) {
-        return undefined;
-      }
-      subscriptions.delete(requestId);
-      releaseActivePlan(subscription.activePlanKey);
-      releaseActivePlanBuild(subscription.activePlanBuildKey, requestId);
-      releaseGroupedRefresh(requestId);
-      subscription.pendingLagVersions = 0n;
-      subscription.dirtyTargetVersion = undefined;
-      subscription.activePlanAutoBuildSkipped = false;
-      subscription.groupedRefreshScheduled = false;
-      subscription.groupedRefreshInFlight = false;
-      return subscription;
+      return subscriptions.remove(requestId);
     };
 
     const removeSubscriptionForQueue = (
       requestId: string,
       queue: ActiveSubscription["queue"],
     ): ActiveSubscription | undefined => {
-      const subscription = subscriptions.get(requestId);
-      return subscription?.queue === queue ? removeSubscription(requestId) : undefined;
+      return subscriptions.removeForQueue(requestId, queue);
     };
 
-    const appendMutation = Effect.fnUntraced(function* (
-      mutation: Omit<MutationLogEntry, "version">,
-    ) {
-      const fromVersion = version;
-      version = version + 1n;
-      const entry: MutationLogEntry = { ...mutation, version };
-      mutationLog.append(entry);
+    const persistAndFanoutMutation = Effect.fnUntraced(function* (change: MutationStoreChange) {
       yield* backend
         .applyBatch({
-          mutations: [entry],
-          highestVersion: version,
+          mutations: [change.entry],
+          highestVersion: change.toVersion,
         })
         .pipe(
           Effect.tap(() =>
@@ -1400,40 +984,18 @@ export function makeTopicWorkerCore(
           ),
           Effect.forkIn(scope),
         );
-      yield* fanout(fromVersion, version, entry);
+      yield* fanout(change.fromVersion, change.toVersion, change.entry);
     });
 
     const publishDecoded = Effect.fnUntraced(function* (decoded: RuntimeRow) {
       const id = yield* ensureId(decoded);
-      const index = idIndex.get(id);
-      if (index === undefined) {
-        rows.push({ ...decoded });
-        idIndex.set(id, rows.length - 1);
-        yield* appendMutation({
-          kind: "insert",
-          id,
-          after: { ...decoded },
-          changedFields: new Set(Object.keys(decoded)),
-        });
-        return;
-      }
-
-      const before = rows[index];
-      const after = { ...decoded };
-      rows[index] = after;
-      yield* appendMutation({
-        kind: "update",
-        id,
-        before,
-        after,
-        changedFields: changedFields(before, after),
-      });
+      yield* persistAndFanoutMutation(mutationStore.publish(decoded, id));
     });
 
     const worker: TopicWorkerCore = {
       topic,
       idField,
-      version: Effect.sync(() => version),
+      version: Effect.sync(() => mutationStore.version()),
       metrics: Effect.fn("view-server.worker.metrics")(function* () {
         const depth = yield* queueDepth();
         const lagStats = yield* subscriptionLagStats();
@@ -1441,12 +1003,12 @@ export function makeTopicWorkerCore(
         const snapshotHealth = yield* backendHealth();
         yield* Effect.annotateCurrentSpan({
           "view_server.topic": topic,
-          "view_server.rows": rows.length,
+          "view_server.rows": mutationStore.rows().length,
         });
         return {
-          rows: rows.length,
+          rows: mutationStore.rows().length,
           subscribers: subscriptions.size,
-          version,
+          version: mutationStore.version(),
           queueDepth: depth,
           maxSubscriptionLagVersions: lagStats.maxSubscriptionLagVersions,
           totalSubscriptionLagVersions: lagStats.totalSubscriptionLagVersions,
@@ -1477,7 +1039,7 @@ export function makeTopicWorkerCore(
           Effect.fn("view-server.worker.query")(function* () {
             yield* Effect.annotateCurrentSpan({
               "view_server.topic": topic,
-              "view_server.worker_version": version.toString(),
+              "view_server.worker_version": mutationStore.version().toString(),
             });
             const { result, targetVersion } = yield* fencedQuery(query);
             yield* Effect.annotateCurrentSpan({
@@ -1501,7 +1063,7 @@ export function makeTopicWorkerCore(
                 "view_server.request_id": requestId,
                 "view_server.subscription_id": requestId,
                 "view_server.topic": topic,
-                "view_server.worker_version": version.toString(),
+                "view_server.worker_version": mutationStore.version().toString(),
               });
               const { snapshot, targetVersion, totalRows } = yield* fencedSnapshot(
                 requestId,
@@ -1521,7 +1083,7 @@ export function makeTopicWorkerCore(
               if (previous !== undefined) {
                 yield* Queue.end(previous.queue);
               }
-              subscriptions.set(requestId, active);
+              subscriptions.replace(active);
               yield* Queue.offer(queue, snapshot);
               yield* prepareActivePlan(active);
               yield* Effect.addFinalizer(() =>
@@ -1570,71 +1132,40 @@ export function makeTopicWorkerCore(
             if (typeof id !== "string" && typeof id !== "number") {
               return yield* Effect.fail(missingTopicId(topic, idField));
             }
-            const index = idIndex.get(id);
-            if (index === undefined) {
+            const before = mutationStore.rowById(id);
+            if (before === undefined) {
               return yield* Effect.fail(
                 invalidPublish(topic, `Cannot deltaPublish missing row ${String(id)}`),
               );
             }
-            const before = rows[index];
             const merged = { ...before, ...patch };
             const decoded = yield* decodeRow(merged);
-            rows[index] = decoded;
-            yield* appendMutation({
-              kind: "update",
-              id,
-              before,
-              after: decoded,
-              changedFields: changedFields(before, decoded),
-            });
+            const change = mutationStore.updateExisting(id, decoded);
+            if (change !== undefined) {
+              yield* persistAndFanoutMutation(change);
+            }
           })(),
         ),
 
       deleteById: (id) =>
         gate.withPermit(
           Effect.fnUntraced(function* () {
-            const index = idIndex.get(id);
-            if (index === undefined) {
-              return;
+            const change = mutationStore.deleteById(id);
+            if (change !== undefined) {
+              yield* persistAndFanoutMutation(change);
             }
-            const before = rows[index];
-            const lastIndex = rows.length - 1;
-            const last = rows[lastIndex];
-            rows.pop();
-            idIndex.delete(id);
-            if (index !== lastIndex && last !== undefined) {
-              rows[index] = last;
-              const lastId = last[idField];
-              if (typeof lastId === "string" || typeof lastId === "number") {
-                idIndex.set(lastId, index);
-              }
-            }
-            yield* appendMutation({
-              kind: "delete",
-              id,
-              before,
-              changedFields: new Set(Object.keys(before)),
-            });
           })(),
         ),
 
-      getRowsForTest: Effect.sync(() => rows.map((row) => ({ ...row }))),
+      getRowsForTest: Effect.sync(() => mutationStore.snapshotRows()),
 
       shutdown: Effect.fn("view-server.worker.shutdown")(function* () {
         const shutdownState = yield* gate.withPermit(
           Effect.sync((): ShutdownState => {
             status = "stopping";
-            const shutdownSubscriptions = Array.from(
-              subscriptions.values(),
-              (subscription): ShutdownSubscription => ({
-                requestId: subscription.requestId,
-                queue: subscription.queue,
-              }),
-            );
+            const shutdownSubscriptions = subscriptions.clearForShutdown();
             const backgroundFibers = [...activePlanBuildFibers, ...groupedRefreshFibers];
-            subscriptions.clear();
-            activePlans.clear();
-            activePlanBuilds.clear();
+            activePlanCoordinator.clear();
             groupedRefreshes.clear();
             groupedRefreshFibers.clear();
             return {
@@ -1645,7 +1176,7 @@ export function makeTopicWorkerCore(
         );
         yield* Effect.annotateCurrentSpan({
           "view_server.topic": topic,
-          "view_server.worker_version": version.toString(),
+          "view_server.worker_version": mutationStore.version().toString(),
         });
         yield* Effect.forEach(
           shutdownState.subscriptions,
@@ -1663,16 +1194,17 @@ export function makeTopicWorkerCore(
       })(),
     };
 
+    const initialRows: RuntimeRow[] = [];
     for (const row of options.initialRows ?? []) {
       const decoded = yield* decodeRow(row);
-      rows.push(decoded);
+      initialRows.push(decoded);
     }
-    replaceIndexes();
+    mutationStore.loadInitialRows(initialRows);
     yield* backend.init({
       topic,
       idField,
-      rows: rows.map((row) => ({ row, version })),
-      version,
+      rows: mutationStore.rows().map((row) => ({ row, version: mutationStore.version() })),
+      version: mutationStore.version(),
       literalStringFields,
     });
     const buildFibers = yield* Effect.forEach(
@@ -1703,111 +1235,7 @@ function groupedRefreshKey(query: RuntimeGroupedQuery): string {
   return stableStringify(query);
 }
 
-function coalescedQueueEvents(
-  prefix: readonly SubscriptionEvent<readonly RuntimeRow[]>[],
-  queuedDeltas: readonly DeltaEvent<readonly RuntimeRow[]>[],
-  nextDelta: DeltaEvent<readonly RuntimeRow[]>,
-): readonly SubscriptionEvent<readonly RuntimeRow[]>[] {
-  return [...prefix, coalesceDeltas([...queuedDeltas, nextDelta])];
-}
-
-function coalesceDeltas(
-  deltas: readonly DeltaEvent<readonly RuntimeRow[]>[],
-): DeltaEvent<readonly RuntimeRow[]> {
-  const first = deltas[0];
-  const last = deltas[deltas.length - 1];
-  if (first === undefined || last === undefined) {
-    throw new Error("Cannot coalesce an empty delta list");
-  }
-  return {
-    type: "delta",
-    requestId: last.requestId,
-    ops: deltas.flatMap((delta) => delta.ops),
-    meta: {
-      fromVersion: first.meta.fromVersion,
-      toVersion: last.meta.toVersion,
-      totalRows: last.meta.totalRows,
-      serverTime: last.meta.serverTime,
-    },
-  };
-}
-
-function deltaVersionSpan(delta: DeltaEvent<readonly RuntimeRow[]>): bigint {
-  return BigInt(delta.meta.toVersion) - BigInt(delta.meta.fromVersion);
-}
-
-function queueEventsVersionLag(
-  events: readonly SubscriptionEvent<readonly RuntimeRow[]>[],
-): bigint {
-  return events.reduce(
-    (total, event) => (event.type === "delta" ? total + deltaVersionSpan(event) : total),
-    0n,
-  );
-}
-
-export function subscriptionLagVersionsForQueueDepth(
-  queueDepth: number,
-  pendingLagVersions: bigint,
-  deltaCoalescing: boolean,
-): bigint {
-  if (queueDepth <= 0) {
-    return 0n;
-  }
-  return deltaCoalescing ? pendingLagVersions : BigInt(queueDepth);
-}
-
 function bigintMetricNumber(value: bigint): number {
   const max = BigInt(Number.MAX_SAFE_INTEGER);
   return value > max ? Number.MAX_SAFE_INTEGER : Number(value);
-}
-
-function isNearLimit(value: number, limit: number | undefined): boolean {
-  return limit !== undefined && limit > 0 && value / limit >= 0.8;
-}
-
-function replayMutations(
-  baseRows: readonly RuntimeRow[],
-  entries: readonly MutationLogEntry[],
-  idField: string,
-): readonly RuntimeRow[] {
-  const replayRows = baseRows.map((row) => ({ ...row }));
-  const replayIndex = new Map<string | number, number>();
-  replayRows.forEach((row, index) => {
-    replayIndex.set(rowId(row, idField), index);
-  });
-  for (const entry of entries) {
-    if (entry.kind === "delete") {
-      removeReplayRow(replayRows, replayIndex, entry.id, idField);
-      continue;
-    }
-    const next = { ...entry.after };
-    const index = replayIndex.get(entry.id);
-    if (index === undefined) {
-      replayRows.push(next);
-      replayIndex.set(entry.id, replayRows.length - 1);
-    } else {
-      replayRows[index] = next;
-    }
-  }
-  return replayRows;
-}
-
-function removeReplayRow(
-  rows: RuntimeRow[],
-  indexById: Map<string | number, number>,
-  id: string | number,
-  idField: string,
-): void {
-  const index = indexById.get(id);
-  if (index === undefined) {
-    return;
-  }
-  const lastIndex = rows.length - 1;
-  const last = rows[lastIndex];
-  rows.pop();
-  indexById.delete(id);
-  if (index !== lastIndex && last !== undefined) {
-    rows[index] = last;
-    indexById.set(rowId(last, idField), index);
-  }
 }

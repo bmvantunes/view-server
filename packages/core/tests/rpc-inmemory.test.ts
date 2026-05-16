@@ -26,9 +26,9 @@ import type {
 } from "../src/protocol/index.ts";
 import { ViewServerHandlersLive, ViewServerRpcs } from "../src/rpc/index.ts";
 import { makeViewServerRuntime, ViewServerRuntime } from "../src/server/index.ts";
+import { subscriptionLagVersionsForQueueDepth } from "../src/worker/fanout-queue.ts";
 import {
   makeTopicWorkerCore,
-  subscriptionLagVersionsForQueueDepth,
   type TopicWorkerCore,
   type TopicWorkerMetrics,
 } from "../src/worker/topic-worker-core.ts";
