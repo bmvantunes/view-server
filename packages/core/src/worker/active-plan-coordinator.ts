@@ -1,6 +1,6 @@
 import type { RuntimeQuery, RuntimeRawQuery, RuntimeRow } from "../protocol/index.ts";
+import { activeRawPlanKey } from "./active-raw-plan-key.ts";
 import {
-  activeRawPlanKey,
   estimateActiveRawPlanIndexBytes,
   makeActiveRawViewFromPlan,
   type ActiveRawPlan,

@@ -1,6 +1,6 @@
-import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
 import type { RuntimeRawQuery, RuntimeRow, RuntimeRowKey } from "../protocol/index.ts";
+import { activeRawPlanKey } from "./active-raw-plan-key.ts";
 import {
   estimateActiveSortedIndexBytes,
   makeActiveSortedIndex,
@@ -21,6 +21,8 @@ import {
   type QueryExecutionResult,
 } from "./query-engine.ts";
 import type { MutationLogEntry } from "./mutation-log.ts";
+
+export { activeRawPlanKey, stableStringify } from "./active-raw-plan-key.ts";
 
 export type ActiveRawViewOptions = QueryExecutionOptions & {
   readonly sortedIndex?: ActiveSortedIndexKind | undefined;
@@ -247,16 +249,6 @@ export function makeActiveRawViewFromPlan(
   idField: string,
 ): ActiveRawView {
   return new PlanBackedActiveRawView(plan, query, idField, false);
-}
-
-export function activeRawPlanKey(query: RuntimeRawQuery, idField: string): string {
-  // This key intentionally omits schema-derived execution options such as
-  // literalStringFields. ActiveRawPlan caches must stay scoped to one topic
-  // worker because a topic has exactly one schema/options set.
-  return stableStringify({
-    orderBy: rawQueryOrderBy(query, idField),
-    where: query.where ?? null,
-  });
 }
 
 class IncrementalRawPlan implements ActiveRawPlan {
@@ -628,26 +620,6 @@ function rowFromMap(
 
 function normalizedBuildChunkSize(chunkSize: number | undefined): number {
   return Math.max(1, Math.trunc(chunkSize ?? 8_192));
-}
-
-export function stableStringify(value: unknown): string {
-  if (typeof value === "bigint") {
-    return `{"$bigint":${JSON.stringify(value.toString())}}`;
-  }
-  if (BigDecimal.isBigDecimal(value)) {
-    return `{"$bigdecimal":${JSON.stringify(BigDecimal.format(value))}}`;
-  }
-  if (value === undefined) {
-    return '{"$undefined":true}';
-  }
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map(stableStringify).join(",")}]`;
-  }
-  const entries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right));
-  return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`).join(",")}}`;
 }
 
 function sameIds(left: readonly RuntimeRowKey[], right: readonly RuntimeRowKey[]): boolean {

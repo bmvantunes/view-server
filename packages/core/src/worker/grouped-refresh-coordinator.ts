@@ -1,5 +1,5 @@
 import type { RuntimeGroupedQuery, RuntimeRow } from "../protocol/index.ts";
-import { stableStringify } from "./active-view.ts";
+import { stableStringify } from "./active-raw-plan-key.ts";
 import type { WorkerVersion } from "./mutation-log.ts";
 import { isGroupedQuery, type QueryExecutionResult } from "./query-engine.ts";
 import type { ActiveSubscription } from "./subscription-registry.ts";

@@ -73,6 +73,9 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 33: ChdbHealth contract normalizes public child health fields,
       serializes through Schema, preserves restart semantics, and proves /health
       plus health-topic parity for ready/degraded chDB state.
+- [x] Task 34: ActiveRawPlanKey module owns topic-scoped where/order keying,
+      excludes projection/window fields, documents literalStringFields scope, and
+      covers key sharing, key differences, and topic-local strictness behavior.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
 - [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [x] Task 39: chDB SQL compiler contract tests and internal compiler module.
