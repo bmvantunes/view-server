@@ -524,6 +524,8 @@ Tests / acceptance:
 
 Priority: P1
 
+Status: Done in `packages/core/src/snapshot/chdb-sql-mirror.ts`.
+
 Problem:
 
 The SQL compiler and table mirror are part of the database seam. They should be independent from worker orchestration.

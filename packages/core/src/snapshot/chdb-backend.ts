@@ -19,17 +19,9 @@ import {
   encodeRuntimeQuery,
   encodeVersionedRow,
 } from "./chdb-query-worker-codec.ts";
-import {
-  BIG_DECIMAL_COLUMN_TYPE,
-  columnSqlType,
-  compileQuerySql,
-  quoteIdentifier,
-  type Column,
-  type ColumnType,
-} from "./chdb-sql-compiler.ts";
+import { compileQuerySql } from "./chdb-sql-compiler.ts";
+import { ChdbSqlMirror } from "./chdb-sql-mirror.ts";
 
-const DELETED_COLUMN = "__view_server_deleted";
-const VERSION_COLUMN = "__view_server_version";
 const JSON_FORMAT_SETTINGS =
   "SETTINGS output_format_json_quote_decimals=1, output_format_json_quote_64bit_integers=1";
 const WORKER_INIT_CHUNK_SIZE = 25_000;
@@ -413,23 +405,23 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
 class ChdbSnapshotBackend implements SnapshotBackend {
   readonly #session: Session;
   readonly #tableName: string;
+  readonly #mirror: ChdbSqlMirror;
   #groupedRefreshWorker: ChdbGroupedSnapshotWorkerClient | undefined;
   #topic = "";
   #idField = "id";
-  #columns: readonly Column[] = [];
   #backendVersion = 0n;
   #literalStringFields: ReadonlySet<string> = new Set();
   #pendingByVersion = new Map<WorkerVersion, MutationLogEntry>();
   #flushScheduled = false;
   #closed = false;
   #lastFlushError: unknown;
-  #tableReady = false;
   #sessionReleased = false;
 
   constructor(options: ChdbSnapshotBackendOptions = {}) {
     this.#session = acquireSharedSession();
     this.#tableName = `topic_rows_${nextBackendTableId}`;
     nextBackendTableId++;
+    this.#mirror = new ChdbSqlMirror(this.#session, this.#tableName);
     if (options.groupedRefreshWorker !== false) {
       this.#groupedRefreshWorker = new ChdbGroupedSnapshotWorkerClient(options);
     }
@@ -482,19 +474,11 @@ class ChdbSnapshotBackend implements SnapshotBackend {
           backend.#flushScheduled = false;
           backend.#closed = false;
           backend.#lastFlushError = undefined;
-          backend.#tableReady = false;
-          backend.#columns = inferColumns(initialRows, backend.#idField);
-          backend.#session.query(`DROP TABLE IF EXISTS ${quoteIdentifier(backend.#tableName)}`);
-          if (backend.#columns.length > 0) {
-            backend.#createTable();
-            backend.#insertEvents(
-              initialRows.map((row) => ({
-                row,
-                deleted: false,
-                version: args.version,
-              })),
-            );
-          }
+          backend.#mirror.init({
+            idField: backend.#idField,
+            rows: initialRows,
+            version: args.version,
+          });
         },
         catch: (error) => snapshotBackendFailed(args.topic, error),
       });
@@ -559,7 +543,7 @@ class ChdbSnapshotBackend implements SnapshotBackend {
           if (backend.#lastFlushError !== undefined) {
             throw backend.#lastFlushError;
           }
-          if (!backend.#tableReady) {
+          if (!backend.#mirror.tableReady) {
             return {
               rows: [],
               totalRows: 0,
@@ -569,9 +553,9 @@ class ChdbSnapshotBackend implements SnapshotBackend {
           const sql = compileQuerySql(
             args.query,
             backend.#idField,
-            backend.#columns,
+            backend.#mirror.columns,
             backend.#literalStringFields,
-            backend.#tableName,
+            backend.#mirror.tableName,
           );
           const rows = parseJsonEachRow(
             backend.#session.query(withJsonSettings(sql.rowsSql), "JSONEachRow"),
@@ -631,7 +615,7 @@ class ChdbSnapshotBackend implements SnapshotBackend {
       }
       yield* Effect.sync(() => {
         try {
-          backend.#session.query(`DROP TABLE IF EXISTS ${quoteIdentifier(backend.#tableName)}`);
+          backend.#mirror.drop();
         } finally {
           backend.#releaseSession();
         }
@@ -699,71 +683,7 @@ class ChdbSnapshotBackend implements SnapshotBackend {
   }
 
   #applyMutations(mutations: readonly MutationLogEntry[]): void {
-    const events = mutations.flatMap((mutation) => mutationToEvent(mutation, this.#idField));
-    if (events.length === 0) {
-      return;
-    }
-    this.#ensureColumns(events.map((event) => event.row));
-    this.#insertEvents(events);
-  }
-
-  #ensureColumns(rows: readonly RuntimeRow[]): void {
-    const nextColumns = mergeColumns(this.#columns, inferColumns(rows, this.#idField));
-    const addedColumns = nextColumns.filter(
-      (column) => !this.#columns.some((existing) => existing.name === column.name),
-    );
-    const nullableColumns = nextColumns.filter((column) =>
-      this.#columns.some(
-        (existing) => existing.name === column.name && !existing.nullable && column.nullable,
-      ),
-    );
-    if (!this.#tableReady) {
-      this.#columns = nextColumns;
-      this.#createTable();
-      return;
-    }
-    for (const column of addedColumns) {
-      this.#session.query(
-        `ALTER TABLE ${quoteIdentifier(this.#tableName)} ADD COLUMN ${quoteIdentifier(column.name)} ${columnSqlType(column)}`,
-      );
-    }
-    for (const column of nullableColumns) {
-      this.#session.query(
-        `ALTER TABLE ${quoteIdentifier(this.#tableName)} MODIFY COLUMN ${quoteIdentifier(column.name)} ${columnSqlType(column)}`,
-      );
-    }
-    this.#columns = nextColumns;
-  }
-
-  #createTable(): void {
-    this.#session.query(
-      `CREATE TABLE ${quoteIdentifier(this.#tableName)} (${[
-        ...this.#columns.map(
-          (column) => `${quoteIdentifier(column.name)} ${columnSqlType(column)}`,
-        ),
-        `${DELETED_COLUMN} UInt8`,
-        `${VERSION_COLUMN} Int64`,
-      ].join(", ")}) ENGINE = Memory`,
-    );
-    this.#tableReady = true;
-  }
-
-  #insertEvents(events: readonly ChdbEvent[]): void {
-    if (events.length === 0) {
-      return;
-    }
-    const payload = events
-      .map((event) =>
-        JSON.stringify({
-          ...projectSerializableRow(event.row, this.#columns),
-          [DELETED_COLUMN]: event.deleted ? 1 : 0,
-          [VERSION_COLUMN]: event.version.toString(),
-        }),
-      )
-      .join("\n");
-    this.#session.query(
-      `INSERT INTO ${quoteIdentifier(this.#tableName)} FORMAT JSONEachRow ${payload}`,
-    );
+    this.#mirror.applyMutations(mutations);
   }
 
   #releaseSession(): void {
@@ -797,139 +717,6 @@ function releaseSharedSession(session: Session): void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-type ChdbEvent = {
-  readonly row: RuntimeRow;
-  readonly deleted: boolean;
-  readonly version: WorkerVersion;
-};
-
-function mutationToEvent(mutation: MutationLogEntry, idField: string): readonly ChdbEvent[] {
-  if (mutation.kind === "delete") {
-    return [
-      {
-        row: {
-          ...mutation.before,
-          [idField]: mutation.id,
-        },
-        deleted: true,
-        version: mutation.version,
-      },
-    ];
-  }
-  if (mutation.after === undefined) {
-    return [];
-  }
-  return [
-    {
-      row: mutation.after,
-      deleted: false,
-      version: mutation.version,
-    },
-  ];
-}
-
-function mergeColumns(
-  existingColumns: readonly Column[],
-  incomingColumns: readonly Column[],
-): readonly Column[] {
-  const columns = [...existingColumns];
-  for (const column of incomingColumns) {
-    const index = columns.findIndex((existing) => existing.name === column.name);
-    if (index < 0) {
-      columns.push(column);
-      continue;
-    }
-    const existing = columns[index];
-    if (existing !== undefined && column.nullable && !existing.nullable) {
-      columns[index] = { ...existing, nullable: true };
-    }
-  }
-  return columns;
-}
-
-function inferColumns(rows: readonly RuntimeRow[], idField: string): readonly Column[] {
-  const valuesByName = new Map<string, unknown[]>();
-  const addValue = (name: string, value: unknown) => {
-    const values = valuesByName.get(name);
-    if (values === undefined) {
-      valuesByName.set(name, [value]);
-    } else {
-      values.push(value);
-    }
-  };
-  for (const row of rows) {
-    if (row[idField] !== undefined) {
-      addValue(idField, row[idField]);
-    }
-    for (const [key, value] of Object.entries(row)) {
-      if (isUserColumn(key) && isScalar(value)) {
-        addValue(key, value);
-      }
-    }
-  }
-  return Array.from(valuesByName).map(([name, values]) => ({
-    name,
-    type: inferColumnType(values),
-    nullable: values.some((value) => value == null),
-  }));
-}
-
-function isUserColumn(name: string): boolean {
-  return name !== DELETED_COLUMN && name !== VERSION_COLUMN;
-}
-
-function inferColumnType(values: readonly unknown[]): ColumnType {
-  const nonNullValues = values.filter((value) => value != null);
-  if (nonNullValues.some((value) => typeof value === "string")) {
-    return "String";
-  }
-  if (nonNullValues.some(BigDecimal.isBigDecimal)) {
-    return BIG_DECIMAL_COLUMN_TYPE;
-  }
-  if (nonNullValues.some((value) => typeof value === "boolean")) {
-    return "UInt8";
-  }
-  if (nonNullValues.some((value) => typeof value === "number")) {
-    return "Float64";
-  }
-  return "Int64";
-}
-
-function projectSerializableRow(row: RuntimeRow, columns: readonly Column[]): RuntimeRow {
-  const projected: RuntimeRow = {};
-  for (const column of columns) {
-    const value = row[column.name];
-    projected[column.name] =
-      value == null && column.nullable
-        ? null
-        : BigDecimal.isBigDecimal(value)
-          ? BigDecimal.format(value)
-          : typeof value === "bigint"
-            ? value.toString()
-            : typeof value === "boolean"
-              ? value
-                ? 1
-                : 0
-              : (value ?? defaultValue(column.type));
-  }
-  return projected;
-}
-
-function defaultValue(type: ColumnType): string | number {
-  return type === "String" ? "" : 0;
-}
-
-function isScalar(value: unknown): boolean {
-  return (
-    value == null ||
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "bigint" ||
-    typeof value === "boolean" ||
-    BigDecimal.isBigDecimal(value)
-  );
 }
 
 function withJsonSettings(sql: string): string {
