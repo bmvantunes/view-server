@@ -39,6 +39,7 @@ type ColumnType = "String" | "Float64" | "Int64" | "UInt8" | BigDecimalColumnTyp
 type Column = {
   readonly name: string;
   readonly type: ColumnType;
+  readonly nullable: boolean;
 };
 
 const DELETED_COLUMN = "__view_server_deleted";
@@ -936,6 +937,11 @@ class ChdbSnapshotBackend implements SnapshotBackend {
     const addedColumns = nextColumns.filter(
       (column) => !this.#columns.some((existing) => existing.name === column.name),
     );
+    const nullableColumns = nextColumns.filter((column) =>
+      this.#columns.some(
+        (existing) => existing.name === column.name && !existing.nullable && column.nullable,
+      ),
+    );
     if (!this.#tableReady) {
       this.#columns = nextColumns;
       this.#createTable();
@@ -943,7 +949,12 @@ class ChdbSnapshotBackend implements SnapshotBackend {
     }
     for (const column of addedColumns) {
       this.#session.query(
-        `ALTER TABLE ${quoteIdentifier(this.#tableName)} ADD COLUMN ${quoteIdentifier(column.name)} ${column.type}`,
+        `ALTER TABLE ${quoteIdentifier(this.#tableName)} ADD COLUMN ${quoteIdentifier(column.name)} ${columnSqlType(column)}`,
+      );
+    }
+    for (const column of nullableColumns) {
+      this.#session.query(
+        `ALTER TABLE ${quoteIdentifier(this.#tableName)} MODIFY COLUMN ${quoteIdentifier(column.name)} ${columnSqlType(column)}`,
       );
     }
     this.#columns = nextColumns;
@@ -952,7 +963,9 @@ class ChdbSnapshotBackend implements SnapshotBackend {
   #createTable(): void {
     this.#session.query(
       `CREATE TABLE ${quoteIdentifier(this.#tableName)} (${[
-        ...this.#columns.map((column) => `${quoteIdentifier(column.name)} ${column.type}`),
+        ...this.#columns.map(
+          (column) => `${quoteIdentifier(column.name)} ${columnSqlType(column)}`,
+        ),
         `${DELETED_COLUMN} UInt8`,
         `${VERSION_COLUMN} Int64`,
       ].join(", ")}) ENGINE = Memory`,
@@ -1084,8 +1097,14 @@ function mergeColumns(
 ): readonly Column[] {
   const columns = [...existingColumns];
   for (const column of incomingColumns) {
-    if (!columns.some((existing) => existing.name === column.name)) {
+    const index = columns.findIndex((existing) => existing.name === column.name);
+    if (index < 0) {
       columns.push(column);
+      continue;
+    }
+    const existing = columns[index];
+    if (existing !== undefined && column.nullable && !existing.nullable) {
+      columns[index] = { ...existing, nullable: true };
     }
   }
   return columns;
@@ -1114,6 +1133,7 @@ function inferColumns(rows: readonly RuntimeRow[], idField: string): readonly Co
   return Array.from(valuesByName).map(([name, values]) => ({
     name,
     type: inferColumnType(values),
+    nullable: values.some((value) => value == null),
   }));
 }
 
@@ -1122,16 +1142,17 @@ function isUserColumn(name: string): boolean {
 }
 
 function inferColumnType(values: readonly unknown[]): ColumnType {
-  if (values.some((value) => typeof value === "string")) {
+  const nonNullValues = values.filter((value) => value != null);
+  if (nonNullValues.some((value) => typeof value === "string")) {
     return "String";
   }
-  if (values.some(BigDecimal.isBigDecimal)) {
+  if (nonNullValues.some(BigDecimal.isBigDecimal)) {
     return BIG_DECIMAL_COLUMN_TYPE;
   }
-  if (values.some((value) => typeof value === "boolean")) {
+  if (nonNullValues.some((value) => typeof value === "boolean")) {
     return "UInt8";
   }
-  if (values.some((value) => typeof value === "number")) {
+  if (nonNullValues.some((value) => typeof value === "number")) {
     return "Float64";
   }
   return "Int64";
@@ -1141,21 +1162,28 @@ function projectSerializableRow(row: RuntimeRow, columns: readonly Column[]): Ru
   const projected: RuntimeRow = {};
   for (const column of columns) {
     const value = row[column.name];
-    projected[column.name] = BigDecimal.isBigDecimal(value)
-      ? BigDecimal.format(value)
-      : typeof value === "bigint"
-        ? value.toString()
-        : typeof value === "boolean"
-          ? value
-            ? 1
-            : 0
-          : (value ?? defaultValue(column.type));
+    projected[column.name] =
+      value == null && column.nullable
+        ? null
+        : BigDecimal.isBigDecimal(value)
+          ? BigDecimal.format(value)
+          : typeof value === "bigint"
+            ? value.toString()
+            : typeof value === "boolean"
+              ? value
+                ? 1
+                : 0
+              : (value ?? defaultValue(column.type));
   }
   return projected;
 }
 
 function defaultValue(type: ColumnType): string | number {
   return type === "String" ? "" : 0;
+}
+
+function columnSqlType(column: Column): string {
+  return column.nullable ? `Nullable(${column.type})` : column.type;
 }
 
 function isScalar(value: unknown): boolean {
@@ -1323,12 +1351,18 @@ function compileOrderBy(
     return "";
   }
   const columnTypes = new Map(columns.map((column) => [column.name, column.type]));
+  const nullableColumns = new Set(
+    columns.filter((column) => column.nullable).map((column) => column.name),
+  );
   return `ORDER BY ${orderBy
     .map((order) => {
       const field = quoteIdentifier(order.field);
       const expression =
         columnTypes.get(order.field) === "String" ? `lower(toString(${field}))` : field;
-      return `${expression} ${order.direction.toUpperCase()}`;
+      const nullOrdering = nullableColumns.has(order.field)
+        ? `isNull(${field}) ${order.direction === "asc" ? "DESC" : "ASC"}, `
+        : "";
+      return `${nullOrdering}${expression} ${order.direction.toUpperCase()}`;
     })
     .join(", ")}`;
 }
@@ -1445,6 +1479,9 @@ function isGroupedQuery(query: RuntimeQuery): query is RuntimeGroupedQuery {
 }
 
 function compileValue(value: unknown): string {
+  if (value == null) {
+    return "NULL";
+  }
   if (BigDecimal.isBigDecimal(value)) {
     return `toDecimal256(${literal(BigDecimal.format(value))}, ${BIG_DECIMAL_SCALE})`;
   }

@@ -49,6 +49,7 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 19: RuntimeHealthProjection extraction.
 - [x] Task 32: RuntimeShutdownController extraction.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
+- [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [ ] Task 1: Topic Worker State Machine Split. Partially complete through the modules above;
       GroupedRefreshCoordinator, RuntimeHealthProjection, and RuntimeShutdownController are now
       extracted, but the broader state-machine checklist still needs the remaining modules and
