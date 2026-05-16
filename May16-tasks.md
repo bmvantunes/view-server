@@ -33,6 +33,26 @@ Performance-sensitive tasks must also add or update a benchmark and record befor
 
 Production/runtime-sensitive tasks must include a fault or soak test when feasible.
 
+## Implementation Status
+
+Use this section as the auditable progress ledger. A task is marked complete only when it has
+focused tests and the relevant integration tests still pass.
+
+- [x] Task 5: Active Plan Admission Policy.
+- [x] Task 28: Capacity Soak Runner visibility for 10M progress and subscription setup heartbeats.
+- [x] Task 2: MutationStore extraction.
+- [x] Task 3: SnapshotReconciler extraction.
+- [x] Task 4: ActivePlanCoordinator extraction.
+- [x] Task 6: FanoutQueue extraction.
+- [x] Task 7: SubscriptionRegistry extraction.
+- [x] Task 8: GroupedRefreshCoordinator extraction.
+- [x] Task 19: RuntimeHealthProjection extraction.
+- [x] Task 32: RuntimeShutdownController extraction.
+- [ ] Task 1: Topic Worker State Machine Split. Partially complete through the modules above;
+      GroupedRefreshCoordinator, RuntimeHealthProjection, and RuntimeShutdownController are now
+      extracted, but the broader state-machine checklist still needs the remaining modules and
+      parity/fault hardening below.
+
 ## Updated 10M Soak Status
 
 The latest 10M soak evidence says raw query scanning is not the blocker anymore, and the first

@@ -21,7 +21,6 @@ import type {
   DeltaEvent,
   QueryResponse,
   RuntimeQuery,
-  RuntimeGroupedQuery,
   RuntimeRawQuery,
   RuntimeRow,
   SnapshotEvent,
@@ -32,12 +31,15 @@ import { createMemorySnapshotBackend } from "../snapshot/index.ts";
 import {
   estimateActiveRawPlanIndexBytesEffect,
   makeActiveRawPlanEffect,
-  stableStringify,
   type ActiveRawPlan,
 } from "./active-view.ts";
 import { ActivePlanCoordinator, type ActivePlanBuildSnapshot } from "./active-plan-coordinator.ts";
 import type { ActiveRawViewChange } from "./active-view.ts";
 import { makeFanoutQueue } from "./fanout-queue.ts";
+import {
+  GroupedRefreshCoordinator,
+  type GroupedRefreshSnapshot,
+} from "./grouped-refresh-coordinator.ts";
 import { type MutationLogEntry, type WorkerVersion } from "./mutation-log.ts";
 import { MutationStore, type MutationStoreChange } from "./mutation-store.ts";
 import {
@@ -111,23 +113,6 @@ type MaterializedSubscriptionChange = {
   readonly totalRows: number;
 };
 
-type GroupedRefreshSnapshot = {
-  readonly key: string;
-  readonly requestId: string;
-  readonly requestIds: readonly string[];
-  readonly query: RuntimeGroupedQuery;
-  readonly rows: readonly RuntimeRow[];
-  readonly version: WorkerVersion;
-};
-
-type GroupedRefreshEntry = {
-  readonly key: string;
-  readonly query: RuntimeGroupedQuery;
-  readonly requestIds: Set<string>;
-  readonly pendingRequestIds: Set<string>;
-  state: "queued" | "running";
-};
-
 type ShutdownState = {
   readonly subscriptions: readonly ShutdownSubscription[];
   readonly backgroundFibers: readonly Fiber.Fiber<void, unknown>[];
@@ -192,7 +177,7 @@ export function makeTopicWorkerCore(
       maxActivePlanEstimatedBytes,
       activePlanAutoBuildMaxRows,
     });
-    const groupedRefreshes = new Map<string, GroupedRefreshEntry>();
+    const groupedRefreshCoordinator = new GroupedRefreshCoordinator();
     let status: TopicWorkerMetrics["status"] = "ready";
 
     const decodeRow = (input: unknown) =>
@@ -468,35 +453,16 @@ export function makeTopicWorkerCore(
     function scheduleGroupedSubscriptionRefresh(requestId: string): Effect.Effect<void> {
       return Effect.gen(function* () {
         const subscription = subscriptions.get(requestId);
-        if (
-          subscription === undefined ||
-          subscription.groupedRefreshScheduled === true ||
-          subscription.groupedRefreshInFlight === true ||
-          !isGroupedQuery(subscription.query)
-        ) {
+        if (subscription === undefined) {
           return;
         }
-        const key = groupedRefreshKey(subscription.query);
-        subscription.groupedRefreshScheduled = true;
-        const existing = groupedRefreshes.get(key);
-        if (existing !== undefined) {
-          if (existing.state === "queued") {
-            existing.requestIds.add(requestId);
-          } else {
-            existing.pendingRequestIds.add(requestId);
-          }
+        const decision = groupedRefreshCoordinator.schedule(subscription);
+        if (decision.type === "none") {
           return;
         }
-        groupedRefreshes.set(key, {
-          key,
-          query: subscription.query,
-          requestIds: new Set([requestId]),
-          pendingRequestIds: new Set(),
-          state: "queued",
-        });
         let fiber: Fiber.Fiber<void, unknown> | undefined;
-        const trackedRefresh = runGroupedRefresh(key).pipe(
-          Effect.catchCause(() => gate.withPermit(resetGroupedRefresh(key))),
+        const trackedRefresh = runGroupedRefresh(decision.key).pipe(
+          Effect.catchCause(() => gate.withPermit(resetGroupedRefresh(decision.key))),
           Effect.ensuring(
             Effect.sync(() => {
               if (fiber !== undefined) {
@@ -516,7 +482,16 @@ export function makeTopicWorkerCore(
       if (groupedRefreshDebounceMs > 0) {
         yield* Effect.sleep(`${groupedRefreshDebounceMs} millis`);
       }
-      const snapshot = yield* gate.withPermit(Effect.sync(() => beginGroupedRefresh(key)));
+      const snapshot = yield* gate.withPermit(
+        Effect.sync(() =>
+          groupedRefreshCoordinator.begin({
+            key,
+            subscriptions,
+            rows: mutationStore.rows().slice(),
+            version: mutationStore.version(),
+          }),
+        ),
+      );
       if (snapshot === undefined) {
         return;
       }
@@ -582,70 +557,21 @@ export function makeTopicWorkerCore(
       });
     });
 
-    function beginGroupedRefresh(key: string): GroupedRefreshSnapshot | undefined {
-      const entry = groupedRefreshes.get(key);
-      if (entry === undefined || entry.state === "running") {
-        return undefined;
-      }
-      const requestIds = Array.from(entry.requestIds).filter((requestId) => {
-        const subscription = subscriptions.get(requestId);
-        return (
-          subscription !== undefined &&
-          isGroupedQuery(subscription.query) &&
-          subscription.dirtyTargetVersion !== undefined
-        );
-      });
-      entry.requestIds.clear();
-      if (requestIds.length === 0) {
-        groupedRefreshes.delete(key);
-        return undefined;
-      }
-      entry.state = "running";
-      for (const requestId of requestIds) {
-        const subscription = subscriptions.get(requestId);
-        if (subscription !== undefined) {
-          subscription.groupedRefreshScheduled = false;
-          subscription.groupedRefreshInFlight = true;
-        }
-      }
-      return {
-        key,
-        requestId: requestIds[0] ?? key,
-        requestIds,
-        query: entry.query,
-        rows: mutationStore.rows().slice(),
-        version: mutationStore.version(),
-      };
-    }
-
     function installGroupedRefresh(
       snapshot: GroupedRefreshSnapshot,
       result: QueryExecutionResult,
     ): Effect.Effect<void, ViewServerError> {
       return Effect.gen(function* () {
-        const entry = groupedRefreshes.get(snapshot.key);
-        groupedRefreshes.delete(snapshot.key);
-        const reschedule = new Set(entry?.pendingRequestIds ?? []);
-        for (const requestId of snapshot.requestIds) {
-          const subscription = subscriptions.get(requestId);
-          if (subscription === undefined) {
-            continue;
-          }
-          subscription.groupedRefreshInFlight = false;
-          if (!isGroupedQuery(subscription.query)) {
-            continue;
-          }
-          if (
-            subscription.dirtyTargetVersion !== undefined &&
-            subscription.dirtyTargetVersion > snapshot.version
-          ) {
-            reschedule.add(subscription.requestId);
-            continue;
-          }
-          yield* refreshSubscriptionSnapshot(subscription, result, snapshot.version);
+        const install = groupedRefreshCoordinator.install({
+          snapshot,
+          result,
+          subscriptions,
+        });
+        for (const refresh of install.refreshes) {
+          yield* refreshSubscriptionSnapshot(refresh.subscription, refresh.result, refresh.version);
         }
         yield* Effect.forEach(
-          reschedule,
+          install.rescheduleRequestIds,
           (requestId) => {
             const subscription = subscriptions.get(requestId);
             if (subscription === undefined) {
@@ -664,22 +590,8 @@ export function makeTopicWorkerCore(
 
     function resetGroupedRefresh(key: string): Effect.Effect<void> {
       return Effect.gen(function* () {
-        const entry = groupedRefreshes.get(key);
-        groupedRefreshes.delete(key);
-        const requestIds = new Set([
-          ...(entry?.requestIds ?? []),
-          ...(entry?.pendingRequestIds ?? []),
-        ]);
-        for (const requestId of requestIds) {
-          const subscription = subscriptions.get(requestId);
-          if (subscription === undefined) {
-            continue;
-          }
-          subscription.groupedRefreshScheduled = false;
-          subscription.groupedRefreshInFlight = false;
-          if (subscription.dirtyTargetVersion !== undefined) {
-            yield* scheduleGroupedSubscriptionRefresh(requestId);
-          }
+        for (const requestId of groupedRefreshCoordinator.reset({ key, subscriptions })) {
+          yield* scheduleGroupedSubscriptionRefresh(requestId);
         }
       });
     }
@@ -939,17 +851,7 @@ export function makeTopicWorkerCore(
     };
 
     const releaseGroupedRefresh = (requestId: string): void => {
-      for (const [key, entry] of groupedRefreshes) {
-        entry.requestIds.delete(requestId);
-        entry.pendingRequestIds.delete(requestId);
-        if (
-          entry.state === "queued" &&
-          entry.requestIds.size === 0 &&
-          entry.pendingRequestIds.size === 0
-        ) {
-          groupedRefreshes.delete(key);
-        }
-      }
+      groupedRefreshCoordinator.release(requestId);
     };
 
     const removeSubscription = (requestId: string): ActiveSubscription | undefined => {
@@ -1166,7 +1068,7 @@ export function makeTopicWorkerCore(
             const shutdownSubscriptions = subscriptions.clearForShutdown();
             const backgroundFibers = [...activePlanBuildFibers, ...groupedRefreshFibers];
             activePlanCoordinator.clear();
-            groupedRefreshes.clear();
+            groupedRefreshCoordinator.clear();
             groupedRefreshFibers.clear();
             return {
               subscriptions: shutdownSubscriptions,
@@ -1229,10 +1131,6 @@ function hasDependency(
     }
   }
   return false;
-}
-
-function groupedRefreshKey(query: RuntimeGroupedQuery): string {
-  return stableStringify(query);
 }
 
 function bigintMetricNumber(value: bigint): number {
