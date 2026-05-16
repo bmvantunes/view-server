@@ -3,23 +3,15 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import {
-  type AuthorizationContext,
   columnCatalogForTopic,
   type KafkaSourceConfig,
-  isReservedTopic,
   normalizeConfig,
   type NormalizedViewServerConfig,
   type RowObject,
   type ViewServerConfig,
   VIEW_SERVER_HEALTH_TOPIC,
 } from "../config/index.ts";
-import {
-  invalidConfig,
-  missingTopic,
-  unauthorized,
-  unauthorizedSystemTopic,
-  type ViewServerError,
-} from "../errors.ts";
+import { invalidConfig, missingTopic, type ViewServerError } from "../errors.ts";
 import type {
   QueryResponse,
   RuntimeQuery,
@@ -27,6 +19,7 @@ import type {
   SubscriptionEvent,
 } from "../protocol/index.ts";
 import type { KafkaTopicConsumer, KafkaTopicVerifier } from "../kafka/index.ts";
+import { defaultAuthPolicy, type AuthPolicy } from "./auth-policy.ts";
 import { KafkaSourceSupervisor } from "./kafka-source-supervisor.ts";
 import { QueryLimitPolicy } from "./query-limit-policy.ts";
 import {
@@ -68,6 +61,7 @@ export type ViewServerRuntimeOptions = TopicPlacementOptions & {
     | ((source: KafkaSourceConfig<RowObject, string>) => KafkaTopicConsumer)
     | undefined;
   readonly kafkaTopicVerifier?: KafkaTopicVerifier | undefined;
+  readonly authPolicy?: AuthPolicy | undefined;
 };
 
 export function makeViewServerRuntime(
@@ -93,6 +87,7 @@ export function makeViewServerRuntime(
       ]),
     );
     const queryLimitPolicy = QueryLimitPolicy.fromConfig(normalized);
+    const authPolicy = options.authPolicy ?? defaultAuthPolicy(normalized);
     const shutdownController = new RuntimeShutdownController();
 
     const workerFor = (topic: string) => {
@@ -105,34 +100,6 @@ export function makeViewServerRuntime(
       topic: string,
       requestId?: string,
     ) => shutdownController.ensureOpen(operation, topic, requestId);
-
-    const ensureReadableTopic = (topic: string, operation: "subscribe" | "query") =>
-      isReservedTopic(topic) && topic !== VIEW_SERVER_HEALTH_TOPIC
-        ? Effect.fail(unauthorizedSystemTopic(topic, operation))
-        : Effect.void;
-
-    const authorizeQuery = (topic: string, operation: "subscribe" | "query", payload: unknown) =>
-      normalized.auth
-        .authorizeQuery({ topic, operation, payload, transport: "rpc" })
-        .pipe(
-          Effect.flatMap((allowed) =>
-            allowed ? Effect.void : Effect.fail(unauthorized(topic, operation)),
-          ),
-        );
-
-    const authorizePublish = (
-      topic: string,
-      operation: "publish" | "delta-publish" | "delete",
-      payload: unknown,
-      transport: AuthorizationContext["transport"],
-    ) =>
-      normalized.auth
-        .authorizePublish({ topic, operation, payload, transport })
-        .pipe(
-          Effect.flatMap((allowed) =>
-            allowed ? Effect.void : Effect.fail(unauthorized(topic, operation)),
-          ),
-        );
 
     const collectHealth = Effect.fn("view-server.runtime.health")(function* () {
       const topics: Record<string, RuntimeHealthProjectionTopicInput> = {};
@@ -165,13 +132,10 @@ export function makeViewServerRuntime(
     const publishWithTransportUntraced = Effect.fnUntraced(function* (
       topic: string,
       row: unknown,
-      transport: AuthorizationContext["transport"],
+      transport: "rpc" | "testing" | "internal",
     ) {
-      if (isReservedTopic(topic) && transport !== "internal") {
-        return yield* Effect.fail(unauthorizedSystemTopic(topic, "publish"));
-      }
       yield* ensureRuntimeOpen("publish", topic);
-      yield* authorizePublish(topic, "publish", row, transport);
+      yield* authPolicy.canPublishTopic({ topic, operation: "publish", payload: row, transport });
       const worker = yield* workerFor(topic);
       yield* worker.publish(row);
       if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
@@ -182,7 +146,7 @@ export function makeViewServerRuntime(
     const publishWithTransport = (
       topic: string,
       row: unknown,
-      transport: AuthorizationContext["transport"],
+      transport: "rpc" | "testing" | "internal",
     ) =>
       transport === "internal"
         ? publishWithTransportUntraced(topic, row, transport)
@@ -196,13 +160,15 @@ export function makeViewServerRuntime(
     const deltaPublishWithTransportUntraced = Effect.fnUntraced(function* (
       topic: string,
       patch: RuntimeRow,
-      transport: AuthorizationContext["transport"],
+      transport: "rpc" | "testing" | "internal",
     ) {
-      if (isReservedTopic(topic) && transport !== "internal") {
-        return yield* Effect.fail(unauthorizedSystemTopic(topic, "delta-publish"));
-      }
       yield* ensureRuntimeOpen("delta-publish", topic);
-      yield* authorizePublish(topic, "delta-publish", patch, transport);
+      yield* authPolicy.canPublishTopic({
+        topic,
+        operation: "delta-publish",
+        payload: patch,
+        transport,
+      });
       const worker = yield* workerFor(topic);
       yield* worker.deltaPublish(patch);
       if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
@@ -213,7 +179,7 @@ export function makeViewServerRuntime(
     const deltaPublishWithTransport = (
       topic: string,
       patch: RuntimeRow,
-      transport: AuthorizationContext["transport"],
+      transport: "rpc" | "testing" | "internal",
     ) =>
       transport === "internal"
         ? deltaPublishWithTransportUntraced(topic, patch, transport)
@@ -227,13 +193,10 @@ export function makeViewServerRuntime(
     const deleteByIdWithTransportUntraced = Effect.fnUntraced(function* (
       topic: string,
       id: string | number,
-      transport: AuthorizationContext["transport"],
+      transport: "rpc" | "testing" | "internal",
     ) {
-      if (isReservedTopic(topic) && transport !== "internal") {
-        return yield* Effect.fail(unauthorizedSystemTopic(topic, "delete"));
-      }
       yield* ensureRuntimeOpen("delete", topic);
-      yield* authorizePublish(topic, "delete", id, transport);
+      yield* authPolicy.canPublishTopic({ topic, operation: "delete", payload: id, transport });
       const worker = yield* workerFor(topic);
       yield* worker.deleteById(id);
       if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
@@ -244,7 +207,7 @@ export function makeViewServerRuntime(
     const deleteByIdWithTransport = (
       topic: string,
       id: string | number,
-      transport: AuthorizationContext["transport"],
+      transport: "rpc" | "testing" | "internal",
     ) =>
       transport === "internal"
         ? deleteByIdWithTransportUntraced(topic, id, transport)
@@ -263,13 +226,13 @@ export function makeViewServerRuntime(
         "view_server.topic": topic,
       });
       yield* ensureRuntimeOpen("query", topic);
-      yield* ensureReadableTopic(topic, "query");
+      yield* authPolicy.canReadTopic({ topic, operation: "query" });
       const guardedQuery = yield* queryLimitPolicy.validate(
         topic,
         query,
         columnCatalogs.get(topic),
       );
-      yield* authorizeQuery(topic, "query", guardedQuery);
+      yield* authPolicy.canReadTopic({ topic, operation: "query", payload: guardedQuery });
       if (topic === VIEW_SERVER_HEALTH_TOPIC) {
         yield* syncHealthTopicIgnoringErrors;
       }
@@ -294,13 +257,13 @@ export function makeViewServerRuntime(
         "view_server.topic": topic,
       });
       yield* ensureRuntimeOpen("subscribe", topic, requestId);
-      yield* ensureReadableTopic(topic, "subscribe");
+      yield* authPolicy.canSubscribe({ topic, requestId });
       const guardedQuery = yield* queryLimitPolicy.validate(
         topic,
         query,
         columnCatalogs.get(topic),
       );
-      yield* authorizeQuery(topic, "subscribe", guardedQuery);
+      yield* authPolicy.canSubscribe({ topic, requestId, payload: guardedQuery });
       const worker = yield* workerFor(topic);
       return worker.subscribe(requestId, guardedQuery).pipe(
         Stream.onFirst(() => syncHealthTopicIgnoringErrors),
