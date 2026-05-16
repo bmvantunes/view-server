@@ -56,6 +56,10 @@ focused tests and the relevant integration tests still pass.
       WorkerHealthProjection, RuntimeHealthProjection, and RuntimeShutdownController are extracted
       with focused tests plus the existing duplicate-request, unsubscribe-during-build,
       shutdown-during-refresh, backend-gap, source-failure, and backpressure integration coverage.
+- [x] Task 45: CONTEXT.md added with domain vocabulary, invariants, module map,
+      production architecture, testing philosophy, performance targets, and forbidden shortcuts.
+- [x] Task 46: ADRs added for mandatory chDB, per-topic chDB children, real-server
+      isolationId testing, AsyncResult hooks, active raw views, and grouped refresh strategy.
 
 ## Updated 10M Soak Status
 

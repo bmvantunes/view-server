@@ -105,6 +105,7 @@ export function App() {
 
 ## Docs
 
+- `CONTEXT.md` is the compact architecture and domain map for future agents.
 - `docs/quickstart.md` shows the run-server, publish, and browser flow.
 - `docs/operations.md` documents stale/waiting semantics, `totalRows`, version fencing, health metrics, active plan limits, and troubleshooting.
 - `docs/hello-production.md` shows a Kafka + chDB + metrics UI configuration.
@@ -112,6 +113,7 @@ export function App() {
 - `docs/api-audit.md` lists the release-candidate package exports and private internals.
 - `docs/release-checklist.md` lists the release-candidate validation and dry-run steps.
 - `docs/worker-state-machine-review.md` records the hardening checklist and soak shape.
+- `docs/adr/` records the load-bearing architecture decisions.
 
 ## Validation
 
