@@ -55,6 +55,9 @@ focused tests and the relevant integration tests still pass.
       and string aggregates with focused BigDecimal/null/update tests.
 - [x] Task 9: GroupedAccumulator prototype for opt-in count/sum/min/max grouped subscriptions,
       with worker delta test and 1M rows / 100 aggregates / 10k mutations benchmark evidence.
+- [x] Task 11: QueryPlanner module classifies raw, active-plan, grouped chDB refresh,
+      grouped accumulator, memory fallback, and rejected strategies with table tests,
+      span annotations, and soak progress plannedStrategy fields.
 - [x] Task 1: Topic Worker State Machine Split. MutationStore, SnapshotReconciler,
       ActivePlanCoordinator, FanoutQueue, SubscriptionRegistry, GroupedRefreshCoordinator,
       WorkerHealthProjection, RuntimeHealthProjection, and RuntimeShutdownController are extracted

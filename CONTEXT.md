@@ -28,6 +28,7 @@ This document is the compact domain map for future agents. `plan.md` is the hist
 - `packages/core/src/worker/snapshot-reconciler.ts`: version-fenced backend query, replay, memory fallback.
 - `packages/core/src/worker/active-plan-coordinator.ts`: active raw plan cache, admission, build lifecycle, ref counts.
 - `packages/core/src/worker/grouped-refresh-coordinator.ts`: grouped refresh sharing, in-flight state, dirty rescheduling.
+- `packages/core/src/worker/query-planner.ts`: explicit query strategy classification for raw snapshots, active plans, grouped refresh, grouped accumulator, fallback, and limit rejection.
 - `packages/core/src/worker/fanout-queue.ts`: queue pressure, coalescing, logical lag, backpressure.
 - `packages/core/src/worker/subscription-registry.ts`: subscription ownership, duplicate ids, cleanup hooks.
 - `packages/core/src/worker/worker-health-projection.ts`: worker metrics, pressure degradation, chDB health projection.

@@ -32,7 +32,7 @@ export type GroupedQueryExecutionEffectOptions = QueryExecutionOptions & {
 
 export const DEFAULT_QUERY_LIMIT = 50;
 export const DEFAULT_QUERY_OFFSET = 0;
-const RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT = 10_000;
+export const RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT = 10_000;
 
 type SortEntry = {
   readonly row: RuntimeRow;

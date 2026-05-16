@@ -14,6 +14,8 @@ import type {
   SubscriptionEvent,
 } from "../src/protocol/index.ts";
 import { makeTopicWorkerCore, type TopicWorkerMetrics } from "../src/worker/topic-worker-core.ts";
+import { RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT } from "../src/worker/query-engine.ts";
+import { planQuery } from "../src/worker/query-planner.ts";
 
 const Order = Schema.Struct({
   id: Schema.String,
@@ -108,19 +110,20 @@ describe("topic worker soak", () => {
         const subscriptionSetupStartedAt = performance.now();
 
         for (let index = 0; index < shape.rawSubscriptions; index++) {
+          const query = {
+            ...rawQuery,
+            offset: (index % shape.rawPageCycle) * rawQuery.limit,
+          } satisfies RawQuery<OrderRow, { readonly id: true; readonly price: true }>;
           yield* reportSoakProgress(
             progress,
             "raw_subscription_starting",
             {
               rawSubscription: index + 1,
               rawSubscriptions: shape.rawSubscriptions,
+              plannedStrategy: plannedStrategy(shape, query, "subscription"),
             },
             { force: index === 0 },
           );
-          const query = {
-            ...rawQuery,
-            offset: (index % shape.rawPageCycle) * rawQuery.limit,
-          } satisfies RawQuery<OrderRow, { readonly id: true; readonly price: true }>;
           const fiber = yield* worker.subscribe(`soak-raw-${index}`, query).pipe(
             Stream.tap((event) => Effect.sync(() => recordEvent(events, event))),
             Stream.runDrain,
@@ -153,6 +156,7 @@ describe("topic worker soak", () => {
             {
               groupedSubscription: index + 1,
               groupedSubscriptions: shape.groupedSubscriptions,
+              plannedStrategy: plannedStrategy(shape, groupedQuery, "subscription"),
             },
             { force: index === 0 },
           );
@@ -597,6 +601,22 @@ function metricsProgressFields(metrics: TopicWorkerMetrics): SoakProgressFields 
     activePlanPendingCount: metrics.activePlanPendingCount,
     activePlanAutoBuildSkippedCount: metrics.activePlanAutoBuildSkippedCount,
   };
+}
+
+function plannedStrategy(
+  shape: SoakShape,
+  query: RawQuery<OrderRow> | GroupedQuery<OrderRow>,
+  operation: "query" | "subscription",
+): string {
+  return planQuery({
+    operation,
+    query,
+    rowCount: shape.rows,
+    rawWindowOptimizationLimit: RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT,
+    activePlanAutoBuildMaxRows: shape.activePlanAutoBuildMaxRows,
+    groupedAccumulatorMaxRows: 0,
+    supportsGroupedRefreshSnapshots: false,
+  }).strategy;
 }
 
 function latencyStats(samples: readonly number[]): SoakLatencyStats {

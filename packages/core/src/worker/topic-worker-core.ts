@@ -53,11 +53,13 @@ import {
   matchesFilter,
   normalizeLimit,
   normalizeOffset,
+  RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT,
   type QueryExecutionResult,
   rowKeyForMemoryQuery,
   stableSortRows,
 } from "./query-engine.ts";
 import { makeIncrementalGroupedAccumulator } from "./grouped-accumulator.ts";
+import { planQuery, type QueryPlan, type QueryOperation } from "./query-planner.ts";
 import { makeSnapshotReconciler } from "./snapshot-reconciler.ts";
 import {
   SubscriptionRegistry,
@@ -201,6 +203,20 @@ export function makeTopicWorkerCore(
       queryOptions: { literalStringFields },
     });
 
+    const planWorkerQuery = (operation: QueryOperation, query: RuntimeQuery): QueryPlan =>
+      planQuery({
+        operation,
+        query,
+        rowCount: mutationStore.rows().length,
+        rawWindowOptimizationLimit: RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT,
+        activePlanAutoBuildMaxRows,
+        maxActivePlans,
+        groupedAccumulatorMaxRows,
+        supportsGroupedRefreshSnapshots:
+          backend.supportsGroupedRefreshSnapshots === true &&
+          backend.groupedRefreshSnapshot !== undefined,
+      });
+
     const fencedQuery = Effect.fn("view-server.worker.snapshot.query")(function* (
       query: RuntimeQuery,
     ) {
@@ -209,6 +225,10 @@ export function makeTopicWorkerCore(
         "view_server.worker_version": mutationStore.version().toString(),
       });
       const targetVersion = mutationStore.version();
+      const plan = planWorkerQuery("query", query);
+      yield* Effect.annotateCurrentSpan({
+        "view_server.query_strategy": plan.strategy,
+      });
       const result = yield* snapshotReconciler.query({ query, targetVersion });
       if (result.backendFailed) {
         healthProjection.markDegraded();
@@ -741,18 +761,19 @@ export function makeTopicWorkerCore(
     });
 
     const prepareGroupedAccumulator = (subscription: ActiveSubscription): void => {
-      if (
-        !isGroupedQuery(subscription.query) ||
-        groupedAccumulatorMaxRows <= 0 ||
-        mutationStore.rows().length > groupedAccumulatorMaxRows
-      ) {
+      if (!isGroupedQuery(subscription.query)) {
+        return;
+      }
+      const query = subscription.query;
+      const plan = planWorkerQuery("subscription", query);
+      if (plan.strategy !== "grouped_incremental_accumulator_eligible") {
         return;
       }
       const accumulator = makeIncrementalGroupedAccumulator({
         rows: mutationStore
           .rows()
-          .filter((row) => matchesFilter(row, subscription.query.where, { literalStringFields })),
-        query: subscription.query,
+          .filter((row) => matchesFilter(row, query.where, { literalStringFields })),
+        query,
         idOf: (row) => rowKeyByField(row, idField),
       });
       if (accumulator !== undefined) {
@@ -997,6 +1018,10 @@ export function makeTopicWorkerCore(
                 requestId,
                 query,
               );
+              const plan = planWorkerQuery("subscription", query);
+              yield* Effect.annotateCurrentSpan({
+                "view_server.query_strategy": plan.strategy,
+              });
               const active: ActiveSubscription = {
                 requestId,
                 query,
