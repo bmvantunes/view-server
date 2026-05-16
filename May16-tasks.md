@@ -51,10 +51,11 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
 - [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [x] Task 39: chDB SQL compiler contract tests and internal compiler module.
-- [ ] Task 1: Topic Worker State Machine Split. Partially complete through the modules above;
-      GroupedRefreshCoordinator, RuntimeHealthProjection, and RuntimeShutdownController are now
-      extracted, but the broader state-machine checklist still needs the remaining modules and
-      parity/fault hardening below.
+- [x] Task 1: Topic Worker State Machine Split. MutationStore, SnapshotReconciler,
+      ActivePlanCoordinator, FanoutQueue, SubscriptionRegistry, GroupedRefreshCoordinator,
+      WorkerHealthProjection, RuntimeHealthProjection, and RuntimeShutdownController are extracted
+      with focused tests plus the existing duplicate-request, unsubscribe-during-build,
+      shutdown-during-refresh, backend-gap, source-failure, and backpressure integration coverage.
 
 ## Updated 10M Soak Status
 

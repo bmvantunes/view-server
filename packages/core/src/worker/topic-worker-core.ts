@@ -26,7 +26,7 @@ import type {
   SnapshotEvent,
   SubscriptionEvent,
 } from "../protocol/index.ts";
-import type { SnapshotBackend, SnapshotBackendHealth } from "../snapshot/index.ts";
+import type { SnapshotBackend } from "../snapshot/index.ts";
 import { createMemorySnapshotBackend } from "../snapshot/index.ts";
 import {
   estimateActiveRawPlanIndexBytesEffect,
@@ -58,34 +58,9 @@ import {
   type ActiveSubscription,
   type ShutdownSubscription,
 } from "./subscription-registry.ts";
+import { WorkerHealthProjection, type TopicWorkerMetrics } from "./worker-health-projection.ts";
 
-export type TopicWorkerMetrics = {
-  readonly rows: number;
-  readonly subscribers: number;
-  readonly version: WorkerVersion;
-  readonly queueDepth: number;
-  readonly maxSubscriptionLagVersions: number;
-  readonly totalSubscriptionLagVersions: number;
-  readonly activePlanCount: number;
-  readonly activeViewCount: number;
-  readonly activePlanRows: number;
-  readonly activePlanIndexEstimatedBytes: number;
-  readonly activePlanBuildQueueDepth: number;
-  readonly activePlanBuildingCount: number;
-  readonly activePlanPendingCount: number;
-  readonly activePlanBuildMs: number;
-  readonly activePlanBuildMsTotal: number;
-  readonly activePlanBuildMsMax: number;
-  readonly activePlanFallbackCount: number;
-  readonly activePlanAutoBuildSkippedCount: number;
-  readonly chdbStatus: SnapshotBackendHealth["status"];
-  readonly chdbPid: number;
-  readonly chdbRestarts: number;
-  readonly chdbPendingRequests: number;
-  readonly chdbLastError: string;
-  readonly chdbBackendVersion: WorkerVersion;
-  readonly status: "ready" | "degraded" | "stopping";
-};
+export type { TopicWorkerMetrics } from "./worker-health-projection.ts";
 
 export type TopicWorkerCore = {
   readonly topic: string;
@@ -178,7 +153,19 @@ export function makeTopicWorkerCore(
       activePlanAutoBuildMaxRows,
     });
     const groupedRefreshCoordinator = new GroupedRefreshCoordinator();
-    let status: TopicWorkerMetrics["status"] = "ready";
+    const healthProjection = new WorkerHealthProjection({
+      topic,
+      rows: () => mutationStore.rows().length,
+      version: () => mutationStore.version(),
+      subscriptionCount: () => subscriptions.size,
+      subscriptions: () => subscriptions.values(),
+      activePlanMetrics: () => activePlanCoordinator.metrics(subscriptions.values()),
+      activePlanLimitNear: (metrics) => activePlanCoordinator.isLimitNear(metrics),
+      queueAtLimit: (depth) => fanoutQueue.isQueueAtLimit(depth),
+      lagForDepth: (depth, pendingLagVersions) =>
+        fanoutQueue.lagForDepth(depth, pendingLagVersions),
+      backendHealth: () => backend.health ?? Effect.succeed({ status: "stopped" }),
+    });
 
     const decodeRow = (input: unknown) =>
       Schema.decodeUnknownEffect(config.schema)(input).pipe(
@@ -216,9 +203,9 @@ export function makeTopicWorkerCore(
       const targetVersion = mutationStore.version();
       const result = yield* snapshotReconciler.query({ query, targetVersion });
       if (result.backendFailed) {
-        status = "degraded";
-      } else if (status === "degraded") {
-        status = "ready";
+        healthProjection.markDegraded();
+      } else {
+        healthProjection.markReadyIfDegraded();
       }
       yield* Effect.annotateCurrentSpan({
         "view_server.rows": result.rows.length,
@@ -524,9 +511,7 @@ export function makeTopicWorkerCore(
           .pipe(
             Effect.tap(() =>
               Effect.sync(() => {
-                if (status === "degraded") {
-                  status = "ready";
-                }
+                healthProjection.markReadyIfDegraded();
               }),
             ),
             Effect.map((candidate) =>
@@ -539,7 +524,7 @@ export function makeTopicWorkerCore(
             ),
             Effect.catchTag("SnapshotBackendFailed", () =>
               Effect.sync(() => {
-                status = "degraded";
+                healthProjection.markDegraded();
                 return Option.none<QueryExecutionResult>();
               }),
             ),
@@ -630,57 +615,6 @@ export function makeTopicWorkerCore(
             });
             yield* fanoutUntraced(fromVersion, toVersion, mutation);
           })();
-
-    const queueDepth = Effect.fnUntraced(function* () {
-      let total = 0;
-      for (const subscription of subscriptions.values()) {
-        total += yield* Queue.size(subscription.queue);
-      }
-      return total;
-    });
-
-    const activePlanStats = () => activePlanCoordinator.metrics(subscriptions.values());
-
-    const subscriptionLagStats = Effect.fnUntraced(function* () {
-      let maxLag = 0n;
-      let totalLag = 0n;
-      for (const subscription of subscriptions.values()) {
-        const depth = yield* Queue.size(subscription.queue);
-        const queuedLag = fanoutQueue.lagForDepth(depth, subscription.pendingLagVersions);
-        const dirtyLag =
-          subscription.dirtyTargetVersion !== undefined &&
-          subscription.dirtyTargetVersion > subscription.lastVersion
-            ? subscription.dirtyTargetVersion - subscription.lastVersion
-            : 0n;
-        const lag = queuedLag > dirtyLag ? queuedLag : dirtyLag;
-        if (lag > maxLag) {
-          maxLag = lag;
-        }
-        totalLag += lag;
-      }
-      return {
-        maxSubscriptionLagVersions: bigintMetricNumber(maxLag),
-        totalSubscriptionLagVersions: bigintMetricNumber(totalLag),
-      };
-    });
-
-    const backendHealth = (): Effect.Effect<SnapshotBackendHealth> =>
-      backend.health ?? Effect.succeed({ status: "stopped" });
-
-    const statusForPressure = (
-      depth: number,
-      planStats: ReturnType<typeof activePlanStats>,
-      snapshotHealth: SnapshotBackendHealth,
-    ): TopicWorkerMetrics["status"] =>
-      snapshotHealth.status === "degraded" || snapshotHealth.status === "restarting"
-        ? "degraded"
-        : status === "ready" &&
-            (fanoutQueue.isQueueAtLimit(depth) ||
-              planStats.activePlanFallbackCount > 0 ||
-              planStats.activePlanAutoBuildSkippedCount > 0 ||
-              activePlanCoordinator.isLimitNear(planStats))
-          ? "degraded"
-          : status;
 
     const prepareActivePlan = Effect.fnUntraced(function* (subscription: ActiveSubscription) {
       if (isGroupedQuery(subscription.query)) {
@@ -874,14 +808,12 @@ export function makeTopicWorkerCore(
         .pipe(
           Effect.tap(() =>
             Effect.sync(() => {
-              if (status === "degraded") {
-                status = "ready";
-              }
+              healthProjection.markReadyIfDegraded();
             }),
           ),
           Effect.catchTag("SnapshotBackendFailed", () =>
             Effect.sync(() => {
-              status = "degraded";
+              healthProjection.markDegraded();
             }),
           ),
           Effect.forkIn(scope),
@@ -898,43 +830,7 @@ export function makeTopicWorkerCore(
       topic,
       idField,
       version: Effect.sync(() => mutationStore.version()),
-      metrics: Effect.fn("view-server.worker.metrics")(function* () {
-        const depth = yield* queueDepth();
-        const lagStats = yield* subscriptionLagStats();
-        const planStats = activePlanStats();
-        const snapshotHealth = yield* backendHealth();
-        yield* Effect.annotateCurrentSpan({
-          "view_server.topic": topic,
-          "view_server.rows": mutationStore.rows().length,
-        });
-        return {
-          rows: mutationStore.rows().length,
-          subscribers: subscriptions.size,
-          version: mutationStore.version(),
-          queueDepth: depth,
-          maxSubscriptionLagVersions: lagStats.maxSubscriptionLagVersions,
-          totalSubscriptionLagVersions: lagStats.totalSubscriptionLagVersions,
-          activePlanCount: planStats.activePlanCount,
-          activeViewCount: planStats.activeViewCount,
-          activePlanRows: planStats.activePlanRows,
-          activePlanIndexEstimatedBytes: planStats.activePlanIndexEstimatedBytes,
-          activePlanBuildQueueDepth: planStats.activePlanBuildQueueDepth,
-          activePlanBuildingCount: planStats.activePlanBuildingCount,
-          activePlanPendingCount: planStats.activePlanPendingCount,
-          activePlanBuildMs: planStats.activePlanBuildMs,
-          activePlanBuildMsTotal: planStats.activePlanBuildMsTotal,
-          activePlanBuildMsMax: planStats.activePlanBuildMsMax,
-          activePlanFallbackCount: planStats.activePlanFallbackCount,
-          activePlanAutoBuildSkippedCount: planStats.activePlanAutoBuildSkippedCount,
-          chdbStatus: snapshotHealth.status,
-          chdbPid: snapshotHealth.pid ?? 0,
-          chdbRestarts: snapshotHealth.restarts ?? 0,
-          chdbPendingRequests: snapshotHealth.pendingRequests ?? 0,
-          chdbLastError: snapshotHealth.lastError ?? snapshotHealth.message ?? "",
-          chdbBackendVersion: snapshotHealth.backendVersion ?? 0n,
-          status: statusForPressure(depth, planStats, snapshotHealth),
-        };
-      })(),
+      metrics: healthProjection.metrics(),
 
       query: (query) =>
         gate.withPermit(
@@ -1064,7 +960,7 @@ export function makeTopicWorkerCore(
       shutdown: Effect.fn("view-server.worker.shutdown")(function* () {
         const shutdownState = yield* gate.withPermit(
           Effect.sync((): ShutdownState => {
-            status = "stopping";
+            healthProjection.markStopping();
             const shutdownSubscriptions = subscriptions.clearForShutdown();
             const backgroundFibers = [...activePlanBuildFibers, ...groupedRefreshFibers];
             activePlanCoordinator.clear();
@@ -1131,9 +1027,4 @@ function hasDependency(
     }
   }
   return false;
-}
-
-function bigintMetricNumber(value: bigint): number {
-  const max = BigInt(Number.MAX_SAFE_INTEGER);
-  return value > max ? Number.MAX_SAFE_INTEGER : Number(value);
 }
