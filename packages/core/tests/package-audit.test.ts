@@ -88,7 +88,7 @@ describe("release package audit", () => {
           expect.arrayContaining(packageInfo.requiredExports),
         );
         expect(JSON.stringify(packageJson.exports)).toContain("./dist/");
-        expect(JSON.stringify(packageJson.exports)).toContain("./src/");
+        expect(JSON.stringify(packageJson.exports)).not.toContain("./src/");
 
         for (const dependency of packageInfo.requiredPeerDependencies) {
           expect(packageJson.peerDependencies?.[dependency]).toBeDefined();

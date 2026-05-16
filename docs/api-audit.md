@@ -2,7 +2,7 @@
 
 This audit describes the package surface that is intended to be usable by applications. Anything not listed here is implementation detail, even if it exists in `src`.
 
-Package runtime exports point at built `dist` files. Type entries point at source files so workspace checks and downstream TypeScript users get the config-derived generic surface directly. Dry-run tarballs include `dist` and `src`; the packages are ESM-only and require Node 26.
+Package runtime exports point at built `dist` files. Type entries also point at built `.d.mts` files so downstream TypeScript users do not need the repo's internal `.ts` import settings. Dry-run tarballs include `dist` and `src`; the packages are ESM-only and require Node 26.
 
 ## Packages
 
