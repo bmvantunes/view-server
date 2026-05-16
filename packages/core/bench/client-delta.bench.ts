@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 import { performance } from "node:perf_hooks";
-import { applyDeltaOperations } from "../src/client/live-query-store.ts";
+import { applyDeltaOperations } from "../src/client/visible-rows.ts";
 import type { DeltaEvent, DeltaOperation, RuntimeRow } from "../src/protocol/index.ts";
 import {
   writeBenchmarkArtifact,
@@ -14,50 +14,59 @@ type Timed<T> = {
   readonly ms: number;
 };
 
-const windowSizes = envList("VS_CLIENT_DELTA_WINDOW_SIZES", [50, 1_000, 10_000]);
+const windowSizes = envList("VS_CLIENT_DELTA_WINDOW_SIZES", [50, 100, 1_000, 10_000, 50_000]);
 const operationCounts = envList("VS_CLIENT_DELTA_OPERATION_COUNTS", [1, 10, 100]);
+const scenarios = envScenarios("VS_CLIENT_DELTA_SCENARIOS", [
+  "mixed-remove-move-upsert",
+  "worst-case-reorder",
+]);
 const iterations = envNumber("VS_CLIENT_DELTA_ITERATIONS", 1);
+
+type ClientDeltaScenario = "mixed-remove-move-upsert" | "worst-case-reorder";
 
 void Effect.runPromise(
   Effect.gen(function* () {
     yield* Effect.logInfo(
-      `client-delta benchmark windowSizes=${windowSizes.join(",")} operationCounts=${operationCounts.join(",")} iterations=${iterations}`,
+      `client-delta benchmark windowSizes=${windowSizes.join(",")} operationCounts=${operationCounts.join(",")} scenarios=${scenarios.join(",")} iterations=${iterations}`,
     );
     const results: BenchmarkResult[] = [];
     for (const windowSize of windowSizes) {
       for (const operationCount of operationCounts) {
-        const rows = makeRows(windowSize);
-        const event = deltaEvent(makeMixedOperations(rows, operationCount));
-        const optimized = timeRepeated(iterations, () => applyDeltaOperations(rows, event, "id"));
-        const legacy = timeRepeated(iterations, () =>
-          legacyApplyDeltaOperations(rows, event, "id"),
-        );
-        expectSameRows(optimized.value, legacy.value);
-        const result = benchmarkResult(windowSize, operationCount, [
-          { name: "optimizedMs", value: optimized.ms, unit: "ms" },
-          { name: "legacyMs", value: legacy.ms, unit: "ms" },
-          {
-            name: "speedupRatio",
-            value: optimized.ms === 0 ? Number.MAX_SAFE_INTEGER : legacy.ms / optimized.ms,
-            unit: "ratio",
-            lowerIsBetter: false,
-          },
-          {
-            name: "checksum",
-            value: rowsChecksum(optimized.value),
-            unit: "count",
-            lowerIsBetter: false,
-          },
-        ]);
-        results.push(result);
-        yield* Effect.logInfo(
-          [
-            `operation=applyDeltaOperations`,
-            `windowSize=${windowSize}`,
-            `operationCount=${operationCount}`,
-            ...result.metrics.map((metric) => `${metric.name}=${formatMetric(metric.value)}`),
-          ].join(" "),
-        );
+        for (const scenario of scenarios) {
+          const rows = makeRows(windowSize);
+          const event = deltaEvent(makeOperations(rows, operationCount, scenario));
+          const optimized = timeRepeated(iterations, () => applyDeltaOperations(rows, event, "id"));
+          const legacy = timeRepeated(iterations, () =>
+            legacyApplyDeltaOperations(rows, event, "id"),
+          );
+          expectSameRows(optimized.value, legacy.value);
+          const result = benchmarkResult(windowSize, operationCount, scenario, [
+            { name: "optimizedMs", value: optimized.ms, unit: "ms" },
+            { name: "legacyMs", value: legacy.ms, unit: "ms" },
+            {
+              name: "speedupRatio",
+              value: optimized.ms === 0 ? Number.MAX_SAFE_INTEGER : legacy.ms / optimized.ms,
+              unit: "ratio",
+              lowerIsBetter: false,
+            },
+            {
+              name: "checksum",
+              value: rowsChecksum(optimized.value),
+              unit: "count",
+              lowerIsBetter: false,
+            },
+          ]);
+          results.push(result);
+          yield* Effect.logInfo(
+            [
+              `operation=applyDeltaOperations`,
+              `scenario=${scenario}`,
+              `windowSize=${windowSize}`,
+              `operationCount=${operationCount}`,
+              ...result.metrics.map((metric) => `${metric.name}=${formatMetric(metric.value)}`),
+            ].join(" "),
+          );
+        }
       }
     }
     const artifact = yield* writeBenchmarkArtifact(
@@ -65,6 +74,7 @@ void Effect.runPromise(
       {
         windowSizes: windowSizes.join(","),
         operationCounts: operationCounts.join(","),
+        scenarios: scenarios.join(","),
         iterations,
       },
       results,
@@ -83,12 +93,13 @@ void Effect.runPromise(
 function benchmarkResult(
   windowSize: number,
   operationCount: number,
+  scenario: ClientDeltaScenario,
   metrics: readonly BenchmarkMetric[],
 ): BenchmarkResult {
   return {
     case: {
       operation: "applyDeltaOperations",
-      scenario: "mixed-remove-move-upsert",
+      scenario,
       windowSize,
       operationCount,
     },
@@ -135,6 +146,40 @@ function makeMixedOperations(
     }
   }
   return [...removals, ...placements];
+}
+
+function makeOperations(
+  rows: readonly RuntimeRow[],
+  operationCount: number,
+  scenario: ClientDeltaScenario,
+): readonly DeltaOperation<RuntimeRow>[] {
+  return scenario === "worst-case-reorder"
+    ? makeWorstCaseReorderOperations(rows, operationCount)
+    : makeMixedOperations(rows, operationCount);
+}
+
+function makeWorstCaseReorderOperations(
+  rows: readonly RuntimeRow[],
+  operationCount: number,
+): readonly DeltaOperation<RuntimeRow>[] {
+  const count = Math.min(operationCount, rows.length);
+  return Array.from({ length: count }, (_, index): DeltaOperation<RuntimeRow> => {
+    const row = rows[rows.length - 1 - index];
+    if (row === undefined) {
+      return {
+        type: "upsert",
+        key: `missing-${index}`,
+        row: { id: `missing-${index}`, price: index, status: "missing" },
+        index,
+      };
+    }
+    return {
+      type: "upsert",
+      key: String(row.id),
+      row: { ...row, price: Number(row.price) + 1 },
+      index,
+    };
+  });
 }
 
 function deltaEvent(ops: readonly DeltaOperation<RuntimeRow>[]): DeltaEvent<readonly RuntimeRow[]> {
@@ -250,6 +295,25 @@ function envList(name: string, fallback: readonly number[]): readonly number[] {
     .filter((entry) => Number.isFinite(entry) && entry > 0)
     .map((entry) => Math.trunc(entry));
   return parsed.length === 0 ? fallback : parsed;
+}
+
+function envScenarios(
+  name: string,
+  fallback: readonly ClientDeltaScenario[],
+): readonly ClientDeltaScenario[] {
+  const value = process.env[name];
+  if (value === undefined || value.length === 0) {
+    return fallback;
+  }
+  const parsed = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(isClientDeltaScenario);
+  return parsed.length === 0 ? fallback : parsed;
+}
+
+function isClientDeltaScenario(value: string): value is ClientDeltaScenario {
+  return value === "mixed-remove-move-upsert" || value === "worst-case-reorder";
 }
 
 function envNumber(name: string, fallback: number): number {

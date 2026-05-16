@@ -9,7 +9,6 @@ export {
 } from "./client/create-client.ts";
 export {
   LiveQueryStore,
-  applyDeltaOperations,
   type LiveQueryConnection,
   type LiveQueryInitialData,
   type LiveQueryLifecycle,
@@ -18,6 +17,14 @@ export {
   type LiveQueryStatus,
   type LiveQueryValue,
 } from "./client/live-query-store.ts";
+export {
+  applyDeltaOperations,
+  applySnapshot,
+  applyStatus,
+  isCurrentSubscriptionEvent,
+  type VisibleRowsSnapshot,
+  type VisibleRowsStatus,
+} from "./client/visible-rows.ts";
 export {
   queryResultToRuntimeRows,
   rowKeyForTypedQuery,

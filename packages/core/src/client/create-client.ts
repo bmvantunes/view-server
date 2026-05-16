@@ -46,6 +46,7 @@ import {
   rpcSubscriptionEvent,
 } from "./rpc-boundary.ts";
 import { LiveQueryStore, type LiveQueryInitialData } from "./live-query-store.ts";
+import { isCurrentSubscriptionEvent } from "./visible-rows.ts";
 
 export type RpcClientForViewServer = RpcClient.RpcClient<
   import("effect/unstable/rpc/RpcGroup").Rpcs<typeof ViewServerRpcs>,
@@ -219,7 +220,9 @@ export function createViewServerClient<TConfig extends ViewServerConfig>(
             body: () =>
               Queue.take(events).pipe(
                 Effect.flatMap((event) =>
-                  event.requestId === currentRequestId ? onEvent(event) : Effect.void,
+                  isCurrentSubscriptionEvent(event, currentRequestId)
+                    ? onEvent(event)
+                    : Effect.void,
                 ),
               ),
             step: () => undefined,
