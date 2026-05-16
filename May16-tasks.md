@@ -633,6 +633,8 @@ Tests / acceptance:
 
 Priority: P2
 
+Status: Done in `packages/react/src/metrics-view-model.ts`.
+
 Problem:
 
 Metrics UI should consume a stable view model, not raw health rows directly.

@@ -41,6 +41,7 @@ This document is the compact domain map for future agents. `plan.md` is the hist
 - `packages/core/src/snapshot/chdb-sql-compiler.ts`: internal SQL compiler contract for chDB snapshots.
 - `packages/core/src/snapshot/row-wire-codec.ts`: private chDB worker wire codec for rows, queries, mutations, snapshots, and BigDecimal preservation.
 - `packages/react`: factory-created provider/hooks; browser package must stay server-dependency-free.
+- `packages/react/src/metrics-view-model.ts`: browser-safe health-topic view model and formatting for the metrics dashboard.
 - `packages/testing`: test helpers only. Production correctness should be proven through real server tests where possible.
 
 ## Load-Bearing Invariants

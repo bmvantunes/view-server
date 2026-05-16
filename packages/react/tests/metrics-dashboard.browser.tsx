@@ -50,6 +50,34 @@ describe("ViewServerMetricsDashboard", () => {
     expect(document.body.textContent).toContain("8,123");
     expect(document.body.textContent).toContain("12ms");
   });
+
+  test("renders degraded chDB metrics with stable operations labels", () => {
+    const hooks: ViewServerMetricsHooks = {
+      useLiveQuery() {
+        return AsyncResult.success({
+          rows: degradedHealthRows,
+          totalRows: degradedHealthRows.length,
+          status: "live",
+          connection: {
+            connected: true,
+            attempt: 1,
+          },
+        });
+      },
+    };
+
+    render(<ViewServerMetricsDashboard hooks={hooks} />);
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("degraded");
+    expect(text).toContain("kafka lag");
+    expect(text).toContain("chDB pending");
+    expect(text).toContain("indexed rows");
+    expect(text).toContain("fallbacks");
+    expect(text).toContain("orders");
+    expect(text).toContain("25");
+    expect(document.querySelector('[title="chDB down"]')).not.toBeNull();
+  });
 });
 
 function render(element: React.ReactNode): void {
@@ -145,3 +173,32 @@ const healthRows: readonly ViewServerHealthRow[] = [
     updatedAt: now,
   },
 ];
+
+const degradedHealthRows: readonly ViewServerHealthRow[] = [
+  {
+    ...healthRowById("server"),
+    status: "degraded",
+    chdbStatus: "degraded",
+    chdbPendingRequests: 4,
+    chdbLastError: "chDB down",
+    kafkaLagTotal: 25,
+    activePlanFallbackCount: 2,
+  },
+  {
+    ...healthRowById("topic:orders"),
+    status: "degraded",
+    chdbStatus: "degraded",
+    chdbPendingRequests: 4,
+    chdbLastError: "chDB down",
+    kafkaLagTotal: 25,
+    activePlanFallbackCount: 2,
+  },
+];
+
+function healthRowById(id: string): ViewServerHealthRow {
+  const row = healthRows.find((candidate) => candidate.id === id);
+  if (row === undefined) {
+    throw new Error(`Missing health row ${id}`);
+  }
+  return row;
+}

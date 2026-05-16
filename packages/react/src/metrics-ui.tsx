@@ -1,128 +1,25 @@
-import * as Option from "effect/Option";
-import { AsyncResult } from "effect/unstable/reactivity";
-import { VIEW_SERVER_HEALTH_TOPIC, type ViewServerHealthRow } from "@view-server/core/config";
-import type { InferReadableQueryResult, RawQuery } from "@view-server/core/query";
-import type { LiveQueryResult, LiveQueryValue } from "@view-server/core/client";
+import { VIEW_SERVER_HEALTH_TOPIC } from "@view-server/core/config";
+import {
+  metricsDashboardViewModel,
+  metricsValueFromResult,
+  viewServerHealthQuery,
+  type ViewServerMetricsHooks,
+} from "./metrics-view-model.ts";
 
-export const viewServerHealthQuery = {
-  fields: {
-    id: true,
-    kind: true,
-    topic: true,
-    rows: true,
-    subscribers: true,
-    queueDepth: true,
-    maxSubscriptionLagVersions: true,
-    totalSubscriptionLagVersions: true,
-    activePlanCount: true,
-    activeViewCount: true,
-    activePlanRows: true,
-    activePlanIndexEstimatedBytes: true,
-    activePlanBuildQueueDepth: true,
-    activePlanBuildingCount: true,
-    activePlanPendingCount: true,
-    activePlanBuildMs: true,
-    activePlanBuildMsTotal: true,
-    activePlanBuildMsMax: true,
-    activePlanFallbackCount: true,
-    activePlanAutoBuildSkippedCount: true,
-    chdbStatus: true,
-    chdbPid: true,
-    chdbRestarts: true,
-    chdbPendingRequests: true,
-    chdbLastError: true,
-    chdbBackendVersion: true,
-    workerLagP95Ms: true,
-    deltaFanoutP95Ms: true,
-    publishLatencyP95Ms: true,
-    snapshotLatencyP95Ms: true,
-    chdbSnapshotLatencyP95Ms: true,
-    kafkaLagTotal: true,
-    kafkaLagMax: true,
-    kafkaPartitions: true,
-    lastKafkaOffset: true,
-    lastKafkaEndOffset: true,
-    rssMb: true,
-    status: true,
-    updatedAt: true,
-  },
-  orderBy: [{ field: "id", direction: "asc" }],
-  limit: 50,
-} satisfies RawQuery<
-  ViewServerHealthRow,
-  {
-    readonly id: true;
-    readonly kind: true;
-    readonly topic: true;
-    readonly rows: true;
-    readonly subscribers: true;
-    readonly queueDepth: true;
-    readonly maxSubscriptionLagVersions: true;
-    readonly totalSubscriptionLagVersions: true;
-    readonly activePlanCount: true;
-    readonly activeViewCount: true;
-    readonly activePlanRows: true;
-    readonly activePlanIndexEstimatedBytes: true;
-    readonly activePlanBuildQueueDepth: true;
-    readonly activePlanBuildingCount: true;
-    readonly activePlanPendingCount: true;
-    readonly activePlanBuildMs: true;
-    readonly activePlanBuildMsTotal: true;
-    readonly activePlanBuildMsMax: true;
-    readonly activePlanFallbackCount: true;
-    readonly activePlanAutoBuildSkippedCount: true;
-    readonly chdbStatus: true;
-    readonly chdbPid: true;
-    readonly chdbRestarts: true;
-    readonly chdbPendingRequests: true;
-    readonly chdbLastError: true;
-    readonly chdbBackendVersion: true;
-    readonly workerLagP95Ms: true;
-    readonly deltaFanoutP95Ms: true;
-    readonly publishLatencyP95Ms: true;
-    readonly snapshotLatencyP95Ms: true;
-    readonly chdbSnapshotLatencyP95Ms: true;
-    readonly kafkaLagTotal: true;
-    readonly kafkaLagMax: true;
-    readonly kafkaPartitions: true;
-    readonly lastKafkaOffset: true;
-    readonly lastKafkaEndOffset: true;
-    readonly rssMb: true;
-    readonly status: true;
-    readonly updatedAt: true;
-  }
->;
-
-type MetricsViewServerConfig = { readonly topics: {} };
-export type ViewServerMetricsRow = InferReadableQueryResult<
-  MetricsViewServerConfig,
-  typeof VIEW_SERVER_HEALTH_TOPIC,
-  typeof viewServerHealthQuery
->[number];
-
-export type ViewServerMetricsHooks = {
-  readonly useLiveQuery: (
-    topic: typeof VIEW_SERVER_HEALTH_TOPIC,
-    query: typeof viewServerHealthQuery,
-  ) => LiveQueryResult<ViewServerMetricsRow>;
-};
+export {
+  viewServerHealthQuery,
+  type ViewServerMetricsHooks,
+  type ViewServerMetricsRow,
+} from "./metrics-view-model.ts";
 
 export function ViewServerMetricsDashboard(props: {
   readonly hooks: ViewServerMetricsHooks;
   readonly title?: string | undefined;
 }) {
   const result = props.hooks.useLiveQuery(VIEW_SERVER_HEALTH_TOPIC, viewServerHealthQuery);
-  const value = AsyncResult.match(result, {
-    onInitial: () => emptyMetricsValue,
-    onFailure: (failure) => Option.getOrElse(AsyncResult.value(failure), () => emptyMetricsValue),
-    onSuccess: (success) => success.value,
-  });
-  const rows = value.rows;
-  const server = rows.find((row) => row.kind === "server");
-  const topics = rows
-    .filter((row) => row.kind === "topic")
-    .toSorted((left, right) => String(left.topic ?? "").localeCompare(String(right.topic ?? "")));
-  const status = server?.status ?? (value.status === "reconnecting" ? "degraded" : "stopping");
+  const value = metricsValueFromResult(result);
+  const viewModel = metricsDashboardViewModel(value);
+  const status = viewModel.status;
 
   return (
     <section className="vs-metrics" data-status={status}>
@@ -135,35 +32,20 @@ export function ViewServerMetricsDashboard(props: {
         <div className="vs-metrics__status" data-status={status}>
           <span aria-hidden="true" />
           <strong>{status}</strong>
-          <small>{value.status}</small>
+          <small>{viewModel.liveStatus}</small>
         </div>
       </header>
 
       <div className="vs-metrics__summary" aria-label="Server summary">
-        <MetricCell label="rows" value={formatCount(server?.rows)} />
-        <MetricCell label="subscribers" value={formatCount(server?.subscribers)} />
-        <MetricCell label="queue" value={formatCount(server?.queueDepth)} />
-        <MetricCell label="sub lag" value={formatCount(server?.maxSubscriptionLagVersions)} />
-        <MetricCell label="plans" value={formatCount(server?.activePlanCount)} />
-        <MetricCell label="plan queue" value={formatCount(server?.activePlanBuildQueueDepth)} />
-        <MetricCell label="indexed rows" value={formatCount(server?.activePlanRows)} />
-        <MetricCell label="fallbacks" value={formatCount(server?.activePlanFallbackCount)} />
-        <MetricCell
-          label="skipped plans"
-          value={formatCount(server?.activePlanAutoBuildSkippedCount)}
-        />
+        {viewModel.summary.map((cell) => (
+          <MetricCell key={cell.label} label={cell.label} value={cell.value} />
+        ))}
       </div>
 
       <div className="vs-metrics__latency" aria-label="Latency signals">
-        <SignalCell label="publish p95" value={formatMs(server?.publishLatencyP95Ms)} />
-        <SignalCell label="fanout p95" value={formatMs(server?.deltaFanoutP95Ms)} />
-        <SignalCell label="snapshot p95" value={formatMs(server?.snapshotLatencyP95Ms)} />
-        <SignalCell label="worker lag" value={formatMs(server?.workerLagP95Ms)} />
-        <SignalCell label="kafka lag" value={formatCount(server?.kafkaLagTotal)} />
-        <SignalCell label="chDB pending" value={formatCount(server?.chdbPendingRequests)} />
-        <SignalCell label="plan build" value={formatMs(server?.activePlanBuildMs)} />
-        <SignalCell label="plan build max" value={formatMs(server?.activePlanBuildMsMax)} />
-        <SignalCell label="plan index" value={formatBytes(server?.activePlanIndexEstimatedBytes)} />
+        {viewModel.latency.map((cell) => (
+          <SignalCell key={cell.label} label={cell.label} value={cell.value} />
+        ))}
       </div>
 
       <div className="vs-metrics__topics" aria-label="Topic health">
@@ -190,48 +72,35 @@ export function ViewServerMetricsDashboard(props: {
           <span>pid</span>
           <span>updated</span>
         </div>
-        {topics.map((topic) => (
+        {viewModel.topics.map((topic) => (
           <div className="vs-metrics__topic-row" data-status={topic.status} key={topic.id}>
             <strong>{topic.topic}</strong>
             <span>{topic.status}</span>
-            <span title={topic.chdbLastError}>{topic.chdbStatus}</span>
-            <span>{formatCount(topic.rows)}</span>
-            <span>{formatCount(topic.subscribers)}</span>
-            <span>{formatCount(topic.queueDepth)}</span>
-            <span>{formatCount(topic.maxSubscriptionLagVersions)}</span>
-            <span>{formatCount(topic.activePlanCount)}</span>
-            <span>
-              {formatCount(topic.activePlanBuildingCount)}/
-              {formatCount(topic.activePlanBuildQueueDepth)}
-            </span>
-            <span>{formatCount(topic.activePlanPendingCount)}</span>
-            <span>{formatCount(topic.activeViewCount)}</span>
-            <span>{formatCount(topic.activePlanFallbackCount)}</span>
-            <span>{formatCount(topic.activePlanAutoBuildSkippedCount)}</span>
-            <span>{formatCount(topic.activePlanRows)}</span>
-            <span>{formatBytes(topic.activePlanIndexEstimatedBytes)}</span>
-            <span>{formatCount(topic.kafkaLagTotal)}</span>
-            <span>{formatCount(topic.chdbPendingRequests)}</span>
-            <span>{formatCount(topic.chdbRestarts)}</span>
+            <span title={topic.chdbTitle}>{topic.chdbStatus}</span>
+            <span>{topic.rows}</span>
+            <span>{topic.subscribers}</span>
+            <span>{topic.queueDepth}</span>
+            <span>{topic.maxSubscriptionLagVersions}</span>
+            <span>{topic.activePlanCount}</span>
+            <span>{topic.activePlanBuilds}</span>
+            <span>{topic.activePlanPendingCount}</span>
+            <span>{topic.activeViewCount}</span>
+            <span>{topic.activePlanFallbackCount}</span>
+            <span>{topic.activePlanAutoBuildSkippedCount}</span>
+            <span>{topic.activePlanRows}</span>
+            <span>{topic.activePlanIndexEstimatedBytes}</span>
+            <span>{topic.kafkaLagTotal}</span>
+            <span>{topic.chdbPendingRequests}</span>
+            <span>{topic.chdbRestarts}</span>
             <span>{topic.chdbBackendVersion}</span>
-            <span>{formatCount(topic.chdbPid)}</span>
-            <span>{formatTime(topic.updatedAt)}</span>
+            <span>{topic.chdbPid}</span>
+            <span>{topic.updatedAt}</span>
           </div>
         ))}
       </div>
     </section>
   );
 }
-
-const emptyMetricsValue: LiveQueryValue<ViewServerMetricsRow> = {
-  rows: [],
-  totalRows: 0,
-  status: "connecting",
-  connection: {
-    connected: false,
-    attempt: 0,
-  },
-};
 
 function MetricCell(props: { readonly label: string; readonly value: string }) {
   return (
@@ -249,40 +118,6 @@ function SignalCell(props: { readonly label: string; readonly value: string }) {
       <strong>{props.value}</strong>
     </div>
   );
-}
-
-function formatCount(value: number | undefined): string {
-  return value === undefined ? "0" : Intl.NumberFormat("en-US").format(value);
-}
-
-function formatMs(value: number | undefined): string {
-  return `${value ?? 0}ms`;
-}
-
-function formatBytes(value: number | undefined): string {
-  if (value === undefined || value === 0) {
-    return "0 B";
-  }
-  const units = ["B", "KB", "MB", "GB"] as const;
-  let unitIndex = 0;
-  let scaled = value;
-  while (scaled >= 1024 && unitIndex < units.length - 1) {
-    scaled = scaled / 1024;
-    unitIndex++;
-  }
-  const digits = scaled >= 100 || unitIndex === 0 ? 0 : 1;
-  return `${scaled.toFixed(digits)} ${units[unitIndex] ?? "GB"}`;
-}
-
-function formatTime(value: bigint | undefined): string {
-  if (value === undefined) {
-    return "pending";
-  }
-  return new Date(Number(value)).toLocaleTimeString("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
 }
 
 export const metricsDashboardCss = `
