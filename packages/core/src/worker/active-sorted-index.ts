@@ -1,4 +1,5 @@
 import type { RuntimeRowKey } from "../protocol/index.ts";
+import { stableKeyEquals } from "../protocol/stable-key.ts";
 
 export type ActiveSortedIndexKind = "array" | "blocks";
 
@@ -133,7 +134,7 @@ class ArraySortedIndex implements ActiveSortedIndex {
       candidateIndex >= 0 && this.#compareIds(this.#ids[candidateIndex], id) === 0;
       candidateIndex--
     ) {
-      if (Object.is(this.#ids[candidateIndex], id)) {
+      if (stableKeyEquals(this.#ids[candidateIndex], id)) {
         return candidateIndex;
       }
     }
@@ -142,7 +143,7 @@ class ArraySortedIndex implements ActiveSortedIndex {
       candidateIndex < this.#ids.length && this.#compareIds(this.#ids[candidateIndex], id) === 0;
       candidateIndex++
     ) {
-      if (Object.is(this.#ids[candidateIndex], id)) {
+      if (stableKeyEquals(this.#ids[candidateIndex], id)) {
         return candidateIndex;
       }
     }
@@ -341,7 +342,7 @@ class BlockSortedIndex implements ActiveSortedIndex {
       candidateIndex >= 0 && this.#compareIds(block[candidateIndex], id) === 0;
       candidateIndex--
     ) {
-      if (Object.is(block[candidateIndex], id)) {
+      if (stableKeyEquals(block[candidateIndex], id)) {
         return candidateIndex;
       }
     }
@@ -350,7 +351,7 @@ class BlockSortedIndex implements ActiveSortedIndex {
       candidateIndex < block.length && this.#compareIds(block[candidateIndex], id) === 0;
       candidateIndex++
     ) {
-      if (Object.is(block[candidateIndex], id)) {
+      if (stableKeyEquals(block[candidateIndex], id)) {
         return candidateIndex;
       }
     }

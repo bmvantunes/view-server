@@ -1,4 +1,5 @@
-import type { RuntimeRow } from "../protocol/index.ts";
+import { isStableKey, stableKeyFromRow } from "../protocol/stable-key.ts";
+import type { RuntimeRow, RuntimeRowKey } from "../protocol/index.ts";
 import { changedFields } from "./query-engine.ts";
 import { MutationLog, type MutationLogEntry, type WorkerVersion } from "./mutation-log.ts";
 
@@ -149,7 +150,7 @@ export class MutationStore {
     this.#idIndex = new Map();
     this.#rows.forEach((row, index) => {
       const id = row[this.#idField];
-      if (typeof id === "string" || typeof id === "number") {
+      if (isStableKey(id)) {
         this.#idIndex.set(id, index);
       }
     });
@@ -203,7 +204,6 @@ function removeIndexedRow(
   }
 }
 
-function rowId(row: RuntimeRow, idField: string): string | number {
-  const value = row[idField];
-  return typeof value === "string" || typeof value === "number" ? value : String(value);
+function rowId(row: RuntimeRow, idField: string): RuntimeRowKey {
+  return stableKeyFromRow(row, idField);
 }

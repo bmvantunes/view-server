@@ -20,6 +20,7 @@ import {
   type RuntimeRow,
   type SubscriptionEvent,
 } from "../protocol/index.ts";
+import { decodeStableKeyFromWire } from "../protocol/stable-key.ts";
 import {
   fromWireRow,
   fromWireRows,
@@ -174,15 +175,16 @@ function decodeDeltaOperation<
   if (operation.type === "remove") {
     return Effect.succeed({
       type: "remove" as const,
-      key: operation.key,
+      key: decodeStableKeyFromWire(operation.key),
     });
   }
   if (operation.type === "patch") {
     const changes = fromWireRow(operation.changes);
+    const key = decodeStableKeyFromWire(operation.key);
     return decodeResultPatch(changes, config, topic, query).pipe(
       Effect.map((decodedChanges) => ({
         type: "patch" as const,
-        key: operation.key,
+        key,
         changes: decodedChanges,
         ...(operation.index === undefined ? {} : { index: operation.index }),
       })),
@@ -205,7 +207,7 @@ function decodeDeltaOperation<
         : Effect.succeed({
             type: "upsert" as const,
             row,
-            ...(operation.key === undefined ? {} : { key: operation.key }),
+            ...(operation.key === undefined ? {} : { key: decodeStableKeyFromWire(operation.key) }),
             ...(operation.index === undefined ? {} : { index: operation.index }),
           });
     }),

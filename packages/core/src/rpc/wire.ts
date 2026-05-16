@@ -1,5 +1,6 @@
 import * as BigDecimal from "effect/BigDecimal";
 import { stableStringify, type RuntimeRow, type SubscriptionEvent } from "../protocol/index.ts";
+import { encodeStableKeyForWire } from "../protocol/stable-key.ts";
 import type { RpcWireValue } from "./rpcs.ts";
 
 export function wireQueryResponse(response: {
@@ -28,16 +29,21 @@ export function wireSubscriptionEvent(event: SubscriptionEvent<readonly RuntimeR
     ...event,
     ops: event.ops.map((operation) => {
       if (operation.type === "remove") {
-        return operation;
+        return {
+          ...operation,
+          key: encodeStableKeyForWire(operation.key),
+        };
       }
       if (operation.type === "patch") {
         return {
           ...operation,
+          key: encodeStableKeyForWire(operation.key),
           changes: toWireRow(operation.changes),
         };
       }
       return {
         ...operation,
+        ...(operation.key === undefined ? {} : { key: encodeStableKeyForWire(operation.key) }),
         row: toWireRow(operation.row),
       };
     }),

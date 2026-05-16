@@ -6,6 +6,7 @@ import type {
   TopicRowFromConfig,
   ViewServerConfig,
 } from "../config/index.ts";
+import { stableKeyFromRow, type StableKey } from "./stable-key.ts";
 
 export type SortDirection = "asc" | "desc";
 
@@ -297,12 +298,11 @@ export type RuntimeGroupedQuery = {
 };
 export type RuntimeQuery = RuntimeRawQuery | RuntimeGroupedQuery;
 
-export type RuntimeRowKey = string | number;
+export type RuntimeRowKey = StableKey;
 export type RuntimeRowKeyFn = (row: RuntimeRow) => RuntimeRowKey;
 
 export function rowKeyByField(row: RuntimeRow, idField: string): RuntimeRowKey {
-  const value = row[idField];
-  return typeof value === "string" || typeof value === "number" ? value : stableStringify(value);
+  return stableKeyFromRow(row, idField);
 }
 
 export function groupRowKey(row: RuntimeRow, groupBy: readonly string[]): string {

@@ -5,6 +5,7 @@ import {
   type RuntimeQuery,
   type RuntimeRow,
 } from "../protocol/index.ts";
+import { decodeStableKeyFromWire, encodeStableKeyForWire } from "../protocol/stable-key.ts";
 import type { MutationLogEntry } from "../worker/mutation-log.ts";
 import type { SnapshotBackendResult, VersionedRow } from "./snapshot-backend.ts";
 import type {
@@ -36,7 +37,7 @@ export function encodeMutationLogEntry(entry: MutationLogEntry): ChdbWireMutatio
   return {
     version: entry.version,
     kind: entry.kind,
-    id: entry.id,
+    id: encodeStableKeyForWire(entry.id),
     ...(entry.before === undefined ? {} : { before: encodeRuntimeRow(entry.before) }),
     ...(entry.after === undefined ? {} : { after: encodeRuntimeRow(entry.after) }),
     changedFields: entry.changedFields,
@@ -47,7 +48,7 @@ export function decodeMutationLogEntry(entry: ChdbWireMutationLogEntry): Mutatio
   return {
     version: entry.version,
     kind: entry.kind,
-    id: entry.id,
+    id: decodeStableKeyFromWire(entry.id),
     ...(entry.before === undefined ? {} : { before: decodeRuntimeRow(entry.before) }),
     ...(entry.after === undefined ? {} : { after: decodeRuntimeRow(entry.after) }),
     changedFields: entry.changedFields,

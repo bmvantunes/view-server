@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import type { TopicConfig } from "../config/index.ts";
 import { snapshotBackendFailed, type ViewServerError } from "../errors.ts";
 import type { RuntimeQuery, RuntimeRow } from "../protocol/index.ts";
+import { isStableKey } from "../protocol/stable-key.ts";
 import type { MutationLogEntry, WorkerVersion } from "../worker/mutation-log.ts";
 import type {
   SnapshotBackend,
@@ -237,7 +238,7 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
       backend.#lastError = "";
       for (const entry of args.rows) {
         const id = entry.row[args.idField];
-        if (typeof id === "string" || typeof id === "number") {
+        if (isStableKey(id)) {
           backend.#mirrorRows.set(id, { ...entry.row });
         }
       }
@@ -396,7 +397,7 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
       return;
     }
     const id = mutation.after[this.#idField];
-    if (typeof id === "string" || typeof id === "number") {
+    if (isStableKey(id)) {
       this.#mirrorRows.set(id, { ...mutation.after });
     }
   }

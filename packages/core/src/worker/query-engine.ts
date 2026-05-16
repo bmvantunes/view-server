@@ -2,6 +2,7 @@ import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import {
+  rowKeyByField,
   rowKeyForQuery,
   type DeltaOperation,
   type OrderBy,
@@ -288,12 +289,8 @@ export function collectDependencyFields(query: RuntimeQuery, idField: string): R
   return fields;
 }
 
-export function rowId(row: RuntimeRow, idField: string): string | number {
-  const value = row[idField];
-  if (typeof value === "string" || typeof value === "number") {
-    return value;
-  }
-  return String(value);
+export function rowId(row: RuntimeRow, idField: string): RuntimeRowKey {
+  return rowKeyByField(row, idField);
 }
 
 export function changedFields(previous: RuntimeRow, next: RuntimeRow): ReadonlySet<string> {

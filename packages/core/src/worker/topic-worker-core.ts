@@ -27,6 +27,7 @@ import type {
   SubscriptionEvent,
 } from "../protocol/index.ts";
 import { rowKeyByField } from "../protocol/index.ts";
+import { isStableKey } from "../protocol/stable-key.ts";
 import type { SnapshotBackend } from "../snapshot/index.ts";
 import { createMemorySnapshotBackend } from "../snapshot/index.ts";
 import {
@@ -185,9 +186,7 @@ export function makeTopicWorkerCore(
 
     const ensureId = (row: RuntimeRow) => {
       const id = row[idField];
-      return typeof id === "string" || typeof id === "number"
-        ? Effect.succeed(id)
-        : Effect.fail(missingTopicId(topic, idField));
+      return isStableKey(id) ? Effect.succeed(id) : Effect.fail(missingTopicId(topic, idField));
     };
 
     const memoryQuery = (query: RuntimeQuery) =>
@@ -1083,7 +1082,7 @@ export function makeTopicWorkerCore(
         gate.withPermit(
           Effect.fnUntraced(function* () {
             const id = patch[idField];
-            if (typeof id !== "string" && typeof id !== "number") {
+            if (!isStableKey(id)) {
               return yield* Effect.fail(missingTopicId(topic, idField));
             }
             const before = mutationStore.rowById(id);
