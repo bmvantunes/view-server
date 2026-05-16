@@ -4,7 +4,7 @@ import * as Schema from "effect/Schema";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { defineConfig } from "@view-server/core/config";
 import type { RawQuery } from "@view-server/core/query";
-import type { LiveQueryResult } from "@view-server/core/client";
+import type { LiveQueryResult, LiveQueryStatus } from "@view-server/core/client";
 import { createViewServerReact } from "@view-server/react";
 
 const Order = Schema.Struct({
@@ -49,13 +49,51 @@ function useLiveQueryTypeSample(): LiveQueryResult<{
 
   if (AsyncResult.isSuccess(result)) {
     expect(result.value.rows[0]?.amount).toBeDefined();
+    const rows: readonly {
+      readonly id: string;
+      readonly amount: BigDecimal.BigDecimal;
+    }[] = result.value.rows;
+    const status: LiveQueryStatus = result.value.status;
+    const connected: boolean = result.value.connection.connected;
+    expect(rows.length).toBeGreaterThanOrEqual(0);
+    expect(status).toBeDefined();
+    expect(connected).toBeTypeOf("boolean");
   }
 
   return result;
 }
 
+function useInvalidLiveQueryTypeSamples() {
+  // @ts-expect-error topic names are inferred from defineConfig.
+  react.useLiveQuery("customers", query);
+
+  const missingTotalRows = {
+    rows: [
+      {
+        id: "o-1",
+        amount: BigDecimal.fromStringUnsafe("12.50"),
+      },
+    ],
+  };
+  // @ts-expect-error initialData requires totalRows.
+  react.useLiveQuery("orders", query, missingTotalRows);
+
+  const invalidRow = {
+    rows: [
+      {
+        id: "o-1",
+        amount: "12.50",
+      },
+    ],
+    totalRows: 1,
+  };
+  // @ts-expect-error initialData rows match query result rows.
+  react.useLiveQuery("orders", query, invalidRow);
+}
+
 describe("react public API type contracts", () => {
   test("returns AsyncResult with config-derived live query rows", () => {
     expect(typeof useLiveQueryTypeSample).toBe("function");
+    expect(typeof useInvalidLiveQueryTypeSamples).toBe("function");
   });
 });

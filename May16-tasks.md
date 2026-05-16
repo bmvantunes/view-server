@@ -57,6 +57,9 @@ focused tests and the relevant integration tests still pass.
       isolated websocket clients, scoped publish helpers, and browser-mode coverage.
 - [x] Task 25: Package export contract audit updated for public subpaths, testing
       harness root exports, browser dependency guard, and package dry-run validation.
+- [x] Task 26: Public API type matrix covers config-derived topic names, client
+      publish/delta/query typing, raw/grouped query fields, BigDecimal values,
+      literal unions, and AsyncResult live-query rows/initialData.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
 - [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [x] Task 39: chDB SQL compiler contract tests and internal compiler module.
