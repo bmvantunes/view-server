@@ -87,6 +87,63 @@ describe("RuntimeHealthProjection", () => {
     });
     expect(rows.map((row) => row.id)).toEqual(["server", "topic:orders"]);
   });
+
+  it("keeps public health response and health topic rows aligned for degraded topics", () => {
+    const health = projectRuntimeHealth({
+      closing: false,
+      topics: {
+        orders: {
+          worker: topicMetrics({
+            rows: 42,
+            subscribers: 3,
+            queueDepth: 2,
+            status: "degraded",
+            chdbStatus: "degraded",
+            chdbLastError: "chDB down",
+            activePlanFallbackCount: 1,
+          }),
+          kafka: { ...emptyKafkaRuntimeMetrics, lagTotal: 9, lagMax: 6, partitions: 2 },
+          sourceFailed: false,
+        },
+        trades: {
+          worker: topicMetrics({ status: "ready" }),
+          kafka: emptyKafkaRuntimeMetrics,
+          sourceFailed: true,
+        },
+      },
+    });
+
+    const rows = healthRowsFromResponse(health, () => 456);
+    const ordersRow = rows.find((row) => row.id === "topic:orders");
+    const tradesRow = rows.find((row) => row.id === "topic:trades");
+
+    expect(health.ok).toBe(false);
+    expect(health.topics.orders).toMatchObject({
+      status: "degraded",
+      chdbStatus: "degraded",
+      chdbLastError: "chDB down",
+      activePlanFallbackCount: 1,
+      kafkaLagTotal: 9,
+    });
+    expect(health.topics.trades?.status).toBe("degraded");
+    expect(ordersRow).toMatchObject({
+      id: "topic:orders",
+      kind: "topic",
+      topic: "orders",
+      rows: 42,
+      subscribers: 3,
+      queueDepth: 2,
+      status: health.topics.orders?.status,
+      chdbStatus: health.topics.orders?.chdbStatus,
+      chdbLastError: health.topics.orders?.chdbLastError,
+      activePlanFallbackCount: health.topics.orders?.activePlanFallbackCount,
+      kafkaLagTotal: health.topics.orders?.kafkaLagTotal,
+      kafkaLagMax: health.topics.orders?.kafkaLagMax,
+      kafkaPartitions: health.topics.orders?.kafkaPartitions,
+      updatedAt: 456n,
+    });
+    expect(tradesRow?.status).toBe("degraded");
+  });
 });
 
 function topicMetrics(overrides: Partial<TopicWorkerMetrics> = {}): TopicWorkerMetrics {

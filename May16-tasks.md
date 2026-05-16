@@ -607,6 +607,8 @@ Tests / acceptance:
 
 Priority: P1
 
+Status: Done in `packages/core/src/server/runtime-health-projection.ts`.
+
 Problem:
 
 Health data is assembled across runtime, workers, backend, Kafka, active plans, lag, chDB, readiness, source failure. That projection should be explicit.
