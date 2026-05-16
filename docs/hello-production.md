@@ -32,6 +32,7 @@ export const viewServerConfig = defineConfig({
     deltaCoalescing: true,
     maxActivePlans: 64,
     maxActivePlanEstimatedBytes: 512 * 1024 * 1024,
+    activePlanAutoBuildMaxRows: 1_000_000,
     activePlanBuildConcurrency: 1,
     groupedRefreshDebounceMs: 100,
   },

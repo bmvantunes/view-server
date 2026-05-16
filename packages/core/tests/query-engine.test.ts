@@ -1,6 +1,9 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
 import type {
   DeltaOperation,
+  RuntimeGroupedQuery,
   RuntimeRawQuery,
   RuntimeRow,
   RuntimeRowKey,
@@ -8,6 +11,8 @@ import type {
 } from "../src/protocol/index.ts";
 import {
   diffVisibleRows,
+  executeGroupedQuery,
+  executeGroupedQueryEffect,
   executeRawQuery,
   projectRawRow,
   rawQueryOrderBy,
@@ -150,6 +155,61 @@ describe("query-engine visible row diff", () => {
   });
 });
 
+describe("query-engine grouped query execution", () => {
+  it.effect("computes grouped aggregates in one pass without changing result semantics", () =>
+    Effect.gen(function* () {
+      const rows = [
+        { id: "a", symbol: "AAPL", price: 10, exact: BigDecimal.fromStringUnsafe("1.10") },
+        { id: "b", symbol: "AAPL", price: 20, exact: BigDecimal.fromStringUnsafe("2.20") },
+        { id: "c", symbol: "MSFT", price: 5, exact: BigDecimal.fromStringUnsafe("3.30") },
+        { id: "d", symbol: "MSFT", price: null, exact: BigDecimal.fromStringUnsafe("4.40") },
+      ];
+      const query = {
+        groupBy: ["symbol"],
+        aggregates: {
+          orders: { aggFunc: "count", field: "id" },
+          distinctPrices: { aggFunc: "count_distinct", field: "price" },
+          totalPrice: { aggFunc: "sum", field: "price" },
+          avgPrice: { aggFunc: "avg", field: "price" },
+          minPrice: { aggFunc: "min", field: "price" },
+          maxPrice: { aggFunc: "max", field: "price" },
+          exactTotal: { aggFunc: "sum", field: "exact" },
+          labels: { aggFunc: "string_concat", field: "id", joiner: ",", sort: "desc" },
+          labelsDistinct: {
+            aggFunc: "string_concat_distinct",
+            field: "symbol",
+            joiner: "|",
+          },
+        },
+        orderBy: [{ field: "symbol", direction: "asc" }],
+      } satisfies RuntimeGroupedQuery;
+
+      const sync = executeGroupedQuery(rows, query);
+      const effect = yield* executeGroupedQueryEffect(rows, query, { chunkSize: 1 });
+
+      expect(effect).toEqual(sync);
+      expect(sync.totalRows).toBe(2);
+      expect(sync.rows[0]).toMatchObject({
+        symbol: "AAPL",
+        orders: 2,
+        distinctPrices: 2,
+        totalPrice: 30,
+        avgPrice: 15,
+        minPrice: 10,
+        maxPrice: 20,
+        labels: "b,a",
+        labelsDistinct: "AAPL",
+      });
+      expect(
+        BigDecimal.equals(
+          expectBigDecimal(sync.rows[0]?.exactTotal),
+          BigDecimal.fromStringUnsafe("3.30"),
+        ),
+      ).toBe(true);
+    }),
+  );
+});
+
 describe("query-engine raw query execution", () => {
   it("matches full-sort raw query semantics for small sorted windows", () => {
     const rows = Array.from({ length: 1_000 }, (_, index) => ({
@@ -226,6 +286,13 @@ function keyById(row: RuntimeRow): RuntimeRowKey {
     throw new Error("Expected string or number id");
   }
   return id;
+}
+
+function expectBigDecimal(value: unknown): BigDecimal.BigDecimal {
+  if (BigDecimal.isBigDecimal(value)) {
+    return value;
+  }
+  throw new Error(`Expected BigDecimal, got ${String(value)}`);
 }
 
 function legacyDiffVisibleRows(

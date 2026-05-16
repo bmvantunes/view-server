@@ -124,6 +124,7 @@ export type ViewServerConfig<TTopics extends TopicConfigMap = TopicConfigMap> = 
         readonly deltaCoalescing?: boolean | undefined;
         readonly maxActivePlans?: number | undefined;
         readonly maxActivePlanEstimatedBytes?: number | undefined;
+        readonly activePlanAutoBuildMaxRows?: number | undefined;
         readonly activePlanBuildConcurrency?: number | undefined;
         readonly groupedRefreshDebounceMs?: number | undefined;
       }
@@ -170,6 +171,7 @@ export type NormalizedViewServerConfig = {
     readonly deltaCoalescing: boolean;
     readonly maxActivePlans?: number | undefined;
     readonly maxActivePlanEstimatedBytes?: number | undefined;
+    readonly activePlanAutoBuildMaxRows: number;
     readonly activePlanBuildConcurrency: number;
     readonly groupedRefreshDebounceMs: number;
   };
@@ -259,6 +261,7 @@ export const ViewServerHealthRowSchema = Schema.Struct({
   activePlanBuildMsTotal: Schema.Number,
   activePlanBuildMsMax: Schema.Number,
   activePlanFallbackCount: Schema.Number,
+  activePlanAutoBuildSkippedCount: Schema.Number,
   chdbStatus: Schema.Literals(["ready", "degraded", "restarting", "stopped"]),
   chdbPid: Schema.Number,
   chdbRestarts: Schema.Number,
@@ -302,6 +305,7 @@ export function normalizeConfig(config: ViewServerConfig): NormalizedViewServerC
     maxQueueDepth: config.worker?.maxQueueDepth ?? 100_000,
     mutationLogSize: config.worker?.mutationLogSize ?? 10_000,
     deltaCoalescing: config.worker?.deltaCoalescing ?? true,
+    activePlanAutoBuildMaxRows: config.worker?.activePlanAutoBuildMaxRows ?? 1_000_000,
     activePlanBuildConcurrency: config.worker?.activePlanBuildConcurrency ?? 1,
     groupedRefreshDebounceMs: config.worker?.groupedRefreshDebounceMs ?? 50,
     ...(config.worker?.maxActivePlans === undefined
@@ -313,6 +317,7 @@ export function normalizeConfig(config: ViewServerConfig): NormalizedViewServerC
   };
   validatePositiveInt("worker.maxQueueDepth", worker.maxQueueDepth);
   validatePositiveInt("worker.mutationLogSize", worker.mutationLogSize);
+  validateNonNegativeInt("worker.activePlanAutoBuildMaxRows", worker.activePlanAutoBuildMaxRows);
   validatePositiveInt("worker.activePlanBuildConcurrency", worker.activePlanBuildConcurrency);
   validateNonNegativeNumber("worker.groupedRefreshDebounceMs", worker.groupedRefreshDebounceMs);
   if (worker.maxActivePlans !== undefined) {

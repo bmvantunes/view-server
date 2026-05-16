@@ -59,12 +59,14 @@ Important metrics:
 - `activePlanIndexEstimatedBytes`: lower-bound estimate for sorted index references.
 - `activePlanBuildQueueDepth`, `activePlanBuildingCount`, `activePlanPendingCount`: startup pressure.
 - `activePlanFallbackCount`: subscriptions using memory recompute fallback because guardrails rejected a new active plan.
+- `activePlanAutoBuildSkippedCount`: subscriptions whose initial row count exceeded `activePlanAutoBuildMaxRows`; these subscriptions keep their initial snapshot and surface stale status on relevant mutations.
 
 Recommended guardrail priority:
 
 1. Use `maxActivePlans` as the primary production guardrail.
-2. Treat `maxActivePlanEstimatedBytes` as retained-index protection, not a full heap budget.
-3. Watch build queue/pending metrics during user-driven query changes.
+2. Use `activePlanAutoBuildMaxRows` to avoid building massive plans during subscription setup.
+3. Treat `maxActivePlanEstimatedBytes` as retained-index protection, not a full heap budget.
+4. Watch build queue/pending/skipped metrics during user-driven query changes.
 
 ## Grouped Queries
 

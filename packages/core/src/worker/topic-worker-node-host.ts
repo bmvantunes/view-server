@@ -74,6 +74,9 @@ export const makeNodeThreadTopicWorkerHostFactory = (
         ...(hostOptions.maxActivePlanEstimatedBytes === undefined
           ? {}
           : { maxActivePlanEstimatedBytes: hostOptions.maxActivePlanEstimatedBytes }),
+        ...(hostOptions.activePlanAutoBuildMaxRows === undefined
+          ? {}
+          : { activePlanAutoBuildMaxRows: hostOptions.activePlanAutoBuildMaxRows }),
         ...(hostOptions.activePlanBuildConcurrency === undefined
           ? {}
           : { activePlanBuildConcurrency: hostOptions.activePlanBuildConcurrency }),
@@ -133,6 +136,7 @@ function topicWorkerHostFromClient(
         activePlanBuildMsTotal: metrics.activePlanBuildMsTotal,
         activePlanBuildMsMax: metrics.activePlanBuildMsMax,
         activePlanFallbackCount: metrics.activePlanFallbackCount,
+        activePlanAutoBuildSkippedCount: metrics.activePlanAutoBuildSkippedCount,
         chdbStatus: metrics.chdbStatus,
         chdbPid: metrics.chdbPid,
         chdbRestarts: metrics.chdbRestarts,

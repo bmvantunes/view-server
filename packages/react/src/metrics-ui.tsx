@@ -25,6 +25,7 @@ export const viewServerHealthQuery = {
     activePlanBuildMsTotal: true,
     activePlanBuildMsMax: true,
     activePlanFallbackCount: true,
+    activePlanAutoBuildSkippedCount: true,
     chdbStatus: true,
     chdbPid: true,
     chdbRestarts: true,
@@ -69,6 +70,7 @@ export const viewServerHealthQuery = {
     readonly activePlanBuildMsTotal: true;
     readonly activePlanBuildMsMax: true;
     readonly activePlanFallbackCount: true;
+    readonly activePlanAutoBuildSkippedCount: true;
     readonly chdbStatus: true;
     readonly chdbPid: true;
     readonly chdbRestarts: true;
@@ -146,6 +148,10 @@ export function ViewServerMetricsDashboard(props: {
         <MetricCell label="plan queue" value={formatCount(server?.activePlanBuildQueueDepth)} />
         <MetricCell label="indexed rows" value={formatCount(server?.activePlanRows)} />
         <MetricCell label="fallbacks" value={formatCount(server?.activePlanFallbackCount)} />
+        <MetricCell
+          label="skipped plans"
+          value={formatCount(server?.activePlanAutoBuildSkippedCount)}
+        />
       </div>
 
       <div className="vs-metrics__latency" aria-label="Latency signals">
@@ -174,6 +180,7 @@ export function ViewServerMetricsDashboard(props: {
           <span>pending</span>
           <span>views</span>
           <span>fallbacks</span>
+          <span>skipped</span>
           <span>indexed rows</span>
           <span>index</span>
           <span>lag</span>
@@ -200,6 +207,7 @@ export function ViewServerMetricsDashboard(props: {
             <span>{formatCount(topic.activePlanPendingCount)}</span>
             <span>{formatCount(topic.activeViewCount)}</span>
             <span>{formatCount(topic.activePlanFallbackCount)}</span>
+            <span>{formatCount(topic.activePlanAutoBuildSkippedCount)}</span>
             <span>{formatCount(topic.activePlanRows)}</span>
             <span>{formatBytes(topic.activePlanIndexEstimatedBytes)}</span>
             <span>{formatCount(topic.kafkaLagTotal)}</span>
@@ -436,7 +444,7 @@ export const metricsDashboardCss = `
 .vs-metrics__topic-head,
 .vs-metrics__topic-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1.4fr) 92px 104px repeat(16, minmax(70px, 0.7fr)) 120px;
+  grid-template-columns: minmax(140px, 1.4fr) 92px 104px repeat(17, minmax(70px, 0.7fr)) 120px;
   gap: 10px;
   align-items: center;
   min-height: 42px;

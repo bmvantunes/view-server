@@ -240,14 +240,117 @@ export function applyDeltaOperations(
     typeof rowKeyOrIdField === "string"
       ? (row: RuntimeRow) => rowKeyByField(row, rowKeyOrIdField)
       : rowKeyOrIdField;
+  if (shouldUseIndexedDeltaApplication(rows.length, event.ops.length)) {
+    const indexed = tryApplyIndexedDeltaOperations(rows, event, rowKey);
+    if (indexed !== undefined) {
+      return indexed;
+    }
+  }
   const next = rows.map((row) => ({ ...row }));
   for (const operation of event.ops) {
-    applyDeltaOperation(next, operation, rowKey);
+    applyDeltaOperationSequential(next, operation, rowKey);
   }
   return next;
 }
 
-function applyDeltaOperation(
+function shouldUseIndexedDeltaApplication(rowCount: number, operationCount: number): boolean {
+  return rowCount >= 500 && operationCount >= 64;
+}
+
+function tryApplyIndexedDeltaOperations(
+  rows: readonly RuntimeRow[],
+  event: DeltaEvent<readonly RuntimeRow[]>,
+  rowKey: RuntimeRowKeyFn,
+): readonly RuntimeRow[] | undefined {
+  const originalRowsByKey = new Map<string | number, RuntimeRow>();
+  for (const row of rows) {
+    const key = rowKey(row);
+    if (originalRowsByKey.has(key)) {
+      return undefined;
+    }
+    originalRowsByKey.set(key, row);
+  }
+
+  const removedKeys = new Set<string | number>();
+  const placedRowsByIndex = new Map<number, RuntimeRow>();
+  const placedKeys = new Set<string | number>();
+  let sawPlacement = false;
+  for (const operation of event.ops) {
+    if (operation.type === "remove") {
+      if (sawPlacement) {
+        return undefined;
+      }
+      removedKeys.add(operation.key);
+      continue;
+    }
+
+    sawPlacement = true;
+    if (operation.index === undefined || !Number.isFinite(operation.index)) {
+      return undefined;
+    }
+    const index = Math.trunc(operation.index);
+    if (index < 0 || placedRowsByIndex.has(index)) {
+      return undefined;
+    }
+    const key =
+      operation.type === "patch" ? operation.key : (operation.key ?? rowKey(operation.row));
+    if (placedKeys.has(key)) {
+      return undefined;
+    }
+    if (operation.type === "patch") {
+      const previous = originalRowsByKey.get(operation.key);
+      if (previous === undefined) {
+        continue;
+      }
+      placedRowsByIndex.set(index, { ...previous, ...operation.changes });
+    } else {
+      placedRowsByIndex.set(index, operation.row);
+    }
+    placedKeys.add(key);
+  }
+
+  const remainingRows: RuntimeRow[] = [];
+  let removedExistingCount = 0;
+  for (const row of rows) {
+    const key = rowKey(row);
+    if (removedKeys.has(key)) {
+      removedExistingCount++;
+      continue;
+    }
+    if (!placedKeys.has(key)) {
+      remainingRows.push({ ...row });
+    }
+  }
+  let insertedCount = 0;
+  for (const key of placedKeys) {
+    if (!originalRowsByKey.has(key) || removedKeys.has(key)) {
+      insertedCount++;
+    }
+  }
+  const finalLength = rows.length - removedExistingCount + insertedCount;
+  for (const index of placedRowsByIndex.keys()) {
+    if (index >= finalLength) {
+      return undefined;
+    }
+  }
+  const next: RuntimeRow[] = [];
+  let remainingIndex = 0;
+  for (let index = 0; index < finalLength; index++) {
+    const placed = placedRowsByIndex.get(index);
+    if (placed !== undefined) {
+      next.push(placed);
+      continue;
+    }
+    const row = remainingRows[remainingIndex];
+    if (row !== undefined) {
+      next.push(row);
+      remainingIndex++;
+    }
+  }
+  return next;
+}
+
+function applyDeltaOperationSequential(
   rows: RuntimeRow[],
   operation: DeltaOperation<RuntimeRow>,
   rowKey: RuntimeRowKeyFn,

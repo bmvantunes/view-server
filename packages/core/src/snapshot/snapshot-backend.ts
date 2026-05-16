@@ -115,7 +115,9 @@ export function createMemorySnapshotBackend(): SnapshotBackend {
           rows: result.rows,
           totalRows: result.totalRows,
           backendVersion,
-          replayRows: rows.map((row) => ({ ...row })),
+          ...(backendVersion === args.targetVersion
+            ? {}
+            : { replayRows: rows.map((row) => ({ ...row })) }),
         };
       })(),
 

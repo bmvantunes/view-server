@@ -53,12 +53,13 @@ worker: {
   deltaCoalescing: true,
   maxActivePlans: 64,
   maxActivePlanEstimatedBytes: 512 * 1024 * 1024,
+  activePlanAutoBuildMaxRows: 1_000_000,
   activePlanBuildConcurrency: 1,
   groupedRefreshDebounceMs: 100,
 }
 ```
 
-`maxActivePlans` is the primary guardrail. `maxActivePlanEstimatedBytes` is a lower-bound sorted-index estimate, not a full heap budget. Keep process heap headroom for row memory, active plan maps, RPC buffers, one chDB child process per active topic, and Kafka decode bursts.
+`maxActivePlans` is the primary guardrail. `activePlanAutoBuildMaxRows` prevents subscription startup from building huge active plans automatically; skipped subscriptions receive the initial snapshot and then report stale status on relevant mutations. `maxActivePlanEstimatedBytes` is a lower-bound sorted-index estimate, not a full heap budget. Keep process heap headroom for row memory, active plan maps, RPC buffers, one chDB child process per active topic, and Kafka decode bursts.
 
 ## Nginx Websocket
 

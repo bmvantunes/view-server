@@ -141,6 +141,7 @@ const healthQuery = {
     activePlanBuildMsTotal: true,
     activePlanBuildMsMax: true,
     activePlanFallbackCount: true,
+    activePlanAutoBuildSkippedCount: true,
     status: true,
   },
   orderBy: [{ field: "id", direction: "asc" }],
@@ -167,6 +168,7 @@ const healthQuery = {
     readonly activePlanBuildMsTotal: true;
     readonly activePlanBuildMsMax: true;
     readonly activePlanFallbackCount: true;
+    readonly activePlanAutoBuildSkippedCount: true;
     readonly status: true;
   }
 >;
@@ -659,6 +661,49 @@ describe("Effect RPC in-memory", () => {
         activePlanRows: 0,
         activePlanIndexEstimatedBytes: 0,
       });
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("skips active plan auto-build when the topic row count exceeds admission policy", () =>
+    Effect.gen(function* () {
+      const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
+        initialRows: [
+          { id: "o-1", symbol: "AAPL", price: 100 },
+          { id: "o-2", symbol: "MSFT", price: 200 },
+          { id: "o-3", symbol: "NVDA", price: 300 },
+        ],
+        activePlanAutoBuildMaxRows: 2,
+      });
+      const events = yield* worker
+        .subscribe("active-plan-admission-skip", coalesceQuery)
+        .pipe(Stream.toQueue({ capacity: 16 }));
+      const snapshot = yield* Queue.take(events);
+      expect(snapshot.type).toBe("snapshot");
+
+      const admitted = yield* worker.metrics;
+      expect(admitted.activePlanAutoBuildSkippedCount).toBe(1);
+      expect(admitted.activePlanCount).toBe(0);
+      expect(admitted.activePlanBuildQueueDepth).toBe(0);
+      expect(admitted.activePlanBuildingCount).toBe(0);
+      expect(admitted.activePlanPendingCount).toBe(0);
+
+      yield* worker.publish({ id: "o-4", symbol: "TSLA", price: 150 });
+      const stale = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+      expect(stale.type).toBe("status");
+      if (stale.type !== "status") {
+        throw new Error("Expected stale status");
+      }
+      expect(stale.status).toBe("stale");
+      expect(stale.meta.totalRows).toBe(4);
+
+      const dirty = yield* worker.metrics;
+      expect(dirty.activePlanAutoBuildSkippedCount).toBe(1);
+      expect(dirty.maxSubscriptionLagVersions).toBe(1);
+
+      yield* worker.unsubscribe("active-plan-admission-skip");
+      const released = yield* worker.metrics;
+      expect(released.activePlanAutoBuildSkippedCount).toBe(0);
+      expect(released.maxSubscriptionLagVersions).toBe(0);
     }).pipe(Effect.scoped),
   );
 

@@ -16,6 +16,7 @@ The script runs `packages/core/tests/worker-soak.test.ts` with:
 - `VS_WORKER_SOAK_RAW_SUBSCRIPTIONS=250`
 - `VS_WORKER_SOAK_GROUPED_SUBSCRIPTIONS=0`
 - `VS_WORKER_SOAK_MUTATIONS=10000`
+- `VS_WORKER_SOAK_ACTIVE_PLAN_AUTO_BUILD_MAX_ROWS=1000000`
 - `node --expose-gc`
 - a JSON summary under `/private/tmp/view-server-worker-soak-10m-<timestamp>.json`
 - a heartbeat JSONL progress artifact next to the summary
@@ -29,6 +30,17 @@ ${VS_WORKER_SOAK_SUMMARY_PATH}.progress.jsonl
 ```
 
 Each line includes the current phase, elapsed time, shape, and phase-specific counters. A healthy long run should emit progress for row generation, worker seed, subscriptions, mutation progress, settle, and cleanup at least every `VS_WORKER_SOAK_PROGRESS_INTERVAL_MS` milliseconds.
+
+The 10M profile intentionally uses the runtime active-plan admission policy. When a topic has more rows than `VS_WORKER_SOAK_ACTIVE_PLAN_AUTO_BUILD_MAX_ROWS`, raw subscriptions still receive their initial snapshot, but automatic active-plan construction is skipped and later mutations mark the view stale instead of building a 10M-row plan on subscription setup. The summary exposes `activePlanAutoBuildSkippedCountBeforeCleanup` so this is visible rather than hidden as a test-only switch.
+
+Use these timeout expectations as rough operator guidance, not SLAs:
+
+- Row generation should emit chunk heartbeats every `VS_WORKER_SOAK_ROW_GENERATION_CHUNK_SIZE` rows.
+- Worker seed can take tens of seconds at 10M rows depending on heap and CPU.
+- Subscription setup should never be silent longer than the heartbeat interval; it reports started/completed counts and active-plan build metrics.
+- Mutation run should report latency percentiles every 100 mutations.
+- Settle reports queue, lag, active-plan, and skipped-plan metrics until stable.
+- Cleanup should return subscribers, active views, build queues, and skipped-plan counts to zero.
 
 Grouped subscriptions default to `0` here on purpose. This worker soak uses the direct in-process worker and memory fallback path. That is useful for raw active-view lag/cleanup checks, but it is not the production grouped-query architecture. Production grouped refresh is chDB-backed and worker-isolated.
 
@@ -67,6 +79,7 @@ Relevant env vars:
 - `VS_WORKER_SOAK_MUTATIONS`
 - `VS_WORKER_SOAK_RAW_PAGE_CYCLE`
 - `VS_WORKER_SOAK_GROUPED_DEBOUNCE_MS`
+- `VS_WORKER_SOAK_ACTIVE_PLAN_AUTO_BUILD_MAX_ROWS`
 - `VS_WORKER_SOAK_TIMEOUT_MS`
 - `VS_WORKER_SOAK_MAX_OLD_SPACE_MB`
 - `VS_WORKER_SOAK_SUMMARY_PATH`
@@ -86,6 +99,7 @@ Keep the JSON artifact with the release notes or rollout ticket. Track:
 - final rows and worker version
 - subscribers before/after cleanup
 - active plan count/view count/fallback count
+- active-plan auto-build skipped count
 - active plan build queue/building/pending counts
 - queue depth
 - max and total subscription lag

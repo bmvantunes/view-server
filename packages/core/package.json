@@ -65,8 +65,11 @@
   "scripts": {
     "bench:ci-smoke": "node --experimental-strip-types bench/ci-smoke.ts",
     "bench:compare": "node --experimental-strip-types bench/ci-smoke.ts",
+    "bench:client-delta": "node --experimental-strip-types bench/client-delta.bench.ts",
+    "bench:grouped-aggregation": "node --experimental-strip-types bench/grouped-aggregation.bench.ts",
     "bench:query-engine": "node --experimental-strip-types bench/query-engine.bench.ts",
     "bench:refresh-baselines": "node --experimental-strip-types bench/ci-smoke.ts --refresh-baselines",
+    "bench:worker-replay": "node --experimental-strip-types bench/worker-replay.bench.ts",
     "build": "vp pack",
     "dev": "vp pack --watch",
     "test": "vitest run --config vitest.config.ts",

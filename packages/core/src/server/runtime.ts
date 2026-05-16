@@ -92,6 +92,7 @@ export type HealthResponse = {
         readonly activePlanBuildMsTotal: number;
         readonly activePlanBuildMsMax: number;
         readonly activePlanFallbackCount: number;
+        readonly activePlanAutoBuildSkippedCount: number;
         readonly chdbStatus: "ready" | "degraded" | "restarting" | "stopped";
         readonly chdbPid: number;
         readonly chdbRestarts: number;
@@ -160,6 +161,7 @@ export function makeViewServerRuntime(
         deltaCoalescing: normalized.worker.deltaCoalescing,
         maxActivePlans: normalized.worker.maxActivePlans,
         maxActivePlanEstimatedBytes: normalized.worker.maxActivePlanEstimatedBytes,
+        activePlanAutoBuildMaxRows: normalized.worker.activePlanAutoBuildMaxRows,
         activePlanBuildConcurrency: normalized.worker.activePlanBuildConcurrency,
         groupedRefreshDebounceMs: normalized.worker.groupedRefreshDebounceMs,
       });
@@ -230,6 +232,7 @@ export function makeViewServerRuntime(
           activePlanBuildMsTotal: number;
           activePlanBuildMsMax: number;
           activePlanFallbackCount: number;
+          activePlanAutoBuildSkippedCount: number;
           chdbStatus: "ready" | "degraded" | "restarting" | "stopped";
           chdbPid: number;
           chdbRestarts: number;
@@ -266,6 +269,7 @@ export function makeViewServerRuntime(
           activePlanBuildMsTotal: metrics.activePlanBuildMsTotal,
           activePlanBuildMsMax: metrics.activePlanBuildMsMax,
           activePlanFallbackCount: metrics.activePlanFallbackCount,
+          activePlanAutoBuildSkippedCount: metrics.activePlanAutoBuildSkippedCount,
           chdbStatus: metrics.chdbStatus,
           chdbPid: metrics.chdbPid,
           chdbRestarts: metrics.chdbRestarts,
@@ -589,6 +593,10 @@ function healthRowsFromResponse(health: HealthResponse): readonly ViewServerHeal
     activePlanBuildMsTotal: sumTopicMetric(topicEntries, "activePlanBuildMsTotal"),
     activePlanBuildMsMax: maxTopicMetric(topicEntries, "activePlanBuildMsMax"),
     activePlanFallbackCount: sumTopicMetric(topicEntries, "activePlanFallbackCount"),
+    activePlanAutoBuildSkippedCount: sumTopicMetric(
+      topicEntries,
+      "activePlanAutoBuildSkippedCount",
+    ),
     chdbStatus: aggregateChdbStatus(topicEntries),
     chdbPid: 0,
     chdbRestarts: sumTopicMetric(topicEntries, "chdbRestarts"),
@@ -624,6 +632,7 @@ function healthRowsFromResponse(health: HealthResponse): readonly ViewServerHeal
       activePlanBuildMsTotal: metrics.activePlanBuildMsTotal,
       activePlanBuildMsMax: metrics.activePlanBuildMsMax,
       activePlanFallbackCount: metrics.activePlanFallbackCount,
+      activePlanAutoBuildSkippedCount: metrics.activePlanAutoBuildSkippedCount,
       chdbStatus: metrics.chdbStatus,
       chdbPid: metrics.chdbPid,
       chdbRestarts: metrics.chdbRestarts,
@@ -662,6 +671,7 @@ function healthRow(input: {
   readonly activePlanBuildMsTotal: number;
   readonly activePlanBuildMsMax: number;
   readonly activePlanFallbackCount: number;
+  readonly activePlanAutoBuildSkippedCount: number;
   readonly chdbStatus: ViewServerHealthRow["chdbStatus"];
   readonly chdbPid: number;
   readonly chdbRestarts: number;
@@ -696,6 +706,7 @@ function healthRow(input: {
     activePlanBuildMsTotal: input.activePlanBuildMsTotal,
     activePlanBuildMsMax: input.activePlanBuildMsMax,
     activePlanFallbackCount: input.activePlanFallbackCount,
+    activePlanAutoBuildSkippedCount: input.activePlanAutoBuildSkippedCount,
     chdbStatus: input.chdbStatus,
     chdbPid: input.chdbPid,
     chdbRestarts: input.chdbRestarts,
@@ -734,6 +745,7 @@ function sumTopicMetric(
     | "activePlanPendingCount"
     | "activePlanBuildMsTotal"
     | "activePlanFallbackCount"
+    | "activePlanAutoBuildSkippedCount"
     | "chdbRestarts"
     | "chdbPendingRequests"
     | "kafkaLagTotal"

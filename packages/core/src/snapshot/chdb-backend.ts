@@ -1092,20 +1092,28 @@ function mergeColumns(
 }
 
 function inferColumns(rows: readonly RuntimeRow[], idField: string): readonly Column[] {
-  const names = new Set<string>();
+  const valuesByName = new Map<string, unknown[]>();
+  const addValue = (name: string, value: unknown) => {
+    const values = valuesByName.get(name);
+    if (values === undefined) {
+      valuesByName.set(name, [value]);
+    } else {
+      values.push(value);
+    }
+  };
   for (const row of rows) {
     if (row[idField] !== undefined) {
-      names.add(idField);
+      addValue(idField, row[idField]);
     }
     for (const [key, value] of Object.entries(row)) {
       if (isUserColumn(key) && isScalar(value)) {
-        names.add(key);
+        addValue(key, value);
       }
     }
   }
-  return Array.from(names).map((name) => ({
+  return Array.from(valuesByName).map(([name, values]) => ({
     name,
-    type: inferColumnType(rows.map((row) => row[name])),
+    type: inferColumnType(values),
   }));
 }
 

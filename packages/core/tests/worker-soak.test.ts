@@ -87,6 +87,7 @@ describe("topic worker soak", () => {
         const workerSeedStartedAt = performance.now();
         const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
           initialRows,
+          activePlanAutoBuildMaxRows: shape.activePlanAutoBuildMaxRows,
           groupedRefreshDebounceMs: shape.groupedRefreshDebounceMs,
         });
         const workerSeedMs = performance.now() - workerSeedStartedAt;
@@ -126,9 +127,14 @@ describe("topic worker soak", () => {
             Effect.forkScoped,
           );
           subscriptionFibers.push(fiber);
+          const metrics = yield* worker.metrics;
           yield* reportSoakProgress(progress, "raw_subscription_started", {
-            rawSubscriptionsStarted: index + 1,
+            subscriptionsStarted: subscriptionFibers.length,
+            subscriptionsCompleted: metrics.subscribers,
+            currentRawSubscriptions: index + 1,
+            currentGroupedSubscriptions: 0,
             rawSubscriptions: shape.rawSubscriptions,
+            ...metricsProgressFields(metrics),
           });
         }
         yield* reportSoakProgress(
@@ -156,9 +162,14 @@ describe("topic worker soak", () => {
             Effect.forkScoped,
           );
           subscriptionFibers.push(fiber);
+          const metrics = yield* worker.metrics;
           yield* reportSoakProgress(progress, "grouped_subscription_started", {
-            groupedSubscriptionsStarted: index + 1,
+            subscriptionsStarted: subscriptionFibers.length,
+            subscriptionsCompleted: metrics.subscribers,
+            currentRawSubscriptions: shape.rawSubscriptions,
+            currentGroupedSubscriptions: index + 1,
             groupedSubscriptions: shape.groupedSubscriptions,
+            ...metricsProgressFields(metrics),
           });
         }
         yield* reportSoakProgress(
@@ -170,7 +181,7 @@ describe("topic worker soak", () => {
           { force: true },
         );
 
-        yield* waitForMetrics(
+        const readyMetrics = yield* waitForMetrics(
           worker.metrics,
           (metrics) => metrics.subscribers === shape.rawSubscriptions + shape.groupedSubscriptions,
           progress,
@@ -180,7 +191,10 @@ describe("topic worker soak", () => {
           progress,
           "subscriptions_ready",
           {
+            subscriptionsStarted: subscriptionFibers.length,
+            subscriptionsCompleted: readyMetrics.subscribers,
             subscribers: shape.rawSubscriptions + shape.groupedSubscriptions,
+            ...metricsProgressFields(readyMetrics),
           },
           { force: true },
         );
@@ -250,11 +264,15 @@ describe("topic worker soak", () => {
         );
 
         const settleStartedAt = performance.now();
+        const expectedSkippedActivePlans =
+          shape.rows > shape.activePlanAutoBuildMaxRows ? shape.rawSubscriptions : 0;
         const settled = yield* waitForMetrics(
           worker.metrics,
           (metrics) =>
-            metrics.maxSubscriptionLagVersions === 0 &&
-            metrics.totalSubscriptionLagVersions === 0 &&
+            (expectedSkippedActivePlans > 0 ||
+              (metrics.maxSubscriptionLagVersions === 0 &&
+                metrics.totalSubscriptionLagVersions === 0)) &&
+            metrics.activePlanAutoBuildSkippedCount === expectedSkippedActivePlans &&
             metrics.queueDepth === 0 &&
             metrics.activePlanBuildQueueDepth === 0 &&
             metrics.activePlanBuildingCount === 0 &&
@@ -346,9 +364,11 @@ describe("topic worker soak", () => {
           activePlanCountBeforeCleanup: settled.activePlanCount,
           activeViewCountBeforeCleanup: settled.activeViewCount,
           activePlanFallbackCountBeforeCleanup: settled.activePlanFallbackCount,
+          activePlanAutoBuildSkippedCountBeforeCleanup: settled.activePlanAutoBuildSkippedCount,
           activePlanCountAfterCleanup: released.activePlanCount,
           activeViewCountAfterCleanup: released.activeViewCount,
           activePlanFallbackCountAfterCleanup: released.activePlanFallbackCount,
+          activePlanAutoBuildSkippedCountAfterCleanup: released.activePlanAutoBuildSkippedCount,
           activePlanBuildQueueDepthAfterCleanup: released.activePlanBuildQueueDepth,
           activePlanBuildingCountAfterCleanup: released.activePlanBuildingCount,
           activePlanPendingCountAfterCleanup: released.activePlanPendingCount,
@@ -391,6 +411,7 @@ type SoakShape = {
   readonly mutations: number;
   readonly rawPageCycle: number;
   readonly groupedRefreshDebounceMs: number;
+  readonly activePlanAutoBuildMaxRows: number;
 };
 
 type SoakEventCounts = {
@@ -435,9 +456,11 @@ type SoakSummary = {
   readonly activePlanCountBeforeCleanup: number;
   readonly activeViewCountBeforeCleanup: number;
   readonly activePlanFallbackCountBeforeCleanup: number;
+  readonly activePlanAutoBuildSkippedCountBeforeCleanup: number;
   readonly activePlanCountAfterCleanup: number;
   readonly activeViewCountAfterCleanup: number;
   readonly activePlanFallbackCountAfterCleanup: number;
+  readonly activePlanAutoBuildSkippedCountAfterCleanup: number;
   readonly activePlanBuildQueueDepthAfterCleanup: number;
   readonly activePlanBuildingCountAfterCleanup: number;
   readonly activePlanPendingCountAfterCleanup: number;
@@ -539,6 +562,7 @@ function reportSoakProgress(
       rawSubscriptions: progress.shape.rawSubscriptions,
       groupedSubscriptions: progress.shape.groupedSubscriptions,
       mutations: progress.shape.mutations,
+      activePlanAutoBuildMaxRows: progress.shape.activePlanAutoBuildMaxRows,
       ...fields,
     };
     yield* Effect.logInfo(
@@ -571,6 +595,7 @@ function metricsProgressFields(metrics: TopicWorkerMetrics): SoakProgressFields 
     activePlanBuildQueueDepth: metrics.activePlanBuildQueueDepth,
     activePlanBuildingCount: metrics.activePlanBuildingCount,
     activePlanPendingCount: metrics.activePlanPendingCount,
+    activePlanAutoBuildSkippedCount: metrics.activePlanAutoBuildSkippedCount,
   };
 }
 
@@ -657,6 +682,10 @@ function soakShape(): SoakShape {
     mutations: envNumber("VS_WORKER_SOAK_MUTATIONS", 500),
     rawPageCycle: envNumber("VS_WORKER_SOAK_RAW_PAGE_CYCLE", 10),
     groupedRefreshDebounceMs: envNumber("VS_WORKER_SOAK_GROUPED_DEBOUNCE_MS", 0),
+    activePlanAutoBuildMaxRows: envNumber(
+      "VS_WORKER_SOAK_ACTIVE_PLAN_AUTO_BUILD_MAX_ROWS",
+      1_000_000,
+    ),
   };
 }
 

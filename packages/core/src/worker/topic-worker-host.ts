@@ -15,6 +15,7 @@ export type TopicWorkerHostOptions = {
   readonly deltaCoalescing?: boolean | undefined;
   readonly maxActivePlans?: number | undefined;
   readonly maxActivePlanEstimatedBytes?: number | undefined;
+  readonly activePlanAutoBuildMaxRows?: number | undefined;
   readonly activePlanBuildConcurrency?: number | undefined;
   readonly groupedRefreshDebounceMs?: number | undefined;
 };

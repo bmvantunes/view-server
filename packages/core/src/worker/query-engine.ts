@@ -130,6 +130,7 @@ export function executeGroupedQueryEffect(
     const chunkSize = normalizePositiveInteger(options.chunkSize, 10_000);
     const aggregateYieldInterval = normalizePositiveInteger(options.aggregateYieldInterval, 50);
     const groups = new Map<string, RuntimeRow[]>();
+    const aggregateDefinitions = Object.entries(query.aggregates);
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index];
       if (row !== undefined && matchesFilter(row, query.where, options)) {
@@ -143,10 +144,8 @@ export function executeGroupedQueryEffect(
     const result: RuntimeRow[] = [];
     let aggregateCount = 0;
     for (const groupRows of groups.values()) {
-      result.push(
-        yield* groupedResultRow(groupRows, query, aggregateYieldInterval, aggregateCount),
-      );
-      aggregateCount += Object.keys(query.aggregates).length;
+      result.push(groupedResultRowSync(groupRows, query.groupBy, query.aggregates));
+      aggregateCount += aggregateDefinitions.length;
       if (aggregateCount % aggregateYieldInterval === 0) {
         yield* Effect.yieldNow;
       }
@@ -566,30 +565,6 @@ function groupedResultRowSync(
   return row;
 }
 
-function groupedResultRow(
-  groupRows: readonly RuntimeRow[],
-  query: RuntimeGroupedQuery,
-  aggregateYieldInterval: number,
-  startAggregateCount: number,
-): Effect.Effect<RuntimeRow> {
-  return Effect.gen(function* () {
-    const [first] = groupRows;
-    const row: RuntimeRow = {};
-    for (const field of query.groupBy) {
-      row[field] = first?.[field];
-    }
-    let aggregateCount = startAggregateCount;
-    for (const [alias, aggregate] of Object.entries(query.aggregates)) {
-      row[alias] = aggregateRows(groupRows, aggregate);
-      aggregateCount++;
-      if (aggregateCount % aggregateYieldInterval === 0) {
-        yield* Effect.yieldNow;
-      }
-    }
-    return row;
-  });
-}
-
 function normalizePositiveInteger(value: number | undefined, fallback: number): number {
   return value === undefined || !Number.isFinite(value) || value <= 0
     ? fallback
@@ -608,32 +583,93 @@ function aggregateRows(
     case "count":
       return rows.length;
     case "count_distinct":
-      return new Set(rows.map((row) => row[aggregate.field])).size;
+      return countDistinctRows(rows, aggregate.field);
     case "sum":
-      return sumNumeric(rows.map((row) => row[aggregate.field]));
+      return sumRows(rows, aggregate.field);
     case "avg":
-      return avgNumeric(rows.map((row) => row[aggregate.field]));
+      if (rows.length === 0) {
+        return 0;
+      }
+      const sum = sumRows(rows, aggregate.field);
+      return BigDecimal.isBigDecimal(sum)
+        ? BigDecimal.divideUnsafe(sum, BigDecimal.fromBigInt(BigInt(rows.length)))
+        : sum / rows.length;
     case "min":
-      return extrema(
-        rows.map((row) => row[aggregate.field]),
-        "min",
-      );
+      return extremaRows(rows, aggregate.field, "min");
     case "max":
-      return extrema(
-        rows.map((row) => row[aggregate.field]),
-        "max",
-      );
+      return extremaRows(rows, aggregate.field, "max");
     case "string_concat":
-      return sortedStrings(
-        rows.map((row) => stringAggregateValue(row[aggregate.field])),
-        aggregate.sort,
-      ).join(aggregate.joiner);
+      return sortedStrings(stringValues(rows, aggregate.field), aggregate.sort).join(
+        aggregate.joiner,
+      );
     case "string_concat_distinct":
       return sortedStrings(
-        Array.from(new Set(rows.map((row) => stringAggregateValue(row[aggregate.field])))),
+        Array.from(new Set(stringValues(rows, aggregate.field))),
         aggregate.sort ?? "asc",
       ).join(aggregate.joiner);
   }
+}
+
+function countDistinctRows(rows: readonly RuntimeRow[], field: string): number {
+  const values = new Set<unknown>();
+  for (const row of rows) {
+    values.add(row[field]);
+  }
+  return values.size;
+}
+
+function sumRows(rows: readonly RuntimeRow[], field: string): number | BigDecimal.BigDecimal {
+  let numberSum = 0;
+  let decimalSum: BigDecimal.BigDecimal | undefined;
+  for (const row of rows) {
+    const value = row[field];
+    if (BigDecimal.isBigDecimal(value)) {
+      decimalSum = BigDecimal.sum(decimalSum ?? decimalFromNumber(numberSum), value);
+      continue;
+    }
+    if (decimalSum !== undefined) {
+      decimalSum = BigDecimal.sum(decimalSum, toBigDecimal(value) ?? BigDecimal.make(0n, 0));
+      continue;
+    }
+    numberSum += numericValue(value);
+  }
+  return decimalSum ?? numberSum;
+}
+
+function decimalFromNumber(value: number): BigDecimal.BigDecimal {
+  return toBigDecimal(value) ?? BigDecimal.make(0n, 0);
+}
+
+function extremaRows(
+  rows: readonly RuntimeRow[],
+  field: string,
+  direction: "min" | "max",
+): unknown {
+  let hasValue = false;
+  let current: unknown;
+  for (const row of rows) {
+    const value = row[field];
+    if (value == null) {
+      continue;
+    }
+    if (!hasValue) {
+      hasValue = true;
+      current = value;
+      continue;
+    }
+    const comparison = compareComparable(value, current);
+    current =
+      direction === "min" ? (comparison < 0 ? value : current) : comparison > 0 ? value : current;
+  }
+  return hasValue ? current : undefined;
+}
+
+function stringValues(rows: readonly RuntimeRow[], field: string): readonly string[] {
+  const values: string[] = [];
+  for (const row of rows) {
+    values.push(stringAggregateValue(row[field]));
+  }
+  return values;
 }
 
 function stringAggregateValue(value: unknown): string {
@@ -659,24 +695,6 @@ function numericValue(value: unknown): number {
   return 0;
 }
 
-function sumNumeric(values: readonly unknown[]): number | BigDecimal.BigDecimal {
-  if (values.some(BigDecimal.isBigDecimal)) {
-    return BigDecimal.sumAll(values.map((value) => toBigDecimal(value) ?? BigDecimal.make(0n, 0)));
-  }
-  return values.reduce<number>((sum, value) => sum + numericValue(value), 0);
-}
-
-function avgNumeric(values: readonly unknown[]): number | BigDecimal.BigDecimal {
-  if (values.length === 0) {
-    return 0;
-  }
-  const sum = sumNumeric(values);
-  if (BigDecimal.isBigDecimal(sum)) {
-    return BigDecimal.divideUnsafe(sum, BigDecimal.fromBigInt(BigInt(values.length)));
-  }
-  return sum / values.length;
-}
-
 function toBigDecimal(value: unknown): BigDecimal.BigDecimal | undefined {
   if (BigDecimal.isBigDecimal(value)) {
     return value;
@@ -691,23 +709,6 @@ function toBigDecimal(value: unknown): BigDecimal.BigDecimal | undefined {
     return Option.getOrUndefined(BigDecimal.fromString(value));
   }
   return undefined;
-}
-
-function extrema(values: readonly unknown[], direction: "min" | "max"): unknown {
-  const usable = values.filter((value) => value != null);
-  if (usable.length === 0) {
-    return undefined;
-  }
-  return usable.reduce((current, value) => {
-    const comparison = compareComparable(value, current);
-    return direction === "min"
-      ? comparison < 0
-        ? value
-        : current
-      : comparison > 0
-        ? value
-        : current;
-  });
 }
 
 function sortedStrings(

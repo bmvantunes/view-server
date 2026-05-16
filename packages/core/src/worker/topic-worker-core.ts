@@ -78,6 +78,7 @@ export type TopicWorkerMetrics = {
   readonly activePlanBuildMsTotal: number;
   readonly activePlanBuildMsMax: number;
   readonly activePlanFallbackCount: number;
+  readonly activePlanAutoBuildSkippedCount: number;
   readonly chdbStatus: SnapshotBackendHealth["status"];
   readonly chdbPid: number;
   readonly chdbRestarts: number;
@@ -123,6 +124,7 @@ type ActiveSubscription = {
   activePlanKey?: string | undefined;
   activePlanBuildKey?: string | undefined;
   activePlanFallback?: boolean | undefined;
+  activePlanAutoBuildSkipped?: boolean | undefined;
   dirtyTargetVersion?: WorkerVersion | undefined;
   groupedRefreshScheduled?: boolean | undefined;
   groupedRefreshInFlight?: boolean | undefined;
@@ -190,6 +192,7 @@ export type TopicWorkerCoreOptions = {
   readonly deltaCoalescing?: boolean | undefined;
   readonly maxActivePlans?: number | undefined;
   readonly maxActivePlanEstimatedBytes?: number | undefined;
+  readonly activePlanAutoBuildMaxRows?: number | undefined;
   readonly activePlanBuildConcurrency?: number | undefined;
   readonly activePlanBuildChunkSize?: number | undefined;
   readonly groupedRefreshDebounceMs?: number | undefined;
@@ -213,6 +216,7 @@ export function makeTopicWorkerCore(
     const deltaCoalescing = options.deltaCoalescing ?? true;
     const maxActivePlans = options.maxActivePlans;
     const maxActivePlanEstimatedBytes = options.maxActivePlanEstimatedBytes;
+    const activePlanAutoBuildMaxRows = options.activePlanAutoBuildMaxRows ?? 1_000_000;
     const activePlanBuildConcurrency = Math.max(1, options.activePlanBuildConcurrency ?? 1);
     const activePlanBuildChunkSize = options.activePlanBuildChunkSize;
     const groupedRefreshDebounceMs = Math.max(0, options.groupedRefreshDebounceMs ?? 50);
@@ -476,7 +480,8 @@ export function makeTopicWorkerCore(
     };
 
     const isPendingActivePlanSubscription = (subscription: ActiveSubscription): boolean =>
-      subscription.activePlanBuildKey !== undefined &&
+      (subscription.activePlanBuildKey !== undefined ||
+        subscription.activePlanAutoBuildSkipped === true) &&
       subscription.activePlanFallback !== true &&
       subscription.activeView === undefined &&
       !isGroupedQuery(subscription.query);
@@ -823,6 +828,7 @@ export function makeTopicWorkerCore(
       | "activePlanBuildMsTotal"
       | "activePlanBuildMsMax"
       | "activePlanFallbackCount"
+      | "activePlanAutoBuildSkippedCount"
     > => {
       let activeViewCount = 0;
       let activePlanRows = 0;
@@ -833,6 +839,7 @@ export function makeTopicWorkerCore(
       let activePlanBuildQueueDepth = 0;
       let activePlanBuildingCount = 0;
       let activePlanPendingCount = 0;
+      let activePlanAutoBuildSkippedCount = 0;
       for (const entry of activePlans.values()) {
         activeViewCount += entry.subscribers;
         activePlanRows += entry.plan.totalRows();
@@ -852,6 +859,9 @@ export function makeTopicWorkerCore(
         if (subscription.activePlanFallback === true) {
           activePlanFallbackCount++;
         }
+        if (subscription.activePlanAutoBuildSkipped === true) {
+          activePlanAutoBuildSkippedCount++;
+        }
       }
       return {
         activePlanCount: activePlans.size,
@@ -865,6 +875,7 @@ export function makeTopicWorkerCore(
         activePlanBuildMsTotal,
         activePlanBuildMsMax,
         activePlanFallbackCount,
+        activePlanAutoBuildSkippedCount,
       };
     };
 
@@ -914,6 +925,7 @@ export function makeTopicWorkerCore(
         : status === "ready" &&
             (isQueueAtLimit(depth) ||
               planStats.activePlanFallbackCount > 0 ||
+              planStats.activePlanAutoBuildSkippedCount > 0 ||
               isActivePlanLimitNear(planStats))
           ? "degraded"
           : status;
@@ -1020,10 +1032,16 @@ export function makeTopicWorkerCore(
         return;
       }
       subscription.activePlanFallback = false;
+      subscription.activePlanAutoBuildSkipped = false;
       const pending = activePlanBuilds.get(key);
       if (pending !== undefined) {
         pending.requestIds.add(subscription.requestId);
         subscription.activePlanBuildKey = key;
+        return;
+      }
+      if (rows.length > activePlanAutoBuildMaxRows) {
+        subscription.activePlanAutoBuildSkipped = true;
+        subscription.activePlanBuildKey = undefined;
         return;
       }
       if (wouldExceedActivePlanCountLimitForNewBuild()) {
@@ -1114,6 +1132,7 @@ export function makeTopicWorkerCore(
       subscription.activePlanKey = key;
       subscription.activePlanBuildKey = undefined;
       subscription.activePlanFallback = false;
+      subscription.activePlanAutoBuildSkipped = false;
       subscription.activeView = makeActiveRawViewFromPlan(entry.plan, query, idField);
     };
 
@@ -1340,6 +1359,7 @@ export function makeTopicWorkerCore(
       releaseGroupedRefresh(requestId);
       subscription.pendingLagVersions = 0n;
       subscription.dirtyTargetVersion = undefined;
+      subscription.activePlanAutoBuildSkipped = false;
       subscription.groupedRefreshScheduled = false;
       subscription.groupedRefreshInFlight = false;
       return subscription;
@@ -1441,6 +1461,7 @@ export function makeTopicWorkerCore(
           activePlanBuildMsTotal: planStats.activePlanBuildMsTotal,
           activePlanBuildMsMax: planStats.activePlanBuildMsMax,
           activePlanFallbackCount: planStats.activePlanFallbackCount,
+          activePlanAutoBuildSkippedCount: planStats.activePlanAutoBuildSkippedCount,
           chdbStatus: snapshotHealth.status,
           chdbPid: snapshotHealth.pid ?? 0,
           chdbRestarts: snapshotHealth.restarts ?? 0,
@@ -1749,32 +1770,44 @@ function replayMutations(
   entries: readonly MutationLogEntry[],
   idField: string,
 ): readonly RuntimeRow[] {
-  let replayRows = baseRows.map((row) => ({ ...row }));
-  let replayIndex = new Map<string | number, number>();
-  const rebuildIndex = () => {
-    replayIndex = new Map();
-    replayRows.forEach((row, index) => {
-      const id = rowId(row, idField);
-      if (id !== undefined) {
-        replayIndex.set(id, index);
-      }
-    });
-  };
-  rebuildIndex();
+  const replayRows = baseRows.map((row) => ({ ...row }));
+  const replayIndex = new Map<string | number, number>();
+  replayRows.forEach((row, index) => {
+    replayIndex.set(rowId(row, idField), index);
+  });
   for (const entry of entries) {
     if (entry.kind === "delete") {
-      replayRows = replayRows.filter((row) => rowId(row, idField) !== entry.id);
-      rebuildIndex();
+      removeReplayRow(replayRows, replayIndex, entry.id, idField);
       continue;
     }
     const next = { ...entry.after };
     const index = replayIndex.get(entry.id);
     if (index === undefined) {
-      replayRows = [...replayRows, next];
-      rebuildIndex();
+      replayRows.push(next);
+      replayIndex.set(entry.id, replayRows.length - 1);
     } else {
       replayRows[index] = next;
     }
   }
   return replayRows;
+}
+
+function removeReplayRow(
+  rows: RuntimeRow[],
+  indexById: Map<string | number, number>,
+  id: string | number,
+  idField: string,
+): void {
+  const index = indexById.get(id);
+  if (index === undefined) {
+    return;
+  }
+  const lastIndex = rows.length - 1;
+  const last = rows[lastIndex];
+  rows.pop();
+  indexById.delete(id);
+  if (index !== lastIndex && last !== undefined) {
+    rows[index] = last;
+    indexById.set(rowId(last, idField), index);
+  }
 }
