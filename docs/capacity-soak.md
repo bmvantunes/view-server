@@ -2,6 +2,8 @@
 
 The default test suite keeps soak shapes small enough for local and CI feedback. Production capacity validation should use larger manual or nightly profiles, not PR CI.
 
+See `docs/capacity-matrix.md` for the explicit 100k, 1M, and 10M profile commands and latest recorded artifacts.
+
 ## 10M Raw Worker Soak
 
 Run this before a serious production rollout, after the normal RC checklist is green:

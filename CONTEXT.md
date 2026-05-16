@@ -4,7 +4,7 @@ This document is the compact domain map for future agents. `plan.md` is the hist
 
 ## Domain Vocabulary
 
-- **Topic**: A vertical data slice declared by `defineConfig`. A topic has one schema, one id field, one authoritative in-memory row store, and one chDB mirror. Topics are isolated from each other; there are no cross-topic queries, joins, or subscriptions.
+- **Topic**: A vertical data slice declared by `defineConfig`. A topic has one schema, one id field, one authoritative in-memory row store, and one chDB mirror. Topics are isolated from each other; there are no cross-topic queries, joins, or subscriptions in the product model.
 - **Topic worker**: The owner of a topic's hot state. It owns memory, mutation log, active raw plans, grouped refresh state, fanout queues, and the per-topic chDB backend.
 - **Worker memory**: The authoritative source of truth for live rows. chDB never becomes authoritative.
 - **chDB mirror**: A per-topic snapshot accelerator. It is mandatory for production runtime, but if it is behind or failing the worker serves from memory.
@@ -41,6 +41,7 @@ This document is the compact domain map for future agents. `plan.md` is the hist
 
 - `defineConfig` is the only topic source of truth. Worker threads import the user config module by URL/path and select their topic.
 - Topic boundaries are hard runtime boundaries. No query or subscription may span topics, which is what lets each topic worker own its own memory, active plans, grouped refresh state, and chDB mirror independently.
+- Per-topic worker + per-topic chDB is therefore an architectural invariant, not an incidental optimization. If a future design adds cross-topic reads, it must introduce an explicit new architecture instead of quietly sharing the current chDB mirrors.
 - No user topic may start with `__`; system topics are private.
 - Production runtime uses chDB. Memory backend is internal test infrastructure only.
 - Worker memory is authoritative; chDB is a snapshot accelerator.
@@ -63,7 +64,7 @@ Kafka/source -> topic worker -> authoritative memory + mutation log
                          |-> Effect RPC websocket NDJSON clients
 ```
 
-One chDB child belongs to one topic worker. This is valid because topics never query across each other. The topic worker and its chDB child are a deployable/scalable slice, and no global chDB process is needed to coordinate joins or multi-topic subscriptions.
+One chDB child belongs to one topic worker. This is valid because topics never query across each other. The topic worker and its chDB child are a deployable/scalable slice, and no global chDB process is needed to coordinate joins or multi-topic subscriptions. If a reader is looking for a shared chDB coordinator, the answer is deliberately "no" under the current topic-isolated product model.
 
 ## Testing Philosophy
 

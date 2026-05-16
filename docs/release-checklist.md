@@ -21,14 +21,22 @@ pnpm install --frozen-lockfile
 Run from the repo root:
 
 ```bash
+pnpm run release:gate
+```
+
+`pnpm run release:gate` defaults to the local release scope: check, Effect LSP diagnostics, tests, build, pack dry run, benchmark smoke, and policy scans. Use `VS_RELEASE_GATE_SCOPE=ci` for a lighter package/API gate and `VS_RELEASE_GATE_SCOPE=full` for the full external-consumer and deployment smoke gate. Set `VS_RELEASE_GATE_INCLUDE_SOAK=1` to append the 1M soak to any scope.
+
+The gate writes a Markdown summary to `/private/tmp/view-server-release-gate-<timestamp>.md` unless `VS_RELEASE_GATE_SUMMARY_PATH` is set.
+
+Equivalent manual commands:
+
+```bash
 vp check
 pnpm exec effect-language-service diagnostics --project packages/core/tsconfig.json --format text --severity error
-vp run core#test
-vp run react#test
-vp run testing#test
 vp run -r test
 vp run -r build
 pnpm run pack:dry-run
+VS_BENCH_BLOCKING=0 VS_BENCH_REGRESSION_MIN_DELTA_MS=5 vp run core#bench:compare
 ```
 
 The public API and package-shape checks live in:
@@ -156,11 +164,7 @@ Before a release candidate, install actual tarballs into a fresh temp project ou
 Required checks:
 
 ```bash
-pnpm exec tsc --noEmit
-pnpm run node:smoke
-pnpm run build
-pnpm run bundle:grep
-pnpm run test
+pnpm run smoke:consumer
 ```
 
 The smoke proves:

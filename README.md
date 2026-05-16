@@ -110,6 +110,7 @@ export function App() {
 - `docs/operations.md` documents stale/waiting semantics, `totalRows`, version fencing, health metrics, active plan limits, and troubleshooting.
 - `docs/hello-production.md` shows a Kafka + chDB + metrics UI configuration.
 - `docs/benchmarks.md` covers benchmark artifact output, summaries, and baseline refresh.
+- `docs/capacity-matrix.md` records the 100k, 1M, and 10M capacity profiles and latest artifacts.
 - `docs/api-audit.md` lists the release-candidate package exports and private internals.
 - `docs/release-checklist.md` lists the release-candidate validation and dry-run steps.
 - `docs/worker-state-machine-review.md` records the hardening checklist and soak shape.

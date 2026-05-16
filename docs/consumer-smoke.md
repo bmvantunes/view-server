@@ -72,17 +72,19 @@ Create a minimal `package.json` with the tarballs:
 }
 ```
 
-If pnpm prompts about ignored build scripts from transitive dependencies, keep the decision explicit in the temp project:
+If pnpm prompts about ignored build scripts from native dependencies, keep the decision explicit in the temp project:
 
-```yaml
-# pnpm-workspace.yaml
-onlyBuiltDependencies:
-  - msgpackr-extract
-allowBuilds:
-  - msgpackr-extract
+```json
+{
+  "pnpm": {
+    "onlyBuiltDependencies": ["chdb", "msgpackr-extract", "protobufjs"]
+  }
+}
 ```
 
-`msgpackr-extract` comes from the Effect dependency graph. Browser bundles should not import `chdb`, `@platformatic/kafka`, or `@effect/platform-node`. Production server/runtime consumers must install `chdb`; browser-only and internal memory testing paths must not bundle chDB into client assets.
+`msgpackr-extract` comes from the Effect dependency graph, `protobufjs` is used by Kafka/protobuf paths, and `chdb` is required by production runtime packages. Browser bundles should not import `chdb`, `@platformatic/kafka`, or `@effect/platform-node`. Production server/runtime consumers must install `chdb`; browser-only and internal memory testing paths must not bundle chDB into client assets.
+
+The scripted smoke uses `pnpm approve-builds --all` only inside the disposable temp project if pnpm blocks pending native builds. Do not copy that policy into application repos blindly; production apps should keep an explicit native dependency allowlist.
 
 ```bash
 pnpm install --config.confirmModulesPurge=false
@@ -249,6 +251,7 @@ For app-level UI/E2E tests, prefer a real View Server process plus the testing-o
 Run:
 
 ```bash
+pnpm exec playwright install chromium
 pnpm run test
 ```
 
