@@ -32,6 +32,12 @@ export type GroupedQueryExecutionEffectOptions = QueryExecutionOptions & {
 
 export const DEFAULT_QUERY_LIMIT = 50;
 export const DEFAULT_QUERY_OFFSET = 0;
+const RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT = 10_000;
+
+type SortEntry = {
+  readonly row: RuntimeRow;
+  readonly index: number;
+};
 
 export function executeMemoryQuery(
   rows: readonly RuntimeRow[],
@@ -50,15 +56,50 @@ export function executeRawQuery(
   idField: string,
   options: QueryExecutionOptions = {},
 ): QueryExecutionResult {
-  const filtered = rows.filter((row) => matchesFilter(row, query.where, options));
-  const sorted = stableSortRows(filtered, rawQueryOrderBy(query, idField));
-  const totalRows = sorted.length;
   const offset = normalizeOffset(query.offset);
   const limit = normalizeLimit(query.limit);
+  const orderBy = rawQueryOrderBy(query, idField);
+  const windowEnd = offset + limit;
+  if (windowEnd <= RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT) {
+    return executeRawQueryWindowed(rows, query, idField, options, orderBy, offset, limit);
+  }
+  const filtered = rows.filter((row) => matchesFilter(row, query.where, options));
+  const sorted = stableSortRows(filtered, orderBy);
+  const totalRows = sorted.length;
   return {
     rows: sorted
       .slice(offset, offset + limit)
       .map((row) => projectRawRow(row, query.fields, idField)),
+    totalRows,
+  };
+}
+
+function executeRawQueryWindowed(
+  rows: readonly RuntimeRow[],
+  query: RuntimeRawQuery,
+  idField: string,
+  options: QueryExecutionOptions,
+  orderBy: OrderBy<RuntimeRow>,
+  offset: number,
+  limit: number,
+): QueryExecutionResult {
+  const windowEnd = offset + limit;
+  const topRows: SortEntry[] = [];
+  let totalRows = 0;
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    if (row === undefined || !matchesFilter(row, query.where, options)) {
+      continue;
+    }
+    totalRows += 1;
+    if (windowEnd > 0) {
+      insertTopSortEntry(topRows, { row, index }, orderBy, windowEnd);
+    }
+  }
+  return {
+    rows: topRows
+      .slice(offset, offset + limit)
+      .map((entry) => projectRawRow(entry.row, query.fields, idField)),
     totalRows,
   };
 }
@@ -339,6 +380,55 @@ export function stableSortRows(
       return left.index - right.index;
     })
     .map((entry) => entry.row);
+}
+
+function insertTopSortEntry(
+  entries: SortEntry[],
+  candidate: SortEntry,
+  orderBy: OrderBy<RuntimeRow>,
+  limit: number,
+): void {
+  const worst = entries[entries.length - 1];
+  if (
+    entries.length >= limit &&
+    worst !== undefined &&
+    compareSortEntries(candidate, worst, orderBy) >= 0
+  ) {
+    return;
+  }
+  const index = sortEntryInsertionIndex(entries, candidate, orderBy);
+  entries.splice(index, 0, candidate);
+  if (entries.length > limit) {
+    entries.pop();
+  }
+}
+
+function sortEntryInsertionIndex(
+  entries: readonly SortEntry[],
+  candidate: SortEntry,
+  orderBy: OrderBy<RuntimeRow>,
+): number {
+  let low = 0;
+  let high = entries.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const entry = entries[middle];
+    if (entry !== undefined && compareSortEntries(candidate, entry, orderBy) < 0) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+  return low;
+}
+
+function compareSortEntries(
+  left: SortEntry,
+  right: SortEntry,
+  orderBy: OrderBy<RuntimeRow>,
+): number {
+  const compared = compareRowsForOrder(left.row, right.row, orderBy);
+  return compared !== 0 ? compared : left.index - right.index;
 }
 
 export function compareSortValue(left: unknown, right: unknown): number {

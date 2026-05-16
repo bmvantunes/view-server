@@ -1,11 +1,19 @@
 import { describe, expect, it } from "@effect/vitest";
 import type {
   DeltaOperation,
+  RuntimeRawQuery,
   RuntimeRow,
   RuntimeRowKey,
   RuntimeRowKeyFn,
 } from "../src/protocol/index.ts";
-import { diffVisibleRows, rowsEqual } from "../src/worker/query-engine.ts";
+import {
+  diffVisibleRows,
+  executeRawQuery,
+  projectRawRow,
+  rawQueryOrderBy,
+  rowsEqual,
+  stableSortRows,
+} from "../src/worker/query-engine.ts";
 
 describe("query-engine visible row diff", () => {
   it("emits no operations when rows keep the same key, index, and values", () => {
@@ -142,6 +150,76 @@ describe("query-engine visible row diff", () => {
   });
 });
 
+describe("query-engine raw query execution", () => {
+  it("matches full-sort raw query semantics for small sorted windows", () => {
+    const rows = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `row-${index.toString().padStart(4, "0")}`,
+      price: (index * 97) % 211,
+      bucket: index % 13 === 0 ? null : `bucket-${index % 9}`,
+      status: index % 3 === 0 ? "open" : "closed",
+    }));
+    const query = {
+      fields: {
+        id: true,
+        price: true,
+        bucket: true,
+      },
+      where: {
+        field: "status",
+        comparator: "equals",
+        value: "open",
+      },
+      orderBy: [
+        { field: "bucket", direction: "asc" },
+        { field: "price", direction: "desc" },
+      ],
+      offset: 40,
+      limit: 50,
+    } satisfies RuntimeRawQuery;
+
+    expect(executeRawQuery(rows, query, "id")).toEqual(legacyExecuteRawQuery(rows, query, "id"));
+  });
+
+  it("preserves stable tiebreak semantics inside the windowed raw query path", () => {
+    const rows: RuntimeRow[] = [
+      { id: "b", price: 10, group: "same" },
+      { id: "a", price: 10, group: "same" },
+      { id: "d", price: 10, group: "same" },
+      { id: "c", price: 10, group: "same" },
+    ];
+    const query = {
+      fields: {
+        id: true,
+        price: true,
+        group: true,
+      },
+      orderBy: [{ field: "price", direction: "asc" }],
+      limit: 4,
+    } satisfies RuntimeRawQuery;
+
+    expect(executeRawQuery(rows, query, "id")).toEqual(legacyExecuteRawQuery(rows, query, "id"));
+  });
+
+  it("returns exact totalRows when the requested raw window is empty", () => {
+    const rows: RuntimeRow[] = [
+      { id: "a", price: 10 },
+      { id: "b", price: 20 },
+    ];
+    const query = {
+      fields: {
+        id: true,
+        price: true,
+      },
+      limit: 0,
+    } satisfies RuntimeRawQuery;
+
+    expect(executeRawQuery(rows, query, "id")).toEqual({
+      rows: [],
+      totalRows: 2,
+    });
+  });
+});
+
 function keyById(row: RuntimeRow): RuntimeRowKey {
   const id = row.id;
   if (typeof id !== "string" && typeof id !== "number") {
@@ -176,4 +254,72 @@ function legacyDiffVisibleRows(
   });
 
   return operations;
+}
+
+function legacyExecuteRawQuery(
+  rows: readonly RuntimeRow[],
+  query: RuntimeRawQuery,
+  idField: string,
+): ReturnType<typeof executeRawQuery> {
+  const filtered = rows.filter((row) => legacyMatchesFilter(row, query.where));
+  const sorted = stableSortRows(filtered, rawQueryOrderBy(query, idField));
+  const offset =
+    query.offset === undefined || !Number.isFinite(query.offset)
+      ? 0
+      : Math.max(0, Math.trunc(query.offset));
+  const limit =
+    query.limit === undefined || !Number.isFinite(query.limit)
+      ? 50
+      : Math.max(0, Math.min(50, Math.trunc(query.limit)));
+  return {
+    rows: sorted
+      .slice(offset, offset + limit)
+      .map((row) => projectRawRow(row, query.fields, idField)),
+    totalRows: sorted.length,
+  };
+}
+
+function legacyMatchesFilter(row: RuntimeRow, filter: RuntimeRawQuery["where"]): boolean {
+  if (filter === undefined) {
+    return true;
+  }
+  if ("op" in filter) {
+    const matches = filter.conditions.map((condition) => legacyMatchesFilter(row, condition));
+    return filter.op === "and" ? matches.every(Boolean) : matches.some(Boolean);
+  }
+  const rowValue = row[filter.field];
+  switch (filter.comparator) {
+    case "equals":
+      return typeof rowValue === "string" && typeof filter.value === "string"
+        ? rowValue.toLocaleLowerCase() === filter.value.toLocaleLowerCase()
+        : Object.is(rowValue, filter.value);
+    case "not_equals":
+      return typeof rowValue === "string" && typeof filter.value === "string"
+        ? rowValue.toLocaleLowerCase() !== filter.value.toLocaleLowerCase()
+        : !Object.is(rowValue, filter.value);
+    case "greater_than":
+      return Number(rowValue) > Number(filter.value);
+    case "greater_than_or_equal":
+      return Number(rowValue) >= Number(filter.value);
+    case "less_than":
+      return Number(rowValue) < Number(filter.value);
+    case "less_than_or_equal":
+      return Number(rowValue) <= Number(filter.value);
+    case "contains":
+      return (
+        typeof rowValue === "string" &&
+        typeof filter.value === "string" &&
+        rowValue.toLocaleLowerCase().includes(filter.value.toLocaleLowerCase())
+      );
+    case "starts_with":
+      return (
+        typeof rowValue === "string" &&
+        typeof filter.value === "string" &&
+        rowValue.toLocaleLowerCase().startsWith(filter.value.toLocaleLowerCase())
+      );
+    case "one_of":
+      return (
+        Array.isArray(filter.value) && filter.value.some((value) => Object.is(rowValue, value))
+      );
+  }
 }
