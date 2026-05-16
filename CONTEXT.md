@@ -22,6 +22,7 @@ This document is the compact domain map for future agents. `plan.md` is the hist
 - `packages/core/src/protocol`: query protocol, runtime rows, subscription events, row keys, stable stringify.
 - `packages/core/src/errors`: Effect `TaggedError` taxonomy.
 - `packages/core/src/client`: typed RPC boundary, live query store, visible-row delta application, generated client shape.
+- `packages/core/src/client/live-query-lifecycle.ts`: AsyncResult transition semantics for connecting, live, stale, reconnecting, failure with previous, and closed states.
 - `packages/core/src/rpc`: Effect RPC group, websocket NDJSON transport, wire codecs.
 - `packages/core/src/server`: runtime orchestration, HTTP health/readiness, runtime health projection, shutdown controller.
 - `packages/core/src/worker/mutation-store.ts`: row array, id index, version counter, mutation log, replay.

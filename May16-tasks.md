@@ -58,6 +58,8 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 11: QueryPlanner module classifies raw, active-plan, grouped chDB refresh,
       grouped accumulator, memory fallback, and rejected strategies with table tests,
       span annotations, and soak progress plannedStrategy fields.
+- [x] Task 14: LiveQueryLifecycle module extracted for AsyncResult connecting, live,
+      stale, reconnecting, failure-with-previous, and closed transition semantics.
 - [x] Task 1: Topic Worker State Machine Split. MutationStore, SnapshotReconciler,
       ActivePlanCoordinator, FanoutQueue, SubscriptionRegistry, GroupedRefreshCoordinator,
       WorkerHealthProjection, RuntimeHealthProjection, and RuntimeShutdownController are extracted
