@@ -6,6 +6,7 @@ import type {
   TopicRowFromConfig,
   ViewServerConfig,
 } from "../config/index.ts";
+import { makeRowKey } from "./row-key.ts";
 import { stableKeyFromRow, type StableKey } from "./stable-key.ts";
 
 export type SortDirection = "asc" | "desc";
@@ -313,7 +314,7 @@ export function rowKeyForQuery(query: RuntimeQuery, idField: string): RuntimeRow
   if (isRuntimeGroupedQuery(query)) {
     return (row) => groupRowKey(row, query.groupBy);
   }
-  return (row) => rowKeyByField(row, idField);
+  return makeRowKey(idField).get;
 }
 
 export function isRuntimeGroupedQuery(query: RuntimeQuery): query is RuntimeGroupedQuery {

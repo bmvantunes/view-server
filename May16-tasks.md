@@ -79,6 +79,9 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 35: StableKey module centralizes string/number row-key validation,
       comparison, row extraction, RPC wire key handling, and chDB worker mutation
       id encode/decode with explicit numeric/string distinction tests.
+- [x] Task 36: RowKey module exposes topic-derived get/equals/wire helpers,
+      routes raw query row-key construction through it, and proves missing-id,
+      delete/diff, active index, and client visible-row semantics agree.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
 - [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [x] Task 39: chDB SQL compiler contract tests and internal compiler module.

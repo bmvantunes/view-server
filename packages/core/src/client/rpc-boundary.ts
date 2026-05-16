@@ -20,7 +20,7 @@ import {
   type RuntimeRow,
   type SubscriptionEvent,
 } from "../protocol/index.ts";
-import { decodeStableKeyFromWire } from "../protocol/stable-key.ts";
+import { rowKeyFromTopicConfig } from "../protocol/row-key.ts";
 import {
   fromWireRow,
   fromWireRows,
@@ -172,15 +172,16 @@ function decodeDeltaOperation<
   topic: TTopic,
   query: TQuery,
 ): Effect.Effect<DeltaOperation<RuntimeRow>, ViewServerError> {
+  const rowKey = rowKeyFromTopicConfig(config.topics[topic]);
   if (operation.type === "remove") {
     return Effect.succeed({
       type: "remove" as const,
-      key: decodeStableKeyFromWire(operation.key),
+      key: rowKey.decodeFromWire(operation.key),
     });
   }
   if (operation.type === "patch") {
     const changes = fromWireRow(operation.changes);
-    const key = decodeStableKeyFromWire(operation.key);
+    const key = rowKey.decodeFromWire(operation.key);
     return decodeResultPatch(changes, config, topic, query).pipe(
       Effect.map((decodedChanges) => ({
         type: "patch" as const,
@@ -207,7 +208,7 @@ function decodeDeltaOperation<
         : Effect.succeed({
             type: "upsert" as const,
             row,
-            ...(operation.key === undefined ? {} : { key: decodeStableKeyFromWire(operation.key) }),
+            ...(operation.key === undefined ? {} : { key: rowKey.decodeFromWire(operation.key) }),
             ...(operation.index === undefined ? {} : { index: operation.index }),
           });
     }),

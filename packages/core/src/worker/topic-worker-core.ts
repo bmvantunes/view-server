@@ -26,7 +26,7 @@ import type {
   SnapshotEvent,
   SubscriptionEvent,
 } from "../protocol/index.ts";
-import { rowKeyByField } from "../protocol/index.ts";
+import { makeRowKey } from "../protocol/row-key.ts";
 import { isStableKey } from "../protocol/stable-key.ts";
 import type { SnapshotBackend } from "../snapshot/index.ts";
 import { createMemorySnapshotBackend } from "../snapshot/index.ts";
@@ -129,6 +129,7 @@ export function makeTopicWorkerCore(
       "view_server.rows": options.initialRows?.length ?? 0,
     });
     const idField = config.id;
+    const rowKey = makeRowKey(idField);
     const columnCatalog = columnCatalogForTopic(topic, config);
     const literalStringFields = columnCatalog.literalStringFields;
     const backend = options.snapshotBackend ?? createMemorySnapshotBackend();
@@ -774,7 +775,7 @@ export function makeTopicWorkerCore(
           .rows()
           .filter((row) => matchesFilter(row, query.where, { literalStringFields })),
         query,
-        idOf: (row) => rowKeyByField(row, idField),
+        idOf: rowKey.get,
       });
       if (accumulator !== undefined) {
         subscription.groupedAccumulator = accumulator;
