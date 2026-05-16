@@ -81,16 +81,21 @@ describe("topic worker soak", () => {
         yield* resetSoakProgress(progress);
         yield* reportSoakProgress(progress, "start", {}, { force: true });
 
+        const rowGenerationStartedAt = performance.now();
         const initialRows = yield* generateInitialRows(shape, progress);
+        const rowGenerationMs = performance.now() - rowGenerationStartedAt;
+        const workerSeedStartedAt = performance.now();
         const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
           initialRows,
           groupedRefreshDebounceMs: shape.groupedRefreshDebounceMs,
         });
+        const workerSeedMs = performance.now() - workerSeedStartedAt;
         yield* reportSoakProgress(
           progress,
           "worker_seeded",
           {
             rows: initialRows.length,
+            workerSeedMs: roundMs(workerSeedMs),
           },
           { force: true },
         );
@@ -99,8 +104,18 @@ describe("topic worker soak", () => {
         const baselineRss = process.memoryUsage().rss;
         const subscriptionFibers: Fiber.Fiber<void, ViewServerError>[] = [];
         const events = eventCounts();
+        const subscriptionSetupStartedAt = performance.now();
 
         for (let index = 0; index < shape.rawSubscriptions; index++) {
+          yield* reportSoakProgress(
+            progress,
+            "raw_subscription_starting",
+            {
+              rawSubscription: index + 1,
+              rawSubscriptions: shape.rawSubscriptions,
+            },
+            { force: index === 0 },
+          );
           const query = {
             ...rawQuery,
             offset: (index % shape.rawPageCycle) * rawQuery.limit,
@@ -111,6 +126,10 @@ describe("topic worker soak", () => {
             Effect.forkScoped,
           );
           subscriptionFibers.push(fiber);
+          yield* reportSoakProgress(progress, "raw_subscription_started", {
+            rawSubscriptionsStarted: index + 1,
+            rawSubscriptions: shape.rawSubscriptions,
+          });
         }
         yield* reportSoakProgress(
           progress,
@@ -122,12 +141,25 @@ describe("topic worker soak", () => {
         );
 
         for (let index = 0; index < shape.groupedSubscriptions; index++) {
+          yield* reportSoakProgress(
+            progress,
+            "grouped_subscription_starting",
+            {
+              groupedSubscription: index + 1,
+              groupedSubscriptions: shape.groupedSubscriptions,
+            },
+            { force: index === 0 },
+          );
           const fiber = yield* worker.subscribe(`soak-grouped-${index}`, groupedQuery).pipe(
             Stream.tap((event) => Effect.sync(() => recordEvent(events, event))),
             Stream.runDrain,
             Effect.forkScoped,
           );
           subscriptionFibers.push(fiber);
+          yield* reportSoakProgress(progress, "grouped_subscription_started", {
+            groupedSubscriptionsStarted: index + 1,
+            groupedSubscriptions: shape.groupedSubscriptions,
+          });
         }
         yield* reportSoakProgress(
           progress,
@@ -153,11 +185,15 @@ describe("topic worker soak", () => {
           { force: true },
         );
         const subscribedHeap = process.memoryUsage().heapUsed;
+        const subscriptionSetupMs = performance.now() - subscriptionSetupStartedAt;
         const liveIds = initialRows.map((row) => row.id);
         let nextId = shape.rows;
         let deleteCursor = 0;
+        const mutationLatenciesMs: number[] = [];
+        const mutationLoopStartedAt = performance.now();
 
         for (let index = 0; index < shape.mutations; index++) {
+          const mutationStartedAt = performance.now();
           const operation = index % 10;
           if (operation < 5) {
             const row = orderRow(nextId);
@@ -183,23 +219,37 @@ describe("topic worker soak", () => {
               }
             }
           }
+          mutationLatenciesMs.push(performance.now() - mutationStartedAt);
           if ((index + 1) % 100 === 0) {
+            const currentLatency = latencyStats(mutationLatenciesMs);
             yield* reportSoakProgress(progress, "mutating", {
               mutation: index + 1,
               mutations: shape.mutations,
+              mutationP50Ms: currentLatency.p50Ms,
+              mutationP95Ms: currentLatency.p95Ms,
+              mutationP99Ms: currentLatency.p99Ms,
+              mutationMaxMs: currentLatency.maxMs,
             });
             yield* Effect.yieldNow;
           }
         }
+        const mutationLoopMs = performance.now() - mutationLoopStartedAt;
+        const mutationLatency = latencyStats(mutationLatenciesMs);
         yield* reportSoakProgress(
           progress,
           "mutations_complete",
           {
             mutations: shape.mutations,
+            mutationLoopMs: roundMs(mutationLoopMs),
+            mutationP50Ms: mutationLatency.p50Ms,
+            mutationP95Ms: mutationLatency.p95Ms,
+            mutationP99Ms: mutationLatency.p99Ms,
+            mutationMaxMs: mutationLatency.maxMs,
           },
           { force: true },
         );
 
+        const settleStartedAt = performance.now();
         const settled = yield* waitForMetrics(
           worker.metrics,
           (metrics) =>
@@ -212,15 +262,25 @@ describe("topic worker soak", () => {
           progress,
           "settling",
         );
-        yield* reportSoakProgress(progress, "settled", metricsProgressFields(settled), {
-          force: true,
-        });
+        const settleMs = performance.now() - settleStartedAt;
+        yield* reportSoakProgress(
+          progress,
+          "settled",
+          {
+            ...metricsProgressFields(settled),
+            settleMs: roundMs(settleMs),
+          },
+          {
+            force: true,
+          },
+        );
         expect(settled.subscribers).toBe(shape.rawSubscriptions + shape.groupedSubscriptions);
         expect(settled.queueDepth).toBe(0);
         const settledAt = performance.now();
         const loadedHeap = process.memoryUsage().heapUsed;
         const loadedRss = process.memoryUsage().rss;
 
+        const cleanupStartedAt = performance.now();
         yield* reportSoakProgress(progress, "cleanup_started", {}, { force: true });
         for (let index = 0; index < shape.rawSubscriptions; index++) {
           yield* worker.unsubscribe(`soak-raw-${index}`);
@@ -248,6 +308,7 @@ describe("topic worker soak", () => {
           progress,
           "cleanup_waiting",
         );
+        const cleanupMs = performance.now() - cleanupStartedAt;
         yield* reportSoakProgress(progress, "cleanup_complete", metricsProgressFields(released), {
           force: true,
         });
@@ -270,7 +331,14 @@ describe("topic worker soak", () => {
         yield* writeSoakSummary({
           shape,
           durationMs: Math.round(performance.now() - startedAt),
+          rowGenerationMs: roundMs(rowGenerationMs),
+          workerSeedMs: roundMs(workerSeedMs),
+          subscriptionSetupMs: roundMs(subscriptionSetupMs),
+          mutationLoopMs: roundMs(mutationLoopMs),
           mutationAndSettleMs: Math.round(settledAt - startedAt),
+          settleMs: roundMs(settleMs),
+          cleanupMs: roundMs(cleanupMs),
+          mutationLatencyMs: mutationLatency,
           finalRows: settled.rows,
           finalVersion: settled.version.toString(),
           subscribersBeforeCleanup: settled.subscribers,
@@ -331,6 +399,14 @@ type SoakEventCounts = {
   status: number;
 };
 
+type SoakLatencyStats = {
+  readonly count: number;
+  readonly p50Ms: number;
+  readonly p95Ms: number;
+  readonly p99Ms: number;
+  readonly maxMs: number;
+};
+
 type SoakProgress = {
   readonly startedAt: number;
   lastReportAt: number;
@@ -344,7 +420,14 @@ type SoakProgressFields = Readonly<Record<string, string | number | boolean | nu
 type SoakSummary = {
   readonly shape: SoakShape;
   readonly durationMs: number;
+  readonly rowGenerationMs: number;
+  readonly workerSeedMs: number;
+  readonly subscriptionSetupMs: number;
+  readonly mutationLoopMs: number;
   readonly mutationAndSettleMs: number;
+  readonly settleMs: number;
+  readonly cleanupMs: number;
+  readonly mutationLatencyMs: SoakLatencyStats;
   readonly finalRows: number;
   readonly finalVersion: string;
   readonly subscribersBeforeCleanup: number;
@@ -489,6 +572,41 @@ function metricsProgressFields(metrics: TopicWorkerMetrics): SoakProgressFields 
     activePlanBuildingCount: metrics.activePlanBuildingCount,
     activePlanPendingCount: metrics.activePlanPendingCount,
   };
+}
+
+function latencyStats(samples: readonly number[]): SoakLatencyStats {
+  if (samples.length === 0) {
+    return {
+      count: 0,
+      p50Ms: 0,
+      p95Ms: 0,
+      p99Ms: 0,
+      maxMs: 0,
+    };
+  }
+  const sorted = [...samples].sort((left, right) => left - right);
+  return {
+    count: samples.length,
+    p50Ms: roundMs(percentile(sorted, 0.5)),
+    p95Ms: roundMs(percentile(sorted, 0.95)),
+    p99Ms: roundMs(percentile(sorted, 0.99)),
+    maxMs: roundMs(sorted[sorted.length - 1] ?? 0),
+  };
+}
+
+function percentile(sortedSamples: readonly number[], quantile: number): number {
+  if (sortedSamples.length === 0) {
+    return 0;
+  }
+  const index = Math.min(
+    sortedSamples.length - 1,
+    Math.max(0, Math.ceil(sortedSamples.length * quantile) - 1),
+  );
+  return sortedSamples[index] ?? 0;
+}
+
+function roundMs(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function writeSoakSummary(summary: SoakSummary): Effect.Effect<void> {

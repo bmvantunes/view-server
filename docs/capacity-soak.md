@@ -80,6 +80,8 @@ Relevant env vars:
 Keep the JSON artifact with the release notes or rollout ticket. Track:
 
 - startup/load time
+- row generation, worker seed, subscription setup, mutation loop, settle, and cleanup durations
+- mutation latency p50, p95, p99, and max
 - mutation and settle duration
 - final rows and worker version
 - subscribers before/after cleanup
