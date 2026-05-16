@@ -5,7 +5,6 @@ import * as Stream from "effect/Stream";
 import {
   type AuthorizationContext,
   columnCatalogForTopic,
-  type ColumnCatalog,
   type KafkaSourceConfig,
   isReservedTopic,
   normalizeConfig,
@@ -16,24 +15,20 @@ import {
 } from "../config/index.ts";
 import {
   invalidConfig,
-  invalidQuery,
   missingTopic,
-  queryLimitExceeded,
   unauthorized,
   unauthorizedSystemTopic,
   type ViewServerError,
 } from "../errors.ts";
 import type {
-  RuntimeFilterNode,
-  RuntimeGroupedQuery,
   QueryResponse,
   RuntimeQuery,
   RuntimeRow,
   SubscriptionEvent,
 } from "../protocol/index.ts";
-import { isRuntimeGroupedQuery } from "../protocol/index.ts";
 import type { KafkaTopicConsumer, KafkaTopicVerifier } from "../kafka/index.ts";
 import { KafkaSourceSupervisor } from "./kafka-source-supervisor.ts";
+import { QueryLimitPolicy } from "./query-limit-policy.ts";
 import {
   healthRowsFromResponse,
   projectRuntimeHealth,
@@ -97,6 +92,7 @@ export function makeViewServerRuntime(
         columnCatalogForTopic(topic, topicConfig),
       ]),
     );
+    const queryLimitPolicy = QueryLimitPolicy.fromConfig(normalized);
     const shutdownController = new RuntimeShutdownController();
 
     const workerFor = (topic: string) => {
@@ -147,6 +143,7 @@ export function makeViewServerRuntime(
           worker: metrics,
           kafka: sourceHealth.kafka,
           sourceFailed: sourceHealth.sourceFailed,
+          queryRejectedCount: queryLimitPolicy.rejectedCount(topic),
         };
       }
       return projectRuntimeHealth({ closing: shutdownController.isClosing(), topics });
@@ -267,10 +264,9 @@ export function makeViewServerRuntime(
       });
       yield* ensureRuntimeOpen("query", topic);
       yield* ensureReadableTopic(topic, "query");
-      const guardedQuery = yield* validateRuntimeQuery(
+      const guardedQuery = yield* queryLimitPolicy.validate(
         topic,
         query,
-        normalized.limits,
         columnCatalogs.get(topic),
       );
       yield* authorizeQuery(topic, "query", guardedQuery);
@@ -299,10 +295,9 @@ export function makeViewServerRuntime(
       });
       yield* ensureRuntimeOpen("subscribe", topic, requestId);
       yield* ensureReadableTopic(topic, "subscribe");
-      const guardedQuery = yield* validateRuntimeQuery(
+      const guardedQuery = yield* queryLimitPolicy.validate(
         topic,
         query,
-        normalized.limits,
         columnCatalogs.get(topic),
       );
       yield* authorizeQuery(topic, "subscribe", guardedQuery);
@@ -372,93 +367,3 @@ export const layerViewServerRuntime = (
   options?: ViewServerRuntimeOptions,
 ): Layer.Layer<ViewServerRuntime, ViewServerError> =>
   Layer.effect(ViewServerRuntime, makeViewServerRuntime(config, options));
-
-type RuntimeQueryLimits = NormalizedViewServerConfig["limits"];
-
-function validateRuntimeQuery(
-  topic: string,
-  query: RuntimeQuery,
-  limits: RuntimeQueryLimits,
-  catalog: ColumnCatalog | undefined,
-): Effect.Effect<RuntimeQuery, ViewServerError> {
-  return Effect.fnUntraced(function* () {
-    if (query.offset !== undefined && (!Number.isInteger(query.offset) || query.offset < 0)) {
-      return yield* Effect.fail(invalidQuery(topic, "Query offset must be a non-negative integer"));
-    }
-    if (query.limit !== undefined && (!Number.isInteger(query.limit) || query.limit <= 0)) {
-      return yield* Effect.fail(invalidQuery(topic, "Query limit must be a positive integer"));
-    }
-    const limitedQuery =
-      query.limit === undefined ? { ...query, limit: limits.maxPageSize } : query;
-    if (limitedQuery.limit !== undefined && limitedQuery.limit > limits.maxPageSize) {
-      return yield* Effect.fail(
-        queryLimitExceeded(topic, "maxPageSize", limits.maxPageSize, limitedQuery.limit),
-      );
-    }
-    if (isRuntimeGroupedQuery(limitedQuery)) {
-      yield* validateGroupedQueryLimits(topic, limitedQuery, limits);
-    }
-    const filterStats = runtimeFilterStats(limitedQuery.where);
-    if (filterStats.depth > limits.maxFilterDepth) {
-      return yield* Effect.fail(
-        queryLimitExceeded(topic, "maxFilterDepth", limits.maxFilterDepth, filterStats.depth),
-      );
-    }
-    if (filterStats.conditions > limits.maxFilterConditions) {
-      return yield* Effect.fail(
-        queryLimitExceeded(
-          topic,
-          "maxFilterConditions",
-          limits.maxFilterConditions,
-          filterStats.conditions,
-        ),
-      );
-    }
-    if (catalog !== undefined) {
-      return yield* catalog.validateQuery(limitedQuery);
-    }
-    return limitedQuery;
-  })();
-}
-
-function validateGroupedQueryLimits(
-  topic: string,
-  query: RuntimeGroupedQuery,
-  limits: RuntimeQueryLimits,
-): Effect.Effect<void, ViewServerError> {
-  return Effect.fnUntraced(function* () {
-    if (query.groupBy.length > limits.maxGroupByFields) {
-      return yield* Effect.fail(
-        queryLimitExceeded(
-          topic,
-          "maxGroupByFields",
-          limits.maxGroupByFields,
-          query.groupBy.length,
-        ),
-      );
-    }
-    const aggregateCount = Object.keys(query.aggregates).length;
-    if (aggregateCount > limits.maxAggregateCount) {
-      return yield* Effect.fail(
-        queryLimitExceeded(topic, "maxAggregateCount", limits.maxAggregateCount, aggregateCount),
-      );
-    }
-  })();
-}
-
-function runtimeFilterStats(node: RuntimeFilterNode | undefined): {
-  readonly depth: number;
-  readonly conditions: number;
-} {
-  if (node === undefined) {
-    return { depth: 0, conditions: 0 };
-  }
-  if ("conditions" in node) {
-    const childStats = node.conditions.map(runtimeFilterStats);
-    return {
-      depth: 1 + childStats.reduce((max, stats) => Math.max(max, stats.depth), 0),
-      conditions: childStats.reduce((sum, stats) => sum + stats.conditions, 0),
-    };
-  }
-  return { depth: 1, conditions: 1 };
-}

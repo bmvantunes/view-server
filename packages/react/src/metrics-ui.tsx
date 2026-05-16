@@ -63,6 +63,7 @@ export function ViewServerMetricsDashboard(props: {
           <span>views</span>
           <span>fallbacks</span>
           <span>skipped</span>
+          <span>rejects</span>
           <span>indexed rows</span>
           <span>index</span>
           <span>lag</span>
@@ -87,6 +88,7 @@ export function ViewServerMetricsDashboard(props: {
             <span>{topic.activeViewCount}</span>
             <span>{topic.activePlanFallbackCount}</span>
             <span>{topic.activePlanAutoBuildSkippedCount}</span>
+            <span>{topic.queryRejectedCount}</span>
             <span>{topic.activePlanRows}</span>
             <span>{topic.activePlanIndexEstimatedBytes}</span>
             <span>{topic.kafkaLagTotal}</span>
@@ -279,7 +281,7 @@ export const metricsDashboardCss = `
 .vs-metrics__topic-head,
 .vs-metrics__topic-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1.4fr) 92px 104px repeat(17, minmax(70px, 0.7fr)) 120px;
+  grid-template-columns: minmax(140px, 1.4fr) 92px 104px repeat(18, minmax(70px, 0.7fr)) 120px;
   gap: 10px;
   align-items: center;
   min-height: 42px;

@@ -74,6 +74,7 @@ describe("ViewServerMetricsDashboard", () => {
     expect(text).toContain("chDB pending");
     expect(text).toContain("indexed rows");
     expect(text).toContain("fallbacks");
+    expect(text).toContain("query rejects");
     expect(text).toContain("orders");
     expect(text).toContain("25");
     expect(document.querySelector('[title="chDB down"]')).not.toBeNull();
@@ -111,6 +112,7 @@ const healthRows: readonly ViewServerHealthRow[] = [
     activePlanBuildMsMax: 12,
     activePlanFallbackCount: 0,
     activePlanAutoBuildSkippedCount: 0,
+    queryRejectedCount: 1,
     chdbStatus: "ready",
     chdbPid: 8123,
     chdbRestarts: 0,
@@ -152,6 +154,7 @@ const healthRows: readonly ViewServerHealthRow[] = [
     activePlanBuildMsMax: 12,
     activePlanFallbackCount: 0,
     activePlanAutoBuildSkippedCount: 0,
+    queryRejectedCount: 1,
     chdbStatus: "ready",
     chdbPid: 8123,
     chdbRestarts: 0,

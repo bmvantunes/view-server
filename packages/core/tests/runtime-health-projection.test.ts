@@ -62,6 +62,7 @@ describe("RuntimeHealthProjection", () => {
           }),
           kafka: { ...emptyKafkaRuntimeMetrics, lagTotal: 7, lagMax: 5, partitions: 2 },
           sourceFailed: false,
+          queryRejectedCount: 2,
         },
         [VIEW_SERVER_HEALTH_TOPIC]: {
           worker: topicMetrics({ rows: 99, subscribers: 99 }),
@@ -83,6 +84,7 @@ describe("RuntimeHealthProjection", () => {
       kafkaLagMax: 5,
       kafkaPartitions: 2,
       activePlanAutoBuildSkippedCount: 1,
+      queryRejectedCount: 2,
       updatedAt: 123n,
     });
     expect(rows.map((row) => row.id)).toEqual(["server", "topic:orders"]);

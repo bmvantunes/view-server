@@ -26,6 +26,7 @@ export const viewServerHealthQuery = {
     activePlanBuildMsMax: true,
     activePlanFallbackCount: true,
     activePlanAutoBuildSkippedCount: true,
+    queryRejectedCount: true,
     chdbStatus: true,
     chdbPid: true,
     chdbRestarts: true,
@@ -71,6 +72,7 @@ export const viewServerHealthQuery = {
     readonly activePlanBuildMsMax: true;
     readonly activePlanFallbackCount: true;
     readonly activePlanAutoBuildSkippedCount: true;
+    readonly queryRejectedCount: true;
     readonly chdbStatus: true;
     readonly chdbPid: true;
     readonly chdbRestarts: true;
@@ -128,6 +130,7 @@ export type MetricsTopicViewModel = {
   readonly activeViewCount: string;
   readonly activePlanFallbackCount: string;
   readonly activePlanAutoBuildSkippedCount: string;
+  readonly queryRejectedCount: string;
   readonly activePlanRows: string;
   readonly activePlanIndexEstimatedBytes: string;
   readonly kafkaLagTotal: string;
@@ -193,6 +196,7 @@ export function metricsDashboardViewModel(
         label: "skipped plans",
         value: formatCount(server?.activePlanAutoBuildSkippedCount),
       },
+      { label: "query rejects", value: formatCount(server?.queryRejectedCount) },
     ],
     latency: [
       { label: "publish p95", value: formatMs(server?.publishLatencyP95Ms) },
@@ -226,6 +230,7 @@ function topicViewModel(topic: ViewServerMetricsRow): MetricsTopicViewModel {
     activeViewCount: formatCount(topic.activeViewCount),
     activePlanFallbackCount: formatCount(topic.activePlanFallbackCount),
     activePlanAutoBuildSkippedCount: formatCount(topic.activePlanAutoBuildSkippedCount),
+    queryRejectedCount: formatCount(topic.queryRejectedCount),
     activePlanRows: formatCount(topic.activePlanRows),
     activePlanIndexEstimatedBytes: formatBytes(topic.activePlanIndexEstimatedBytes),
     kafkaLagTotal: formatCount(topic.kafkaLagTotal),

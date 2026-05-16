@@ -253,6 +253,7 @@ export const RpcHealthTopic = Schema.Struct({
   activePlanBuildMsMax: Schema.Number,
   activePlanFallbackCount: Schema.Number,
   activePlanAutoBuildSkippedCount: Schema.Number,
+  queryRejectedCount: Schema.Number,
   chdbStatus: Schema.Literals(["ready", "degraded", "restarting", "stopped"]),
   chdbPid: Schema.Number,
   chdbRestarts: Schema.Number,

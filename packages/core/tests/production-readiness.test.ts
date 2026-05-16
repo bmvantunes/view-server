@@ -351,6 +351,13 @@ describe("production readiness", () => {
         "QueryLimitExceeded",
         "InvalidQuery",
       ]);
+      const health = yield* runtime.health;
+      const orderHealth = health.topics.orders;
+      expect(orderHealth).toBeDefined();
+      if (orderHealth === undefined) {
+        throw new Error("Missing orders health");
+      }
+      expect(orderHealth.queryRejectedCount).toBe(5);
     }).pipe(Effect.scoped),
   );
 

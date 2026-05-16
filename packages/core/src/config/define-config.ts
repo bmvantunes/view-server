@@ -85,6 +85,7 @@ export type TopicConfig<
         readonly maxVersionLagBeforeMemoryFallback?: number | undefined;
       }
     | undefined;
+  readonly limits?: QueryLimitsConfig | undefined;
 };
 
 export type TopicConfigMap = Readonly<Record<string, TopicConfig>>;
@@ -129,15 +130,7 @@ export type ViewServerConfig<TTopics extends TopicConfigMap = TopicConfigMap> = 
         readonly groupedRefreshDebounceMs?: number | undefined;
       }
     | undefined;
-  readonly limits?:
-    | {
-        readonly maxPageSize?: number | undefined;
-        readonly maxAggregateCount?: number | undefined;
-        readonly maxGroupByFields?: number | undefined;
-        readonly maxFilterDepth?: number | undefined;
-        readonly maxFilterConditions?: number | undefined;
-      }
-    | undefined;
+  readonly limits?: QueryLimitsConfig | undefined;
   readonly health?:
     | {
         readonly path?: HttpPath | undefined;
@@ -175,13 +168,7 @@ export type NormalizedViewServerConfig = {
     readonly activePlanBuildConcurrency: number;
     readonly groupedRefreshDebounceMs: number;
   };
-  readonly limits: {
-    readonly maxPageSize: number;
-    readonly maxAggregateCount: number;
-    readonly maxGroupByFields: number;
-    readonly maxFilterDepth: number;
-    readonly maxFilterConditions: number;
-  };
+  readonly limits: NormalizedQueryLimits;
   readonly health: {
     readonly path: HttpPath;
     readonly readyPath: HttpPath;
@@ -189,6 +176,22 @@ export type NormalizedViewServerConfig = {
 };
 
 export type SystemTopicName = typeof VIEW_SERVER_HEALTH_TOPIC;
+
+export type QueryLimitsConfig = {
+  readonly maxPageSize?: number | undefined;
+  readonly maxAggregateCount?: number | undefined;
+  readonly maxGroupByFields?: number | undefined;
+  readonly maxFilterDepth?: number | undefined;
+  readonly maxFilterConditions?: number | undefined;
+};
+
+export type NormalizedQueryLimits = {
+  readonly maxPageSize: number;
+  readonly maxAggregateCount: number;
+  readonly maxGroupByFields: number;
+  readonly maxFilterDepth: number;
+  readonly maxFilterConditions: number;
+};
 export type TopicName<TConfig extends ViewServerConfig> = Extract<keyof TConfig["topics"], string>;
 export type ReadableTopicName<TConfig extends ViewServerConfig> =
   | TopicName<TConfig>
@@ -262,6 +265,7 @@ export const ViewServerHealthRowSchema = Schema.Struct({
   activePlanBuildMsMax: Schema.Number,
   activePlanFallbackCount: Schema.Number,
   activePlanAutoBuildSkippedCount: Schema.Number,
+  queryRejectedCount: Schema.Number,
   chdbStatus: Schema.Literals(["ready", "degraded", "restarting", "stopped"]),
   chdbPid: Schema.Number,
   chdbRestarts: Schema.Number,
@@ -299,6 +303,7 @@ export function normalizeConfig(config: ViewServerConfig): NormalizedViewServerC
     if (idExists === false) {
       throw new Error(`Topic ${topic} id field ${topicConfig.id} is not present in the schema`);
     }
+    validateQueryLimitOverrides(`topics.${topic}.limits`, topicConfig.limits);
   }
 
   const worker = {
@@ -330,18 +335,7 @@ export function normalizeConfig(config: ViewServerConfig): NormalizedViewServerC
     );
   }
 
-  const limits = {
-    maxPageSize: config.limits?.maxPageSize ?? 50,
-    maxAggregateCount: config.limits?.maxAggregateCount ?? 32,
-    maxGroupByFields: config.limits?.maxGroupByFields ?? 8,
-    maxFilterDepth: config.limits?.maxFilterDepth ?? 8,
-    maxFilterConditions: config.limits?.maxFilterConditions ?? 64,
-  };
-  validatePositiveInt("limits.maxPageSize", limits.maxPageSize);
-  validatePositiveInt("limits.maxAggregateCount", limits.maxAggregateCount);
-  validatePositiveInt("limits.maxGroupByFields", limits.maxGroupByFields);
-  validatePositiveInt("limits.maxFilterDepth", limits.maxFilterDepth);
-  validatePositiveInt("limits.maxFilterConditions", limits.maxFilterConditions);
+  const limits = normalizeQueryLimits(config.limits);
 
   return {
     topics: {
@@ -364,6 +358,43 @@ export function normalizeConfig(config: ViewServerConfig): NormalizedViewServerC
       readyPath: config.health?.readyPath ?? "/ready",
     },
   };
+}
+
+function normalizeQueryLimits(limits: QueryLimitsConfig | undefined): NormalizedQueryLimits {
+  const normalized = {
+    maxPageSize: limits?.maxPageSize ?? 50,
+    maxAggregateCount: limits?.maxAggregateCount ?? 32,
+    maxGroupByFields: limits?.maxGroupByFields ?? 8,
+    maxFilterDepth: limits?.maxFilterDepth ?? 8,
+    maxFilterConditions: limits?.maxFilterConditions ?? 64,
+  };
+  validatePositiveInt("limits.maxPageSize", normalized.maxPageSize);
+  validatePositiveInt("limits.maxAggregateCount", normalized.maxAggregateCount);
+  validatePositiveInt("limits.maxGroupByFields", normalized.maxGroupByFields);
+  validatePositiveInt("limits.maxFilterDepth", normalized.maxFilterDepth);
+  validatePositiveInt("limits.maxFilterConditions", normalized.maxFilterConditions);
+  return normalized;
+}
+
+function validateQueryLimitOverrides(path: string, limits: QueryLimitsConfig | undefined): void {
+  if (limits === undefined) {
+    return;
+  }
+  if (limits.maxPageSize !== undefined) {
+    validatePositiveInt(`${path}.maxPageSize`, limits.maxPageSize);
+  }
+  if (limits.maxAggregateCount !== undefined) {
+    validatePositiveInt(`${path}.maxAggregateCount`, limits.maxAggregateCount);
+  }
+  if (limits.maxGroupByFields !== undefined) {
+    validatePositiveInt(`${path}.maxGroupByFields`, limits.maxGroupByFields);
+  }
+  if (limits.maxFilterDepth !== undefined) {
+    validatePositiveInt(`${path}.maxFilterDepth`, limits.maxFilterDepth);
+  }
+  if (limits.maxFilterConditions !== undefined) {
+    validatePositiveInt(`${path}.maxFilterConditions`, limits.maxFilterConditions);
+  }
 }
 
 export function isReservedTopic(topic: string): boolean {

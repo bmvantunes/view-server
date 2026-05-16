@@ -29,6 +29,7 @@ export type HealthTopicMetrics = {
   readonly activePlanBuildMsMax: number;
   readonly activePlanFallbackCount: number;
   readonly activePlanAutoBuildSkippedCount: number;
+  readonly queryRejectedCount: number;
   readonly chdbStatus: "ready" | "degraded" | "restarting" | "stopped";
   readonly chdbPid: number;
   readonly chdbRestarts: number;
@@ -53,6 +54,7 @@ export type RuntimeHealthProjectionTopicInput = {
   readonly worker: TopicWorkerMetrics;
   readonly kafka: KafkaRuntimeMetrics;
   readonly sourceFailed: boolean;
+  readonly queryRejectedCount?: number | undefined;
 };
 
 export const emptyKafkaRuntimeMetrics: KafkaRuntimeMetrics = {
@@ -84,6 +86,7 @@ export function projectRuntimeHealth(args: {
       metrics: input.worker,
       kafka: input.kafka,
       sourceFailed: input.sourceFailed,
+      queryRejectedCount: input.queryRejectedCount,
     });
   }
   return {
@@ -128,6 +131,7 @@ export function healthRowsFromResponse(
       topicEntries,
       "activePlanAutoBuildSkippedCount",
     ),
+    queryRejectedCount: sumTopicMetric(topicEntries, "queryRejectedCount"),
     chdbStatus: aggregateChdbStatus(topicEntries),
     chdbPid: 0,
     chdbRestarts: sumTopicMetric(topicEntries, "chdbRestarts"),
@@ -164,6 +168,7 @@ export function healthRowsFromResponse(
       activePlanBuildMsMax: metrics.activePlanBuildMsMax,
       activePlanFallbackCount: metrics.activePlanFallbackCount,
       activePlanAutoBuildSkippedCount: metrics.activePlanAutoBuildSkippedCount,
+      queryRejectedCount: metrics.queryRejectedCount,
       chdbStatus: metrics.chdbStatus,
       chdbPid: metrics.chdbPid,
       chdbRestarts: metrics.chdbRestarts,
@@ -187,6 +192,7 @@ function projectTopicHealth(args: {
   readonly metrics: TopicWorkerMetrics;
   readonly kafka: KafkaRuntimeMetrics;
   readonly sourceFailed: boolean;
+  readonly queryRejectedCount?: number | undefined;
 }): HealthTopicMetrics {
   return {
     rows: args.metrics.rows,
@@ -206,6 +212,7 @@ function projectTopicHealth(args: {
     activePlanBuildMsMax: args.metrics.activePlanBuildMsMax,
     activePlanFallbackCount: args.metrics.activePlanFallbackCount,
     activePlanAutoBuildSkippedCount: args.metrics.activePlanAutoBuildSkippedCount,
+    queryRejectedCount: args.queryRejectedCount ?? 0,
     chdbStatus: args.metrics.chdbStatus,
     chdbPid: args.metrics.chdbPid,
     chdbRestarts: args.metrics.chdbRestarts,
@@ -243,6 +250,7 @@ function healthRow(input: {
   readonly activePlanBuildMsMax: number;
   readonly activePlanFallbackCount: number;
   readonly activePlanAutoBuildSkippedCount: number;
+  readonly queryRejectedCount: number;
   readonly chdbStatus: ViewServerHealthRow["chdbStatus"];
   readonly chdbPid: number;
   readonly chdbRestarts: number;
@@ -278,6 +286,7 @@ function healthRow(input: {
     activePlanBuildMsMax: input.activePlanBuildMsMax,
     activePlanFallbackCount: input.activePlanFallbackCount,
     activePlanAutoBuildSkippedCount: input.activePlanAutoBuildSkippedCount,
+    queryRejectedCount: input.queryRejectedCount,
     chdbStatus: input.chdbStatus,
     chdbPid: input.chdbPid,
     chdbRestarts: input.chdbRestarts,
@@ -317,6 +326,7 @@ function sumTopicMetric(
     | "activePlanBuildMsTotal"
     | "activePlanFallbackCount"
     | "activePlanAutoBuildSkippedCount"
+    | "queryRejectedCount"
     | "chdbRestarts"
     | "chdbPendingRequests"
     | "kafkaLagTotal"
