@@ -18,6 +18,8 @@ chDB supervision is per topic. Each topic worker owns its own chDB child process
 
 If chDB cannot initialize during startup, production runtime startup fails fast. If snapshot, grouped refresh, or mirror writes fail after startup, the topic reports degraded and falls back to worker memory. A later successful backend operation can return the topic to ready.
 
+Health exposes the per-topic child state through `chdbStatus`, `chdbPid`, `chdbRestarts`, `chdbPendingRequests`, `chdbLastError`, and `chdbBackendVersion`. These fields are also mirrored into `__view_server_health` for the metrics UI.
+
 Snapshots are accepted from chDB only when the version fence proves correctness. Grouped chDB refreshes require an exact backend version match; stale or failed refreshes are discarded and recomputed from memory.
 
 ## WebSocket Reconnect Storm

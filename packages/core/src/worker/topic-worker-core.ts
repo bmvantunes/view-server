@@ -78,6 +78,12 @@ export type TopicWorkerMetrics = {
   readonly activePlanBuildMsTotal: number;
   readonly activePlanBuildMsMax: number;
   readonly activePlanFallbackCount: number;
+  readonly chdbStatus: SnapshotBackendHealth["status"];
+  readonly chdbPid: number;
+  readonly chdbRestarts: number;
+  readonly chdbPendingRequests: number;
+  readonly chdbLastError: string;
+  readonly chdbBackendVersion: WorkerVersion;
   readonly status: "ready" | "degraded" | "stopping";
 };
 
@@ -896,14 +902,14 @@ export function makeTopicWorkerCore(
       maxQueueDepth <= 0 ? depth > 0 : depth >= maxQueueDepth;
 
     const backendHealth = (): Effect.Effect<SnapshotBackendHealth> =>
-      backend.health ?? Effect.succeed({ status: "ready" });
+      backend.health ?? Effect.succeed({ status: "stopped" });
 
     const statusForPressure = (
       depth: number,
       planStats: ReturnType<typeof activePlanStats>,
       snapshotHealth: SnapshotBackendHealth,
     ): TopicWorkerMetrics["status"] =>
-      snapshotHealth.status === "degraded"
+      snapshotHealth.status === "degraded" || snapshotHealth.status === "restarting"
         ? "degraded"
         : status === "ready" &&
             (isQueueAtLimit(depth) ||
@@ -1435,6 +1441,12 @@ export function makeTopicWorkerCore(
           activePlanBuildMsTotal: planStats.activePlanBuildMsTotal,
           activePlanBuildMsMax: planStats.activePlanBuildMsMax,
           activePlanFallbackCount: planStats.activePlanFallbackCount,
+          chdbStatus: snapshotHealth.status,
+          chdbPid: snapshotHealth.pid ?? 0,
+          chdbRestarts: snapshotHealth.restarts ?? 0,
+          chdbPendingRequests: snapshotHealth.pendingRequests ?? 0,
+          chdbLastError: snapshotHealth.lastError ?? snapshotHealth.message ?? "",
+          chdbBackendVersion: snapshotHealth.backendVersion ?? 0n,
           status: statusForPressure(depth, planStats, snapshotHealth),
         };
       })(),

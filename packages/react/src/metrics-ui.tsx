@@ -25,6 +25,12 @@ export const viewServerHealthQuery = {
     activePlanBuildMsTotal: true,
     activePlanBuildMsMax: true,
     activePlanFallbackCount: true,
+    chdbStatus: true,
+    chdbPid: true,
+    chdbRestarts: true,
+    chdbPendingRequests: true,
+    chdbLastError: true,
+    chdbBackendVersion: true,
     workerLagP95Ms: true,
     deltaFanoutP95Ms: true,
     publishLatencyP95Ms: true,
@@ -63,6 +69,12 @@ export const viewServerHealthQuery = {
     readonly activePlanBuildMsTotal: true;
     readonly activePlanBuildMsMax: true;
     readonly activePlanFallbackCount: true;
+    readonly chdbStatus: true;
+    readonly chdbPid: true;
+    readonly chdbRestarts: true;
+    readonly chdbPendingRequests: true;
+    readonly chdbLastError: true;
+    readonly chdbBackendVersion: true;
     readonly workerLagP95Ms: true;
     readonly deltaFanoutP95Ms: true;
     readonly publishLatencyP95Ms: true;
@@ -142,6 +154,7 @@ export function ViewServerMetricsDashboard(props: {
         <SignalCell label="snapshot p95" value={formatMs(server?.snapshotLatencyP95Ms)} />
         <SignalCell label="worker lag" value={formatMs(server?.workerLagP95Ms)} />
         <SignalCell label="kafka lag" value={formatCount(server?.kafkaLagTotal)} />
+        <SignalCell label="chDB pending" value={formatCount(server?.chdbPendingRequests)} />
         <SignalCell label="plan build" value={formatMs(server?.activePlanBuildMs)} />
         <SignalCell label="plan build max" value={formatMs(server?.activePlanBuildMsMax)} />
         <SignalCell label="plan index" value={formatBytes(server?.activePlanIndexEstimatedBytes)} />
@@ -151,6 +164,7 @@ export function ViewServerMetricsDashboard(props: {
         <div className="vs-metrics__topic-head">
           <span>topic</span>
           <span>status</span>
+          <span>chDB</span>
           <span>rows</span>
           <span>subs</span>
           <span>queue</span>
@@ -163,12 +177,17 @@ export function ViewServerMetricsDashboard(props: {
           <span>indexed rows</span>
           <span>index</span>
           <span>lag</span>
+          <span>chDB req</span>
+          <span>restarts</span>
+          <span>chDB ver</span>
+          <span>pid</span>
           <span>updated</span>
         </div>
         {topics.map((topic) => (
           <div className="vs-metrics__topic-row" data-status={topic.status} key={topic.id}>
             <strong>{topic.topic}</strong>
             <span>{topic.status}</span>
+            <span title={topic.chdbLastError}>{topic.chdbStatus}</span>
             <span>{formatCount(topic.rows)}</span>
             <span>{formatCount(topic.subscribers)}</span>
             <span>{formatCount(topic.queueDepth)}</span>
@@ -184,6 +203,10 @@ export function ViewServerMetricsDashboard(props: {
             <span>{formatCount(topic.activePlanRows)}</span>
             <span>{formatBytes(topic.activePlanIndexEstimatedBytes)}</span>
             <span>{formatCount(topic.kafkaLagTotal)}</span>
+            <span>{formatCount(topic.chdbPendingRequests)}</span>
+            <span>{formatCount(topic.chdbRestarts)}</span>
+            <span>{topic.chdbBackendVersion}</span>
+            <span>{formatCount(topic.chdbPid)}</span>
             <span>{formatTime(topic.updatedAt)}</span>
           </div>
         ))}
@@ -361,7 +384,7 @@ export const metricsDashboardCss = `
 
 .vs-metrics__summary {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(126px, 1fr));
   gap: 1px;
   margin-top: 16px;
   background: rgba(154, 181, 164, 0.24);
@@ -383,7 +406,7 @@ export const metricsDashboardCss = `
 
 .vs-metrics__latency {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(126px, 1fr));
   gap: 8px;
   margin-top: 12px;
 }
@@ -413,7 +436,7 @@ export const metricsDashboardCss = `
 .vs-metrics__topic-head,
 .vs-metrics__topic-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1.4fr) 92px repeat(12, minmax(70px, 0.7fr)) 120px;
+  grid-template-columns: minmax(140px, 1.4fr) 92px 104px repeat(16, minmax(70px, 0.7fr)) 120px;
   gap: 10px;
   align-items: center;
   min-height: 42px;
@@ -466,7 +489,7 @@ export const metricsDashboardCss = `
 
   .vs-metrics__topic-head,
   .vs-metrics__topic-row {
-    min-width: 1120px;
+    min-width: 1480px;
   }
 }
 `;

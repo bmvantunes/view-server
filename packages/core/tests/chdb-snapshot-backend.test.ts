@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { defineConfig } from "../src/config/index.ts";
+import { defineConfig, VIEW_SERVER_HEALTH_TOPIC } from "../src/config/index.ts";
 import { snapshotBackendFailed, type ViewServerError } from "../src/errors.ts";
 import type { RuntimeQuery, RuntimeRow } from "../src/protocol/index.ts";
 import { createChdbSnapshotBackend } from "../src/snapshot/chdb-backend.ts";
@@ -86,6 +86,22 @@ const allOrdersQuery = {
     id: true,
     symbol: true,
     price: true,
+  },
+  orderBy: [{ field: "id", direction: "asc" }],
+  limit: 10,
+} satisfies RuntimeQuery;
+
+const healthChdbQuery = {
+  fields: {
+    id: true,
+    topic: true,
+    chdbStatus: true,
+    chdbPid: true,
+    chdbRestarts: true,
+    chdbPendingRequests: true,
+    chdbLastError: true,
+    chdbBackendVersion: true,
+    status: true,
   },
   orderBy: [{ field: "id", direction: "asc" }],
   limit: 10,
@@ -801,6 +817,17 @@ describe("chDB snapshot backend", () => {
         return health.topics.orders?.status === "degraded";
       });
       expect(degraded.ok).toBe(false);
+      expect(degraded.topics.orders).toMatchObject({
+        chdbStatus: "degraded",
+        chdbPid: pid,
+        chdbPendingRequests: 0,
+      });
+      expect(degraded.topics.orders?.chdbLastError).toContain("SIGKILL");
+      const healthTopic = yield* runtime.query(VIEW_SERVER_HEALTH_TOPIC, healthChdbQuery);
+      expect(rowById(healthTopic.rows, "topic:orders")).toMatchObject({
+        chdbStatus: "degraded",
+        chdbPid: pid,
+      });
       expect(isProcessAlive(pid)).toBe(false);
       yield* runtime.close.pipe(Effect.timeout("1 second"));
     }).pipe(Effect.scoped),
@@ -848,7 +875,15 @@ describe("chDB snapshot backend", () => {
       );
       expect(degraded.ok).toBe(false);
       expect(degraded.topics.orders?.status).toBe("degraded");
+      expect(degraded.topics.orders).toMatchObject({
+        chdbStatus: "degraded",
+        chdbPid: ordersPid,
+      });
       expect(degraded.topics.trades?.status).toBe("ready");
+      expect(degraded.topics.trades).toMatchObject({
+        chdbStatus: "ready",
+        chdbPid: tradesPid,
+      });
       expect(isProcessAlive(ordersPid)).toBe(false);
       expect(isProcessAlive(tradesPid)).toBe(true);
 
@@ -1005,7 +1040,12 @@ describe("chDB snapshot backend", () => {
 
       const firstPid = expectPid(childPids[0]);
       process.kill(firstPid, "SIGKILL");
-      yield* waitForBackendHealth(backend, (health) => health.status === "degraded");
+      const degraded = yield* waitForBackendHealth(
+        backend,
+        (health) => health.status === "degraded",
+      );
+      expect(degraded.pid).toBe(firstPid);
+      expect(degraded.lastError).toContain("SIGKILL");
       expect(isProcessAlive(firstPid)).toBe(false);
 
       const result = yield* backend.snapshot({ query: allOrdersQuery, targetVersion: 2n });
@@ -1016,7 +1056,12 @@ describe("chDB snapshot backend", () => {
       ]);
       expect(childPids.length).toBe(2);
       expect(childPids[1]).not.toBe(firstPid);
-      expect((yield* snapshotBackendHealth(backend)).status).toBe("ready");
+      expect(yield* snapshotBackendHealth(backend)).toMatchObject({
+        status: "ready",
+        pid: childPids[1],
+        restarts: 1,
+        backendVersion: 2n,
+      });
     }).pipe(Effect.scoped),
   );
 
@@ -1038,6 +1083,7 @@ describe("chDB snapshot backend", () => {
       expect(isProcessAlive(pid)).toBe(true);
 
       yield* backend.close().pipe(Effect.timeout("2 seconds"));
+      expect((yield* snapshotBackendHealth(backend)).status).toBe("stopped");
       yield* waitForProcessExit(pid);
       expect(isProcessAlive(pid)).toBe(false);
     }).pipe(Effect.scoped),
@@ -1046,6 +1092,14 @@ describe("chDB snapshot backend", () => {
 
 function versionedRows(rows: readonly RuntimeRow[]) {
   return rows.map((row, index) => ({ row, version: BigInt(index + 1) }));
+}
+
+function rowById(rows: readonly RuntimeRow[], id: string): RuntimeRow {
+  const row = rows.find((entry) => entry.id === id);
+  if (row === undefined) {
+    throw new Error(`Expected row ${id}`);
+  }
+  return row;
 }
 
 function snapshotBackendHealth(backend: SnapshotBackend): Effect.Effect<SnapshotBackendHealth> {

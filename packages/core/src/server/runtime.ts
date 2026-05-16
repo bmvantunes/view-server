@@ -92,6 +92,12 @@ export type HealthResponse = {
         readonly activePlanBuildMsTotal: number;
         readonly activePlanBuildMsMax: number;
         readonly activePlanFallbackCount: number;
+        readonly chdbStatus: "ready" | "degraded" | "restarting" | "stopped";
+        readonly chdbPid: number;
+        readonly chdbRestarts: number;
+        readonly chdbPendingRequests: number;
+        readonly chdbLastError: string;
+        readonly chdbBackendVersion: string;
         readonly version: string;
         readonly kafkaLagTotal: number;
         readonly kafkaLagMax: number;
@@ -224,6 +230,12 @@ export function makeViewServerRuntime(
           activePlanBuildMsTotal: number;
           activePlanBuildMsMax: number;
           activePlanFallbackCount: number;
+          chdbStatus: "ready" | "degraded" | "restarting" | "stopped";
+          chdbPid: number;
+          chdbRestarts: number;
+          chdbPendingRequests: number;
+          chdbLastError: string;
+          chdbBackendVersion: string;
           version: string;
           kafkaLagTotal: number;
           kafkaLagMax: number;
@@ -254,6 +266,12 @@ export function makeViewServerRuntime(
           activePlanBuildMsTotal: metrics.activePlanBuildMsTotal,
           activePlanBuildMsMax: metrics.activePlanBuildMsMax,
           activePlanFallbackCount: metrics.activePlanFallbackCount,
+          chdbStatus: metrics.chdbStatus,
+          chdbPid: metrics.chdbPid,
+          chdbRestarts: metrics.chdbRestarts,
+          chdbPendingRequests: metrics.chdbPendingRequests,
+          chdbLastError: metrics.chdbLastError,
+          chdbBackendVersion: metrics.chdbBackendVersion.toString(),
           version: metrics.version.toString(),
           kafkaLagTotal: kafkaMetrics.lagTotal,
           kafkaLagMax: kafkaMetrics.lagMax,
@@ -386,6 +404,9 @@ export function makeViewServerRuntime(
       yield* ensureReadableTopic(topic, "query");
       const guardedQuery = yield* validateRuntimeQueryLimits(topic, query, normalized.limits);
       yield* authorizeQuery(topic, "query", guardedQuery);
+      if (topic === VIEW_SERVER_HEALTH_TOPIC) {
+        yield* syncHealthTopicIgnoringErrors;
+      }
       const worker = yield* workerFor(topic);
       const response = yield* worker.query(guardedQuery);
       yield* Effect.annotateCurrentSpan({
@@ -568,6 +589,12 @@ function healthRowsFromResponse(health: HealthResponse): readonly ViewServerHeal
     activePlanBuildMsTotal: sumTopicMetric(topicEntries, "activePlanBuildMsTotal"),
     activePlanBuildMsMax: maxTopicMetric(topicEntries, "activePlanBuildMsMax"),
     activePlanFallbackCount: sumTopicMetric(topicEntries, "activePlanFallbackCount"),
+    chdbStatus: aggregateChdbStatus(topicEntries),
+    chdbPid: 0,
+    chdbRestarts: sumTopicMetric(topicEntries, "chdbRestarts"),
+    chdbPendingRequests: sumTopicMetric(topicEntries, "chdbPendingRequests"),
+    chdbLastError: firstTopicTextMetric(topicEntries, "chdbLastError"),
+    chdbBackendVersion: maxTopicVersionString(topicEntries, "chdbBackendVersion"),
     kafkaLagTotal: sumTopicMetric(topicEntries, "kafkaLagTotal"),
     kafkaLagMax: maxTopicMetric(topicEntries, "kafkaLagMax"),
     kafkaPartitions: sumTopicMetric(topicEntries, "kafkaPartitions"),
@@ -597,6 +624,12 @@ function healthRowsFromResponse(health: HealthResponse): readonly ViewServerHeal
       activePlanBuildMsTotal: metrics.activePlanBuildMsTotal,
       activePlanBuildMsMax: metrics.activePlanBuildMsMax,
       activePlanFallbackCount: metrics.activePlanFallbackCount,
+      chdbStatus: metrics.chdbStatus,
+      chdbPid: metrics.chdbPid,
+      chdbRestarts: metrics.chdbRestarts,
+      chdbPendingRequests: metrics.chdbPendingRequests,
+      chdbLastError: metrics.chdbLastError,
+      chdbBackendVersion: metrics.chdbBackendVersion,
       kafkaLagTotal: metrics.kafkaLagTotal,
       kafkaLagMax: metrics.kafkaLagMax,
       kafkaPartitions: metrics.kafkaPartitions,
@@ -629,6 +662,12 @@ function healthRow(input: {
   readonly activePlanBuildMsTotal: number;
   readonly activePlanBuildMsMax: number;
   readonly activePlanFallbackCount: number;
+  readonly chdbStatus: ViewServerHealthRow["chdbStatus"];
+  readonly chdbPid: number;
+  readonly chdbRestarts: number;
+  readonly chdbPendingRequests: number;
+  readonly chdbLastError: string;
+  readonly chdbBackendVersion: string;
   readonly kafkaLagTotal: number;
   readonly kafkaLagMax: number;
   readonly kafkaPartitions: number;
@@ -657,6 +696,12 @@ function healthRow(input: {
     activePlanBuildMsTotal: input.activePlanBuildMsTotal,
     activePlanBuildMsMax: input.activePlanBuildMsMax,
     activePlanFallbackCount: input.activePlanFallbackCount,
+    chdbStatus: input.chdbStatus,
+    chdbPid: input.chdbPid,
+    chdbRestarts: input.chdbRestarts,
+    chdbPendingRequests: input.chdbPendingRequests,
+    chdbLastError: input.chdbLastError,
+    chdbBackendVersion: input.chdbBackendVersion,
     workerLagP95Ms: 0,
     deltaFanoutP95Ms: 0,
     publishLatencyP95Ms: 0,
@@ -689,6 +734,8 @@ function sumTopicMetric(
     | "activePlanPendingCount"
     | "activePlanBuildMsTotal"
     | "activePlanFallbackCount"
+    | "chdbRestarts"
+    | "chdbPendingRequests"
     | "kafkaLagTotal"
     | "kafkaPartitions",
 ): number {
@@ -706,6 +753,42 @@ function maxTopicMetric(
     | "lastKafkaEndOffset",
 ): number {
   return entries.reduce((max, [, metrics]) => Math.max(max, metrics[field]), 0);
+}
+
+function aggregateChdbStatus(
+  entries: readonly (readonly [string, HealthResponse["topics"][string]])[],
+): ViewServerHealthRow["chdbStatus"] {
+  if (entries.some(([, metrics]) => metrics.chdbStatus === "degraded")) {
+    return "degraded";
+  }
+  if (entries.some(([, metrics]) => metrics.chdbStatus === "restarting")) {
+    return "restarting";
+  }
+  if (entries.length > 0 && entries.every(([, metrics]) => metrics.chdbStatus === "stopped")) {
+    return "stopped";
+  }
+  return "ready";
+}
+
+function firstTopicTextMetric(
+  entries: readonly (readonly [string, HealthResponse["topics"][string]])[],
+  field: "chdbLastError",
+): string {
+  return entries.find(([, metrics]) => metrics[field].length > 0)?.[1][field] ?? "";
+}
+
+function maxTopicVersionString(
+  entries: readonly (readonly [string, HealthResponse["topics"][string]])[],
+  field: "chdbBackendVersion",
+): string {
+  let max = 0n;
+  for (const [, metrics] of entries) {
+    const value = BigInt(metrics[field]);
+    if (value > max) {
+      max = value;
+    }
+  }
+  return max.toString();
 }
 
 type KafkaSourceForVerification = {

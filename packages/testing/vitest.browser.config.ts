@@ -3,6 +3,7 @@ import { playwright } from "@vitest/browser-playwright";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
+const coreSource = fileURLToPath(new URL("../core/src", import.meta.url));
 const reactSource = fileURLToPath(new URL("../react/src/index.ts", import.meta.url));
 
 export default defineConfig({
@@ -38,6 +39,7 @@ export default defineConfig({
   resolve: {
     tsconfigPaths: true,
     alias: {
+      "@view-server/core": coreSource,
       "@view-server/react": reactSource,
       "vite-plus/test": "vitest",
     },

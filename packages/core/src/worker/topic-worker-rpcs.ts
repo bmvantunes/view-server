@@ -59,6 +59,12 @@ export const TopicWorkerMetricsSchema = Schema.Struct({
   activePlanBuildMsTotal: Schema.Number,
   activePlanBuildMsMax: Schema.Number,
   activePlanFallbackCount: Schema.Number,
+  chdbStatus: Schema.Literals(["ready", "degraded", "restarting", "stopped"]),
+  chdbPid: Schema.Number,
+  chdbRestarts: Schema.Number,
+  chdbPendingRequests: Schema.Number,
+  chdbLastError: Schema.String,
+  chdbBackendVersion: Schema.String,
   version: Schema.String,
   status: Schema.Literals(["ready", "degraded", "stopping"]),
 });

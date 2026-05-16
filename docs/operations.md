@@ -87,6 +87,8 @@ Operational red flags:
 - `maxSubscriptionLagVersions > 0` after settle.
 - `activePlanBuildQueueDepth` or `activePlanPendingCount` climbing under query churn.
 - `activePlanFallbackCount > 0` without an intentional guardrail hit.
+- `chdbStatus != ready`, `chdbPendingRequests` climbing, or `chdbRestarts` increasing unexpectedly.
+- `chdbBackendVersion` falling materially behind the topic worker version.
 - Kafka `kafkaLagTotal` or `kafkaLagMax` increasing.
 - Topic `status = degraded`.
 
@@ -129,8 +131,9 @@ If a subscription appears stuck:
 If chDB seems stale:
 
 1. Verify the process passed chDB startup initialization.
-2. Check backend version annotations/spans.
-3. Confirm grouped chDB refresh is exact-version accepted, not silently trusted.
+2. Check `chdbStatus`, `chdbPid`, `chdbPendingRequests`, `chdbLastError`, and `chdbBackendVersion` in `/health` or `__view_server_health`.
+3. Check backend version annotations/spans.
+4. Confirm grouped chDB refresh is exact-version accepted, not silently trusted.
 
 If many users create unique sort/filter plans:
 

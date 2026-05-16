@@ -17,8 +17,13 @@ export type SnapshotBackendResult = {
 };
 
 export type SnapshotBackendHealth = {
-  readonly status: "ready" | "degraded";
+  readonly status: "ready" | "degraded" | "restarting" | "stopped";
   readonly message?: string | undefined;
+  readonly pid?: number | undefined;
+  readonly restarts?: number | undefined;
+  readonly pendingRequests?: number | undefined;
+  readonly lastError?: string | undefined;
+  readonly backendVersion?: WorkerVersion | undefined;
 };
 
 export interface SnapshotBackend {

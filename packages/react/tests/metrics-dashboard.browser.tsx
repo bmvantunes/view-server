@@ -47,6 +47,7 @@ describe("ViewServerMetricsDashboard", () => {
     expect(document.body.textContent).toContain("orders");
     expect(document.body.textContent).toContain("1,024");
     expect(document.body.textContent).toContain("6");
+    expect(document.body.textContent).toContain("8,123");
     expect(document.body.textContent).toContain("12ms");
   });
 });
@@ -81,6 +82,12 @@ const healthRows: readonly ViewServerHealthRow[] = [
     activePlanBuildMsTotal: 22,
     activePlanBuildMsMax: 12,
     activePlanFallbackCount: 0,
+    chdbStatus: "ready",
+    chdbPid: 8123,
+    chdbRestarts: 0,
+    chdbPendingRequests: 0,
+    chdbLastError: "",
+    chdbBackendVersion: "1024",
     workerLagP95Ms: 2,
     deltaFanoutP95Ms: 4,
     publishLatencyP95Ms: 12,
@@ -115,6 +122,12 @@ const healthRows: readonly ViewServerHealthRow[] = [
     activePlanBuildMsTotal: 22,
     activePlanBuildMsMax: 12,
     activePlanFallbackCount: 0,
+    chdbStatus: "ready",
+    chdbPid: 8123,
+    chdbRestarts: 0,
+    chdbPendingRequests: 0,
+    chdbLastError: "",
+    chdbBackendVersion: "1024",
     workerLagP95Ms: 2,
     deltaFanoutP95Ms: 4,
     publishLatencyP95Ms: 12,

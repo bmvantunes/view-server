@@ -1,5 +1,8 @@
 import { playwright } from "@vitest/browser-playwright";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
+
+const coreSource = fileURLToPath(new URL("../core/src", import.meta.url));
 
 export default {
   plugins: [react()],
@@ -34,6 +37,7 @@ export default {
   resolve: {
     tsconfigPaths: true,
     alias: {
+      "@view-server/core": coreSource,
       "vite-plus/test": "vitest",
     },
   },

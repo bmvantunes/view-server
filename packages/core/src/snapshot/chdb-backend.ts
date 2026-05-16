@@ -142,10 +142,36 @@ class ChdbGroupedSnapshotWorkerClient {
     return this.#worker.pid;
   }
 
+  get pendingRequests(): number {
+    return this.#pending.size;
+  }
+
   get health(): SnapshotBackendHealth {
+    if (this.#closed) {
+      return {
+        status: "stopped",
+        pid: this.#worker.pid ?? 0,
+        restarts: 0,
+        pendingRequests: this.#pending.size,
+        lastError: this.#exitMessage ?? "",
+      };
+    }
     return this.#exitMessage === undefined
-      ? { status: "ready" }
-      : { status: "degraded", message: this.#exitMessage };
+      ? {
+          status: "ready",
+          pid: this.#worker.pid ?? 0,
+          restarts: 0,
+          pendingRequests: this.#pending.size,
+          lastError: "",
+        }
+      : {
+          status: "degraded",
+          message: this.#exitMessage,
+          pid: this.#worker.pid ?? 0,
+          restarts: 0,
+          pendingRequests: this.#pending.size,
+          lastError: this.#exitMessage,
+        };
   }
 
   get exitedUnexpectedly(): boolean {
@@ -399,6 +425,10 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
   #mirrorRows = new Map<string | number, RuntimeRow>();
   #mirrorPendingByVersion = new Map<WorkerVersion, MutationLogEntry>();
   #mirrorVersion: WorkerVersion = 0n;
+  #knownBackendVersion: WorkerVersion = 0n;
+  #restartCount = 0;
+  #restarting = false;
+  #lastError = "";
   #closed = false;
 
   constructor(options: ChdbSnapshotBackendOptions = {}) {
@@ -411,7 +441,18 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
   }
 
   get health(): Effect.Effect<SnapshotBackendHealth> {
-    return Effect.sync(() => this.#worker.health);
+    return Effect.sync(() => {
+      const workerHealth = this.#worker.health;
+      return {
+        status: this.#restarting ? "restarting" : workerHealth.status,
+        message: workerHealth.message,
+        pid: workerHealth.pid ?? 0,
+        restarts: this.#restartCount,
+        pendingRequests: workerHealth.pendingRequests ?? this.#worker.pendingRequests,
+        lastError: workerHealth.lastError ?? workerHealth.message ?? this.#lastError,
+        backendVersion: this.#knownBackendVersion,
+      };
+    });
   }
 
   init(args: Parameters<SnapshotBackend["init"]>[0]): Effect.Effect<void, ViewServerError> {
@@ -424,6 +465,8 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
       backend.#mirrorRows = new Map();
       backend.#mirrorPendingByVersion = new Map();
       backend.#mirrorVersion = args.version;
+      backend.#knownBackendVersion = args.version;
+      backend.#lastError = "";
       for (const entry of args.rows) {
         const id = entry.row[args.idField];
         if (typeof id === "string" || typeof id === "number") {
@@ -440,7 +483,13 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
     return Effect.fnUntraced(function* (backend: WorkerChdbSnapshotBackend) {
       backend.#applyBatchToMirror(args);
       const worker = yield* backend.#ensureWorker();
-      yield* worker.applyBatch(args);
+      yield* worker.applyBatch(args).pipe(
+        Effect.tapError((error) =>
+          Effect.sync(() => {
+            backend.#lastError = error.message;
+          }),
+        ),
+      );
     })(this);
   }
 
@@ -452,7 +501,15 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
       backend: WorkerChdbSnapshotBackend,
     ) {
       const worker = yield* backend.#ensureWorker();
-      return yield* worker.snapshot(args);
+      const result = yield* worker.snapshot(args).pipe(
+        Effect.tapError((error) =>
+          Effect.sync(() => {
+            backend.#lastError = error.message;
+          }),
+        ),
+      );
+      backend.#knownBackendVersion = result.backendVersion;
+      return result;
     })(this);
   }
 
@@ -464,7 +521,15 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
       backend: WorkerChdbSnapshotBackend,
     ) {
       const worker = yield* backend.#ensureWorker();
-      return yield* worker.snapshot(args);
+      const result = yield* worker.snapshot(args).pipe(
+        Effect.tapError((error) =>
+          Effect.sync(() => {
+            backend.#lastError = error.message;
+          }),
+        ),
+      );
+      backend.#knownBackendVersion = result.backendVersion;
+      return result;
     })(this);
   }
 
@@ -488,31 +553,51 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
       this.#options.restartWorkerOnUnexpectedExit !== true
     ) {
       return this.#worker.exitedUnexpectedly && !this.#closed
-        ? Effect.fail(
-            snapshotBackendFailed(this.#topic, this.#worker.health.message ?? "chDB worker exited"),
+        ? Effect.sync(() => {
+            this.#lastError = this.#worker.health.message ?? "chDB worker exited";
+          }).pipe(
+            Effect.flatMap(() => Effect.fail(snapshotBackendFailed(this.#topic, this.#lastError))),
           )
         : Effect.succeed(this.#worker);
     }
     return Effect.fn("view-server.chdb.worker_backend.restart")(function* (
       backend: WorkerChdbSnapshotBackend,
     ) {
+      backend.#lastError = backend.#worker.health.message ?? "chDB worker exited";
+      backend.#restarting = true;
       yield* Effect.logWarning(`view-server chDB worker restarting topic=${backend.#topic}`);
       const nextWorker = backend.#makeWorker();
       backend.#worker = nextWorker;
-      yield* nextWorker.init({
-        topic: backend.#topic,
-        idField: backend.#idField,
-        rows: Array.from(backend.#mirrorRows.values(), (row) => ({
-          row,
+      backend.#restartCount++;
+      yield* nextWorker
+        .init({
+          topic: backend.#topic,
+          idField: backend.#idField,
+          rows: Array.from(backend.#mirrorRows.values(), (row) => ({
+            row,
+            version: backend.#mirrorVersion,
+          })),
           version: backend.#mirrorVersion,
-        })),
-        version: backend.#mirrorVersion,
-        ...(backend.#literalStringFields === undefined
-          ? {}
-          : { literalStringFields: backend.#literalStringFields }),
-      });
+          ...(backend.#literalStringFields === undefined
+            ? {}
+            : { literalStringFields: backend.#literalStringFields }),
+        })
+        .pipe(
+          Effect.tapError((error) =>
+            Effect.sync(() => {
+              backend.#lastError = error.message;
+            }),
+          ),
+        );
+      backend.#knownBackendVersion = backend.#mirrorVersion;
       return nextWorker;
-    })(this);
+    })(this).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          this.#restarting = false;
+        }),
+      ),
+    );
   }
 
   #applyBatchToMirror(args: Parameters<SnapshotBackend["applyBatch"]>[0]): void {
@@ -579,7 +664,22 @@ class ChdbSnapshotBackend implements SnapshotBackend {
   }
 
   get health(): Effect.Effect<SnapshotBackendHealth> {
-    return Effect.sync(() => this.#groupedRefreshWorker?.health ?? { status: "ready" });
+    return Effect.sync(() => {
+      const workerHealth = this.#groupedRefreshWorker?.health;
+      const lastError =
+        workerHealth?.lastError ??
+        workerHealth?.message ??
+        (this.#lastFlushError === undefined ? "" : errorMessage(this.#lastFlushError));
+      return {
+        status: this.#closed ? "stopped" : (workerHealth?.status ?? "ready"),
+        message: workerHealth?.message,
+        pid: workerHealth?.pid ?? 0,
+        restarts: workerHealth?.restarts ?? 0,
+        pendingRequests: workerHealth?.pendingRequests ?? 0,
+        lastError,
+        backendVersion: this.#backendVersion,
+      };
+    });
   }
 
   init(args: {
@@ -941,6 +1041,10 @@ function isChdbQueryWorkerResponse(value: unknown): value is ChdbQueryWorkerResp
 
 function isReadonlyRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 type ChdbEvent = {
