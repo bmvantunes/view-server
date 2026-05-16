@@ -4,6 +4,8 @@ import {
   inMemoryViewServer,
   isolatedInMemoryViewServer,
   makeTestingBrowserWebsocketClient,
+  readyUrlForRpcUrl,
+  realViewServerTestHarness,
 } from "@view-server/testing";
 
 describe("testing public package API", () => {
@@ -12,5 +14,7 @@ describe("testing public package API", () => {
     expect(typeof isolatedInMemoryViewServer).toBe("function");
     expect(typeof makeTestingBrowserWebsocketClient).toBe("function");
     expect(typeof createTestingViewServerReact).toBe("function");
+    expect(typeof realViewServerTestHarness).toBe("function");
+    expect(typeof readyUrlForRpcUrl).toBe("function");
   });
 });

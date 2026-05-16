@@ -125,6 +125,8 @@ describe("release package audit", () => {
         "packages/react/src/index.ts",
         "packages/react/src/metrics-ui.tsx",
         "packages/testing/src/index.ts",
+        "packages/testing/src/real-server-harness.ts",
+        "packages/testing/src/testing-isolation.ts",
       ]);
       expect(reactSources).not.toMatch(/node:worker_threads|node:fs|node:net/);
       expect(reactSources).not.toMatch(/from ["']chdb["']|@platformatic\/kafka/);

@@ -334,10 +334,12 @@ The React package imports public core subpaths only. It must not import Node-onl
 
 Runtime exports:
 
+- `createTestingViewServerReact`
 - `inMemoryViewServer`
 - `isolatedInMemoryViewServer`
 - `makeTestingBrowserWebsocketClient`
-- `createTestingViewServerReact`
+- `readyUrlForRpcUrl`
+- `realViewServerTestHarness`
 
 Type exports:
 
@@ -345,7 +347,13 @@ Type exports:
 - `InMemoryViewServerOptions`
 - `IsolatedInMemoryViewServer`
 - `IsolatedInMemoryViewServerOptions`
+- `MissingIsolationTopics`
+- `RealViewServerTestHarness`
+- `RealViewServerTestHarnessOptions`
+- `RequireIsolationId`
 - `TestingViewServerClient`
+- `TopicPatchWithoutIsolation`
+- `TopicRowWithoutIsolation`
 
 The testing package is intentionally separate from `@view-server/core`; test helpers must not leak through the core root export.
 
