@@ -7,7 +7,7 @@ import {
   decodeRuntimeQuery,
   decodeVersionedRow,
   encodeSnapshotBackendResult,
-} from "./chdb-query-worker-codec.ts";
+} from "./row-wire-codec.ts";
 import type {
   ChdbQueryWorkerInitStartRequest,
   ChdbQueryWorkerRequest,

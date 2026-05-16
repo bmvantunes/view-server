@@ -580,6 +580,8 @@ Tests / acceptance:
 
 Priority: P1
 
+Status: Done in `packages/core/src/snapshot/row-wire-codec.ts`.
+
 Problem:
 
 Rows cross process boundaries and BigDecimal must survive structured clone / wire encoding.

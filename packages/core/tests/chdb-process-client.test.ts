@@ -5,7 +5,7 @@ import {
   decodeSnapshotBackendResult,
   encodeRuntimeQuery,
   encodeVersionedRow,
-} from "../src/snapshot/chdb-query-worker-codec.ts";
+} from "../src/snapshot/row-wire-codec.ts";
 import type {
   ChdbQueryWorkerResponse,
   ChdbWireSnapshotBackendResult,

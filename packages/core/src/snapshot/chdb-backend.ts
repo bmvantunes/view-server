@@ -18,7 +18,7 @@ import {
   encodeMutationLogEntry,
   encodeRuntimeQuery,
   encodeVersionedRow,
-} from "./chdb-query-worker-codec.ts";
+} from "./row-wire-codec.ts";
 import { compileQuerySql } from "./chdb-sql-compiler.ts";
 import { ChdbSqlMirror } from "./chdb-sql-mirror.ts";
 
