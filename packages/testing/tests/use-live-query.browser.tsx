@@ -21,6 +21,8 @@ import { fromWireRow, wireQueryResponse } from "@view-server/core/rpc";
 import {
   inMemoryViewServer,
   isolatedInMemoryViewServer,
+  readyUrlForRpcUrl,
+  realViewServerTestHarness,
   type InMemoryViewServer,
   type IsolatedInMemoryViewServer,
 } from "../src/index.ts";
@@ -422,6 +424,45 @@ describe("useLiveQuery browser mode", () => {
         expect(b.totalRows).toBe(1);
         expect(() => validateTestingIsolationId(" ")).toThrow(/isolationId is required/);
       }),
+    );
+  });
+
+  test("real server harness uses scoped isolation helpers without owning browser internals", async () => {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const rows: RuntimeRow[] = [];
+          let starts = 0;
+          let stops = 0;
+          const harness = yield* realViewServerTestHarness(isolatedConfig, {
+            rpcUrl: "ws://127.0.0.1:3100/rpc",
+            isolationId: "harness-a",
+            transport: fakeIsolatedTransport(rows),
+            start: Effect.sync(() => {
+              starts += 1;
+            }),
+            stop: Effect.sync(() => {
+              stops += 1;
+            }),
+          });
+
+          yield* Effect.promise(() =>
+            harness.publish("orders", { id: "o-1", symbol: "AAPL", price: 100 }),
+          );
+          const result = yield* Effect.promise(() => harness.query("orders", isolatedQuery));
+          yield* Effect.promise(() => harness.close());
+          yield* Effect.promise(() => harness.close());
+
+          expect(starts).toBe(1);
+          expect(stops).toBe(1);
+          expect(harness.isolationId).toBe("harness-a");
+          expect(result.rows).toEqual([{ id: "o-1", price: 100 }]);
+          expect(rows).toEqual([
+            { id: "o-1", symbol: "AAPL", price: 100, isolationId: "harness-a" },
+          ]);
+          expect(readyUrlForRpcUrl("wss://example.test/rpc")).toBe("https://example.test/ready");
+        }),
+      ),
     );
   });
 });

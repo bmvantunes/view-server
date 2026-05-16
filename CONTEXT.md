@@ -46,6 +46,7 @@ This document is the compact domain map for future agents. `plan.md` is the hist
 - `packages/react/src/metrics-view-model.ts`: browser-safe health-topic view model and formatting for the metrics dashboard.
 - `packages/testing`: test helpers only. Production correctness should be proven through real server tests where possible.
 - `packages/testing/src/testing-isolation.ts`: testing-only isolationId validation, query scoping, publish/patch injection, and isolated client construction.
+- `packages/testing/src/real-server-harness.ts`: browser-safe app-test harness for an existing or harness-owned real websocket View Server with isolationId.
 
 ## Load-Bearing Invariants
 

@@ -59,6 +59,13 @@ import {
   type TopicRowWithoutIsolation,
 } from "./testing-isolation.ts";
 
+export {
+  readyUrlForRpcUrl,
+  realViewServerTestHarness,
+  type RealViewServerTestHarness,
+  type RealViewServerTestHarnessOptions,
+} from "./real-server-harness.ts";
+
 export type {
   MissingIsolationTopics,
   RequireIsolationId,
