@@ -18,8 +18,17 @@ The script runs `packages/core/tests/worker-soak.test.ts` with:
 - `VS_WORKER_SOAK_MUTATIONS=10000`
 - `node --expose-gc`
 - a JSON summary under `/private/tmp/view-server-worker-soak-10m-<timestamp>.json`
+- a heartbeat JSONL progress artifact next to the summary
 
 It is intentionally not wired into GitHub Actions. The result is hardware-sensitive and can take a long time.
+
+The soak logs and writes phase progress during long runs. The progress artifact defaults to:
+
+```text
+${VS_WORKER_SOAK_SUMMARY_PATH}.progress.jsonl
+```
+
+Each line includes the current phase, elapsed time, shape, and phase-specific counters. A healthy long run should emit progress for row generation, worker seed, subscriptions, mutation progress, settle, and cleanup at least every `VS_WORKER_SOAK_PROGRESS_INTERVAL_MS` milliseconds.
 
 Grouped subscriptions default to `0` here on purpose. This worker soak uses the direct in-process worker and memory fallback path. That is useful for raw active-view lag/cleanup checks, but it is not the production grouped-query architecture. Production grouped refresh is chDB-backed and worker-isolated.
 
@@ -61,6 +70,9 @@ Relevant env vars:
 - `VS_WORKER_SOAK_TIMEOUT_MS`
 - `VS_WORKER_SOAK_MAX_OLD_SPACE_MB`
 - `VS_WORKER_SOAK_SUMMARY_PATH`
+- `VS_WORKER_SOAK_PROGRESS_PATH`
+- `VS_WORKER_SOAK_PROGRESS_INTERVAL_MS`
+- `VS_WORKER_SOAK_ROW_GENERATION_CHUNK_SIZE`
 - `VS_WORKER_SOAK_HEAP_GROWTH_THRESHOLD`
 
 ## What To Record

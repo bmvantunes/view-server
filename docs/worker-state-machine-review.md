@@ -55,7 +55,7 @@ For a manual/nightly 10M raw capacity profile:
 pnpm run soak:10m
 ```
 
-Save the generated JSON summary artifact. Do not add this profile to PR CI. The script defaults grouped subscriptions to `0`; grouped 10M capacity should be validated through the chDB grouped refresh overlap benchmark, not this memory-fallback worker soak.
+Save the generated JSON summary and heartbeat progress artifacts. Do not add this profile to PR CI. The script defaults grouped subscriptions to `0`; grouped 10M capacity should be validated through the chDB grouped refresh overlap benchmark, not this memory-fallback worker soak.
 
 The soak asserts:
 

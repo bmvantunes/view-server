@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { defineConfig } from "../src/config/index.ts";
 import type { ViewServerError } from "../src/errors.ts";
@@ -77,11 +77,23 @@ describe("topic worker soak", () => {
       Effect.gen(function* () {
         const shape = soakShape();
         const startedAt = performance.now();
-        const initialRows = Array.from({ length: shape.rows }, (_, index) => orderRow(index));
+        const progress = soakProgress(startedAt, shape);
+        yield* resetSoakProgress(progress);
+        yield* reportSoakProgress(progress, "start", {}, { force: true });
+
+        const initialRows = yield* generateInitialRows(shape, progress);
         const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
           initialRows,
           groupedRefreshDebounceMs: shape.groupedRefreshDebounceMs,
         });
+        yield* reportSoakProgress(
+          progress,
+          "worker_seeded",
+          {
+            rows: initialRows.length,
+          },
+          { force: true },
+        );
         collectGarbage();
         const baselineHeap = process.memoryUsage().heapUsed;
         const baselineRss = process.memoryUsage().rss;
@@ -100,6 +112,14 @@ describe("topic worker soak", () => {
           );
           subscriptionFibers.push(fiber);
         }
+        yield* reportSoakProgress(
+          progress,
+          "raw_subscriptions_started",
+          {
+            rawSubscriptions: shape.rawSubscriptions,
+          },
+          { force: true },
+        );
 
         for (let index = 0; index < shape.groupedSubscriptions; index++) {
           const fiber = yield* worker.subscribe(`soak-grouped-${index}`, groupedQuery).pipe(
@@ -109,10 +129,28 @@ describe("topic worker soak", () => {
           );
           subscriptionFibers.push(fiber);
         }
+        yield* reportSoakProgress(
+          progress,
+          "grouped_subscriptions_started",
+          {
+            groupedSubscriptions: shape.groupedSubscriptions,
+          },
+          { force: true },
+        );
 
         yield* waitForMetrics(
           worker.metrics,
           (metrics) => metrics.subscribers === shape.rawSubscriptions + shape.groupedSubscriptions,
+          progress,
+          "subscriptions_ready",
+        );
+        yield* reportSoakProgress(
+          progress,
+          "subscriptions_ready",
+          {
+            subscribers: shape.rawSubscriptions + shape.groupedSubscriptions,
+          },
+          { force: true },
         );
         const subscribedHeap = process.memoryUsage().heapUsed;
         const liveIds = initialRows.map((row) => row.id);
@@ -146,9 +184,21 @@ describe("topic worker soak", () => {
             }
           }
           if ((index + 1) % 100 === 0) {
+            yield* reportSoakProgress(progress, "mutating", {
+              mutation: index + 1,
+              mutations: shape.mutations,
+            });
             yield* Effect.yieldNow;
           }
         }
+        yield* reportSoakProgress(
+          progress,
+          "mutations_complete",
+          {
+            mutations: shape.mutations,
+          },
+          { force: true },
+        );
 
         const settled = yield* waitForMetrics(
           worker.metrics,
@@ -159,13 +209,19 @@ describe("topic worker soak", () => {
             metrics.activePlanBuildQueueDepth === 0 &&
             metrics.activePlanBuildingCount === 0 &&
             metrics.activePlanPendingCount === 0,
+          progress,
+          "settling",
         );
+        yield* reportSoakProgress(progress, "settled", metricsProgressFields(settled), {
+          force: true,
+        });
         expect(settled.subscribers).toBe(shape.rawSubscriptions + shape.groupedSubscriptions);
         expect(settled.queueDepth).toBe(0);
         const settledAt = performance.now();
         const loadedHeap = process.memoryUsage().heapUsed;
         const loadedRss = process.memoryUsage().rss;
 
+        yield* reportSoakProgress(progress, "cleanup_started", {}, { force: true });
         for (let index = 0; index < shape.rawSubscriptions; index++) {
           yield* worker.unsubscribe(`soak-raw-${index}`);
         }
@@ -189,7 +245,12 @@ describe("topic worker soak", () => {
             metrics.activePlanRows === 0 &&
             metrics.activePlanIndexEstimatedBytes === 0 &&
             metrics.activePlanPendingCount === 0,
+          progress,
+          "cleanup_waiting",
         );
+        yield* reportSoakProgress(progress, "cleanup_complete", metricsProgressFields(released), {
+          force: true,
+        });
         expect(released.activePlanFallbackCount).toBe(0);
 
         const releasedHeap = process.memoryUsage().heapUsed;
@@ -270,6 +331,16 @@ type SoakEventCounts = {
   status: number;
 };
 
+type SoakProgress = {
+  readonly startedAt: number;
+  lastReportAt: number;
+  readonly intervalMs: number;
+  readonly path?: string | undefined;
+  readonly shape: SoakShape;
+};
+
+type SoakProgressFields = Readonly<Record<string, string | number | boolean | null>>;
+
 type SoakSummary = {
   readonly shape: SoakShape;
   readonly durationMs: number;
@@ -334,6 +405,92 @@ function recordEvent(
   counts.status += 1;
 }
 
+function soakProgress(startedAt: number, shape: SoakShape): SoakProgress {
+  return {
+    startedAt,
+    lastReportAt: startedAt,
+    intervalMs: envNumber("VS_WORKER_SOAK_PROGRESS_INTERVAL_MS", 60_000),
+    path: soakProgressPath(),
+    shape,
+  };
+}
+
+function soakProgressPath(): string | undefined {
+  const explicit = process.env.VS_WORKER_SOAK_PROGRESS_PATH;
+  if (explicit !== undefined && explicit.length > 0) {
+    return explicit;
+  }
+  const summaryPath = process.env.VS_WORKER_SOAK_SUMMARY_PATH;
+  return summaryPath === undefined || summaryPath.length === 0
+    ? undefined
+    : `${summaryPath}.progress.jsonl`;
+}
+
+function resetSoakProgress(progress: SoakProgress): Effect.Effect<void> {
+  if (progress.path === undefined) {
+    return Effect.void;
+  }
+  const path = progress.path;
+  return Effect.promise(async () => {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, "");
+  });
+}
+
+function reportSoakProgress(
+  progress: SoakProgress,
+  phase: string,
+  fields: SoakProgressFields = {},
+  options: { readonly force?: boolean | undefined } = {},
+): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    const now = performance.now();
+    if (options.force !== true && now - progress.lastReportAt < progress.intervalMs) {
+      return;
+    }
+    progress.lastReportAt = now;
+    const entry = {
+      phase,
+      elapsedMs: Math.round(now - progress.startedAt),
+      rows: progress.shape.rows,
+      rawSubscriptions: progress.shape.rawSubscriptions,
+      groupedSubscriptions: progress.shape.groupedSubscriptions,
+      mutations: progress.shape.mutations,
+      ...fields,
+    };
+    yield* Effect.logInfo(
+      [
+        `worker_soak_phase=${phase}`,
+        `elapsedMs=${entry.elapsedMs}`,
+        ...Object.entries(fields).map(([key, value]) => `${key}=${String(value)}`),
+      ].join(" "),
+    );
+    if (progress.path !== undefined) {
+      const path = progress.path;
+      yield* Effect.promise(async () => {
+        await mkdir(dirname(path), { recursive: true });
+        await appendFile(path, `${JSON.stringify(entry)}\n`);
+      });
+    }
+  });
+}
+
+function metricsProgressFields(metrics: TopicWorkerMetrics): SoakProgressFields {
+  return {
+    subscribers: metrics.subscribers,
+    rows: metrics.rows,
+    version: metrics.version.toString(),
+    queueDepth: metrics.queueDepth,
+    maxSubscriptionLagVersions: metrics.maxSubscriptionLagVersions,
+    totalSubscriptionLagVersions: metrics.totalSubscriptionLagVersions,
+    activePlanCount: metrics.activePlanCount,
+    activeViewCount: metrics.activeViewCount,
+    activePlanBuildQueueDepth: metrics.activePlanBuildQueueDepth,
+    activePlanBuildingCount: metrics.activePlanBuildingCount,
+    activePlanPendingCount: metrics.activePlanPendingCount,
+  };
+}
+
 function writeSoakSummary(summary: SoakSummary): Effect.Effect<void> {
   const summaryPath = process.env.VS_WORKER_SOAK_SUMMARY_PATH;
   if (summaryPath === undefined || summaryPath.length === 0) {
@@ -342,6 +499,35 @@ function writeSoakSummary(summary: SoakSummary): Effect.Effect<void> {
   return Effect.promise(async () => {
     await mkdir(dirname(summaryPath), { recursive: true });
     await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+  });
+}
+
+function generateInitialRows(
+  shape: SoakShape,
+  progress: SoakProgress,
+): Effect.Effect<readonly OrderRow[]> {
+  return Effect.gen(function* () {
+    const rows: OrderRow[] = [];
+    const chunkSize = envNumber("VS_WORKER_SOAK_ROW_GENERATION_CHUNK_SIZE", 100_000);
+    yield* reportSoakProgress(progress, "row_generation_started", {}, { force: true });
+    for (let index = 0; index < shape.rows; index++) {
+      rows.push(orderRow(index));
+      if ((index + 1) % chunkSize === 0) {
+        yield* reportSoakProgress(progress, "row_generation", {
+          rowsGenerated: index + 1,
+        });
+        yield* Effect.yieldNow;
+      }
+    }
+    yield* reportSoakProgress(
+      progress,
+      "row_generation_complete",
+      {
+        rowsGenerated: rows.length,
+      },
+      { force: true },
+    );
+    return rows;
   });
 }
 
@@ -385,6 +571,8 @@ function orderRow(index: number): OrderRow {
 function waitForMetrics<E>(
   metricsEffect: Effect.Effect<TopicWorkerMetrics, E>,
   predicate: (metrics: TopicWorkerMetrics) => boolean,
+  progress?: SoakProgress,
+  phase?: string,
 ): Effect.Effect<TopicWorkerMetrics, E> {
   return Effect.gen(function* () {
     for (let attempt = 0; attempt < 500; attempt++) {
@@ -392,9 +580,17 @@ function waitForMetrics<E>(
       if (predicate(metrics)) {
         return metrics;
       }
+      if (progress !== undefined && phase !== undefined) {
+        yield* reportSoakProgress(progress, phase, metricsProgressFields(metrics));
+      }
       yield* yieldToHost;
     }
     const metrics = yield* metricsEffect;
+    if (progress !== undefined && phase !== undefined) {
+      yield* reportSoakProgress(progress, `${phase}_timeout`, metricsProgressFields(metrics), {
+        force: true,
+      });
+    }
     return yield* Effect.die(
       new Error(
         `Timed out waiting for soak metrics: ${JSON.stringify({

@@ -178,7 +178,7 @@ Manual/nightly 10M raw capacity soak:
 pnpm run soak:10m
 ```
 
-Keep this out of normal CI. The script defaults grouped subscriptions to `0`; use the chDB grouped refresh overlap benchmark for 10M grouped capacity. Save and compare the JSON summary artifact before serious production rollout. See `docs/capacity-soak.md`.
+Keep this out of normal CI. The script defaults grouped subscriptions to `0`; use the chDB grouped refresh overlap benchmark for 10M grouped capacity. Save and compare the JSON summary plus heartbeat progress artifacts before serious production rollout. See `docs/capacity-soak.md`.
 
 ## Safe Rollout Checklist
 

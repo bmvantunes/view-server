@@ -124,7 +124,7 @@ For serious production rollout raw-view capacity, run the manual 10M profile:
 pnpm run soak:10m
 ```
 
-This is manual/nightly only and defaults grouped subscriptions to `0`. Save the summary artifact and inspect lag, cleanup, active-plan, heap/RSS, retry, backpressure, and reconnect fields. For grouped capacity, use the chDB grouped refresh benchmark. See `docs/capacity-soak.md`.
+This is manual/nightly only and defaults grouped subscriptions to `0`. Save the summary and progress artifacts, and inspect lag, cleanup, active-plan, heap/RSS, retry, backpressure, reconnect, and phase heartbeat fields. For grouped capacity, use the chDB grouped refresh benchmark. See `docs/capacity-soak.md`.
 
 ## Troubleshooting
 

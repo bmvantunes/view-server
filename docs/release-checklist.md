@@ -114,7 +114,7 @@ Manual/nightly 10M raw capacity soak:
 pnpm run soak:10m
 ```
 
-This is not a CI gate. The script defaults grouped subscriptions to `0` because the direct worker soak uses memory fallback, not production chDB grouped refresh. Save the JSON summary artifact and review subscribers, queue depth, subscription lag, active plans, heap/RSS, event counts, retries, backpressure, and reconnects. See `docs/capacity-soak.md`.
+This is not a CI gate. The script defaults grouped subscriptions to `0` because the direct worker soak uses memory fallback, not production chDB grouped refresh. Save the JSON summary and heartbeat progress artifacts. Review subscribers, queue depth, subscription lag, active plans, heap/RSS, event counts, retries, backpressure, reconnects, and phase progress. See `docs/capacity-soak.md`.
 
 For 10M grouped capacity, run the chDB grouped refresh overlap benchmark from `docs/capacity-soak.md`.
 
