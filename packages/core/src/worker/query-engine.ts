@@ -12,6 +12,7 @@ import {
   type RuntimeRawQuery,
   type RuntimeQuery,
   type RuntimeRow,
+  type RuntimeRowKey,
   type RuntimeRowKeyFn,
 } from "../protocol/index.ts";
 
@@ -177,25 +178,49 @@ export function diffVisibleRows(
   nextRows: readonly RuntimeRow[],
   rowKey: RuntimeRowKeyFn,
 ): readonly DeltaOperation<RuntimeRow>[] {
-  const previousKeys = new Set(previousRows.map(rowKey));
-  const nextKeys = new Set(nextRows.map(rowKey));
+  const previousRowKeys: RuntimeRowKey[] = [];
+  const previousKeyToIndex = new Map<RuntimeRowKey, number>();
+  for (let index = 0; index < previousRows.length; index++) {
+    const row = previousRows[index];
+    if (row !== undefined) {
+      const key = rowKey(row);
+      previousRowKeys[index] = key;
+      if (!previousKeyToIndex.has(key)) {
+        previousKeyToIndex.set(key, index);
+      }
+    }
+  }
+  const nextRowKeys: RuntimeRowKey[] = [];
+  const nextKeys = new Set<RuntimeRowKey>();
+  for (let index = 0; index < nextRows.length; index++) {
+    const row = nextRows[index];
+    if (row !== undefined) {
+      const key = rowKey(row);
+      nextRowKeys[index] = key;
+      nextKeys.add(key);
+    }
+  }
   const operations: DeltaOperation<RuntimeRow>[] = [];
 
-  for (const row of previousRows) {
-    const key = rowKey(row);
-    if (!nextKeys.has(key)) {
+  for (let index = 0; index < previousRows.length; index++) {
+    const key = previousRowKeys[index];
+    if (key !== undefined && !nextKeys.has(key)) {
       operations.push({ type: "remove", key });
     }
   }
 
-  nextRows.forEach((row, index) => {
-    const key = rowKey(row);
-    const previousIndex = previousRows.findIndex((previous) => rowKey(previous) === key);
+  for (let index = 0; index < nextRows.length; index++) {
+    const row = nextRows[index];
+    const key = nextRowKeys[index];
+    if (row === undefined || key === undefined) {
+      continue;
+    }
+    const previousIndex = previousKeyToIndex.get(key) ?? -1;
     const previous = previousIndex >= 0 ? previousRows[previousIndex] : undefined;
-    if (!previousKeys.has(key) || previousIndex !== index || !rowsEqual(previous, row)) {
+    if (!previousKeyToIndex.has(key) || previousIndex !== index || !rowsEqual(previous, row)) {
       operations.push({ type: "upsert", key, row, index });
     }
-  });
+  }
 
   return operations;
 }

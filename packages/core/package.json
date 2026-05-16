@@ -65,6 +65,7 @@
   "scripts": {
     "bench:ci-smoke": "node --experimental-strip-types bench/ci-smoke.ts",
     "bench:compare": "node --experimental-strip-types bench/ci-smoke.ts",
+    "bench:query-engine": "node --experimental-strip-types bench/query-engine.bench.ts",
     "bench:refresh-baselines": "node --experimental-strip-types bench/ci-smoke.ts --refresh-baselines",
     "build": "vp pack",
     "dev": "vp pack --watch",
