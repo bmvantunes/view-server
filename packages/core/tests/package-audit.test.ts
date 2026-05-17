@@ -142,6 +142,23 @@ describe("release package audit", () => {
     }),
   );
 
+  it.effect("keeps chDB process supervision in the supervision module", () =>
+    Effect.gen(function* () {
+      const publicChdbEntry = yield* readSources(["packages/core/src/snapshot/chdb-backend.ts"]);
+      const supervisorEntry = yield* readSources([
+        "packages/core/src/snapshot/chdb-worker-supervisor.ts",
+      ]);
+
+      expect(publicChdbEntry).not.toContain("ChdbProcessClient");
+      expect(publicChdbEntry).not.toContain("encodeRuntimeQuery");
+      expect(publicChdbEntry).not.toContain("restartWorkerOnUnexpectedExit !== true");
+      expect(supervisorEntry).toContain("ChdbProcessClient");
+      expect(supervisorEntry).toContain("restartWorkerOnUnexpectedExit !== true");
+      expect(supervisorEntry).toContain("pendingRequests");
+      expect(supervisorEntry).toContain("SnapshotBackendHealth");
+    }),
+  );
+
   it.effect("requires chDB for production while keeping unrelated integrations optional", () =>
     Effect.gen(function* () {
       const corePackage = yield* readPackageJson("packages/core/package.json");
