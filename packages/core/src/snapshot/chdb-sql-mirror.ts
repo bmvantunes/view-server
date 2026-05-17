@@ -50,22 +50,15 @@ export class ChdbSqlMirror {
       return;
     }
     this.#createTable();
-    this.#insertEvents(
-      args.rows.map((row) => ({
-        row,
-        deleted: false,
-        version: args.version,
-      })),
-    );
+    this.#insertRows(args.rows, args.version);
   }
 
   applyMutations(mutations: readonly MutationLogEntry[]): void {
-    const events = mutations.flatMap((mutation) => mutationToEvent(mutation, this.#idField));
-    if (events.length === 0) {
+    if (!hasMutationEvents(mutations)) {
       return;
     }
-    this.#ensureColumns(events.map((event) => event.row));
-    this.#insertEvents(events);
+    this.#ensureMutationColumns(mutations);
+    this.#insertMutationEvents(mutations);
   }
 
   drop(): void {
@@ -73,8 +66,8 @@ export class ChdbSqlMirror {
     this.#tableReady = false;
   }
 
-  #ensureColumns(rows: readonly RuntimeRow[]): void {
-    const nextColumns = mergeColumns(this.#columns, inferColumns(rows, this.#idField));
+  #ensureMutationColumns(mutations: readonly MutationLogEntry[]): void {
+    const nextColumns = mergeColumns(this.#columns, inferMutationColumns(mutations, this.#idField));
     const addedColumns = nextColumns.filter(
       (column) => !this.#columns.some((existing) => existing.name === column.name),
     );
@@ -114,19 +107,38 @@ export class ChdbSqlMirror {
     this.#tableReady = true;
   }
 
-  #insertEvents(events: readonly ChdbEvent[]): void {
-    if (events.length === 0) {
+  #insertRows(rows: readonly RuntimeRow[], version: WorkerVersion): void {
+    if (rows.length === 0) {
       return;
     }
-    const payload = events
-      .map((event) =>
-        JSON.stringify({
-          ...projectSerializableRow(event.row, this.#columns),
-          [DELETED_COLUMN]: event.deleted ? 1 : 0,
-          [VERSION_COLUMN]: event.version.toString(),
-        }),
-      )
-      .join("\n");
+    let payload = "";
+    for (const row of rows) {
+      payload = appendEventPayload(payload, row, false, version, this.#columns);
+    }
+    this.#insertPayload(payload);
+  }
+
+  #insertMutationEvents(mutations: readonly MutationLogEntry[]): void {
+    let payload = "";
+    for (const mutation of mutations) {
+      const event = mutationToEvent(mutation, this.#idField);
+      if (event === undefined) {
+        continue;
+      }
+      payload = appendEventPayload(
+        payload,
+        event.row,
+        event.deleted,
+        mutation.version,
+        this.#columns,
+      );
+    }
+    if (payload.length > 0) {
+      this.#insertPayload(payload);
+    }
+  }
+
+  #insertPayload(payload: string): void {
     this.#session.query(
       `INSERT INTO ${quoteIdentifier(this.#tableName)} FORMAT JSONEachRow ${payload}`,
     );
@@ -136,32 +148,29 @@ export class ChdbSqlMirror {
 type ChdbEvent = {
   readonly row: RuntimeRow;
   readonly deleted: boolean;
-  readonly version: WorkerVersion;
 };
 
-function mutationToEvent(mutation: MutationLogEntry, idField: string): readonly ChdbEvent[] {
+function mutationToEvent(mutation: MutationLogEntry, idField: string): ChdbEvent | undefined {
   if (mutation.kind === "delete") {
-    return [
-      {
-        row: {
-          ...mutation.before,
-          [idField]: mutation.id,
-        },
-        deleted: true,
-        version: mutation.version,
+    return {
+      row: {
+        ...mutation.before,
+        [idField]: mutation.id,
       },
-    ];
+      deleted: true,
+    };
   }
   if (mutation.after === undefined) {
-    return [];
+    return undefined;
   }
-  return [
-    {
-      row: mutation.after,
-      deleted: false,
-      version: mutation.version,
-    },
-  ];
+  return {
+    row: mutation.after,
+    deleted: false,
+  };
+}
+
+function hasMutationEvents(mutations: readonly MutationLogEntry[]): boolean {
+  return mutations.some((mutation) => mutation.kind === "delete" || mutation.after !== undefined);
 }
 
 function mergeColumns(
@@ -184,51 +193,119 @@ function mergeColumns(
 }
 
 function inferColumns(rows: readonly RuntimeRow[], idField: string): readonly Column[] {
-  const valuesByName = new Map<string, unknown[]>();
-  const addValue = (name: string, value: unknown) => {
-    const values = valuesByName.get(name);
-    if (values === undefined) {
-      valuesByName.set(name, [value]);
-    } else {
-      values.push(value);
-    }
-  };
+  const statsByName = new Map<string, ColumnStats>();
   for (const row of rows) {
-    if (row[idField] !== undefined) {
-      addValue(idField, row[idField]);
-    }
-    for (const [key, value] of Object.entries(row)) {
-      if (isUserColumn(key) && isScalar(value)) {
-        addValue(key, value);
-      }
-    }
+    addRowColumnStats(statsByName, row, idField);
   }
-  return Array.from(valuesByName).map(([name, values]) => ({
-    name,
-    type: inferColumnType(values),
-    nullable: values.some((value) => value == null),
-  }));
+  return columnStatsToColumns(statsByName);
 }
 
 function isUserColumn(name: string): boolean {
   return name !== DELETED_COLUMN && name !== VERSION_COLUMN;
 }
 
-function inferColumnType(values: readonly unknown[]): ColumnType {
-  const nonNullValues = values.filter((value) => value != null);
-  if (nonNullValues.some((value) => typeof value === "string")) {
+function inferMutationColumns(
+  mutations: readonly MutationLogEntry[],
+  idField: string,
+): readonly Column[] {
+  const statsByName = new Map<string, ColumnStats>();
+  for (const mutation of mutations) {
+    const event = mutationToEvent(mutation, idField);
+    if (event !== undefined) {
+      addRowColumnStats(statsByName, event.row, idField);
+    }
+  }
+  return columnStatsToColumns(statsByName);
+}
+
+type ColumnStats = {
+  readonly type: ColumnType;
+  readonly nullable: boolean;
+};
+
+function addRowColumnStats(
+  statsByName: Map<string, ColumnStats>,
+  row: RuntimeRow,
+  idField: string,
+): void {
+  if (row[idField] !== undefined) {
+    addColumnValue(statsByName, idField, row[idField]);
+  }
+  for (const [key, value] of Object.entries(row)) {
+    if (isUserColumn(key) && isScalar(value)) {
+      addColumnValue(statsByName, key, value);
+    }
+  }
+}
+
+function addColumnValue(statsByName: Map<string, ColumnStats>, name: string, value: unknown): void {
+  const existing = statsByName.get(name) ?? { type: "Int64", nullable: false };
+  statsByName.set(name, {
+    type: widerColumnType(existing.type, value),
+    nullable: existing.nullable || value == null,
+  });
+}
+
+function widerColumnType(existing: ColumnType, value: unknown): ColumnType {
+  if (value == null) {
+    return existing;
+  }
+  const incoming = scalarColumnType(value);
+  return columnTypePriority(incoming) > columnTypePriority(existing) ? incoming : existing;
+}
+
+function scalarColumnType(value: unknown): ColumnType {
+  if (typeof value === "string") {
     return "String";
   }
-  if (nonNullValues.some(BigDecimal.isBigDecimal)) {
+  if (BigDecimal.isBigDecimal(value)) {
     return BIG_DECIMAL_COLUMN_TYPE;
   }
-  if (nonNullValues.some((value) => typeof value === "boolean")) {
+  if (typeof value === "boolean") {
     return "UInt8";
   }
-  if (nonNullValues.some((value) => typeof value === "number")) {
+  if (typeof value === "number") {
     return "Float64";
   }
   return "Int64";
+}
+
+function columnTypePriority(type: ColumnType): number {
+  switch (type) {
+    case "Int64":
+      return 0;
+    case "Float64":
+      return 1;
+    case "UInt8":
+      return 2;
+    case BIG_DECIMAL_COLUMN_TYPE:
+      return 3;
+    case "String":
+      return 4;
+  }
+}
+
+function columnStatsToColumns(statsByName: ReadonlyMap<string, ColumnStats>): readonly Column[] {
+  return Array.from(statsByName, ([name, stats]) => ({
+    name,
+    type: stats.type,
+    nullable: stats.nullable,
+  }));
+}
+
+function appendEventPayload(
+  payload: string,
+  row: RuntimeRow,
+  deleted: boolean,
+  version: WorkerVersion,
+  columns: readonly Column[],
+): string {
+  const line = JSON.stringify({
+    ...projectSerializableRow(row, columns),
+    [DELETED_COLUMN]: deleted ? 1 : 0,
+    [VERSION_COLUMN]: version.toString(),
+  });
+  return payload.length === 0 ? line : `${payload}\n${line}`;
 }
 
 function projectSerializableRow(row: RuntimeRow, columns: readonly Column[]): RuntimeRow {
