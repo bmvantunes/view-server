@@ -64,3 +64,4 @@ jobs:
           name: benchmark-artifacts
           path: packages/core/bench/.artifacts/**/*.json
           if-no-files-found: warn
+          include-hidden-files: true
