@@ -97,6 +97,9 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 41: ChdbWorkerProtocol module owns chDB child command names,
       request/response schemas, health/error responses, grouped refresh command
       separation, invalid-message rejection, and BigDecimal worker wire roundtrips.
+- [x] Task 42: RuntimeSourceGraph owns source-to-topic, topic-to-worker,
+      and topic-owned snapshot backend mapping plus Kafka topic verification
+      before placement, with two-topic chDB child isolation and invalid startup tests.
 - [x] Task 10: Aggregate Function Modules for count, sum, min, max, avg, count distinct,
       and string aggregates with focused BigDecimal/null/update tests.
 - [x] Task 9: GroupedAccumulator prototype for opt-in count/sum/min/max grouped subscriptions,

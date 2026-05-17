@@ -4,10 +4,8 @@ import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import {
   columnCatalogForTopic,
-  type KafkaSourceConfig,
   normalizeConfig,
   type NormalizedViewServerConfig,
-  type RowObject,
   type ViewServerConfig,
   VIEW_SERVER_HEALTH_TOPIC,
 } from "../config/index.ts";
@@ -18,9 +16,7 @@ import type {
   RuntimeRow,
   SubscriptionEvent,
 } from "../protocol/index.ts";
-import type { KafkaTopicConsumer, KafkaTopicVerifier } from "../kafka/index.ts";
 import { defaultAuthPolicy, type AuthPolicy } from "./auth-policy.ts";
-import { KafkaSourceSupervisor } from "./kafka-source-supervisor.ts";
 import { QueryLimitPolicy } from "./query-limit-policy.ts";
 import {
   healthRowsFromResponse,
@@ -29,7 +25,10 @@ import {
   type RuntimeHealthProjectionTopicInput,
 } from "./runtime-health-projection.ts";
 import { RuntimeShutdownController } from "./runtime-shutdown-controller.ts";
-import { createTopicPlacements, type TopicPlacementOptions } from "./topic-placement.ts";
+import {
+  createRuntimeSourceGraph,
+  type RuntimeSourceGraphOptions,
+} from "./runtime-source-graph.ts";
 
 export type { HealthResponse } from "./runtime-health-projection.ts";
 
@@ -56,11 +55,7 @@ export class ViewServerRuntime extends Context.Service<ViewServerRuntime, ViewSe
   "@view-server/core/ViewServerRuntime",
 ) {}
 
-export type ViewServerRuntimeOptions = TopicPlacementOptions & {
-  readonly kafkaConsumerFactory?:
-    | ((source: KafkaSourceConfig<RowObject, string>) => KafkaTopicConsumer)
-    | undefined;
-  readonly kafkaTopicVerifier?: KafkaTopicVerifier | undefined;
+export type ViewServerRuntimeOptions = RuntimeSourceGraphOptions & {
   readonly authPolicy?: AuthPolicy | undefined;
 };
 
@@ -73,13 +68,9 @@ export function makeViewServerRuntime(
       try: () => normalizeConfig(config),
       catch: (error) => invalidConfig("Invalid view-server config", "config", error),
     });
-    const sourceSupervisor = new KafkaSourceSupervisor(normalized, {
-      kafkaConsumerFactory: options.kafkaConsumerFactory,
-      kafkaTopicVerifier: options.kafkaTopicVerifier,
-    });
-    yield* sourceSupervisor.verifyTopics();
-    const placementSet = yield* createTopicPlacements(normalized, options);
-    const workers = placementSet.workers;
+    const sourceGraph = yield* createRuntimeSourceGraph(normalized, options);
+    const sourceSupervisor = sourceGraph.sourceSupervisor;
+    const workers = sourceGraph.workers;
     const columnCatalogs = new Map(
       Object.entries(normalized.topics).map(([topic, topicConfig]) => [
         topic,
