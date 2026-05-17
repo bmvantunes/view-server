@@ -4,6 +4,34 @@ The default test suite keeps soak shapes small enough for local and CI feedback.
 
 See `docs/capacity-matrix.md` for the explicit 100k, 1M, and 10M profile commands and latest recorded artifacts.
 
+## Runtime WebSocket Soak
+
+Use this when validating the operational surface that users actually touch: real websocket RPC
+clients, production runtime wiring, chDB mirrors, raw subscriptions, grouped subscriptions,
+mid-load disconnect/reconnect, mixed mutations, health, and cleanup.
+
+```bash
+pnpm --dir packages/core exec vitest run --config vitest.config.ts tests/runtime-websocket-soak.test.ts
+```
+
+The default profile is intentionally small enough for regular local runs. Scale it manually before a
+release candidate:
+
+```bash
+VS_RUNTIME_WEBSOCKET_SOAK_ROWS=10000 \
+VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS=80 \
+VS_RUNTIME_WEBSOCKET_SOAK_GROUPED_CLIENTS=20 \
+VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS=50 \
+VS_RUNTIME_WEBSOCKET_SOAK_MUTATIONS=1000 \
+VS_RUNTIME_WEBSOCKET_SOAK_SUMMARY_PATH=/private/tmp/view-server-runtime-websocket-soak.json \
+pnpm --dir packages/core exec vitest run --config vitest.config.ts tests/runtime-websocket-soak.test.ts
+```
+
+The summary artifact records subscription setup time, mutation latency, reconnect count, event
+counts, final health, chDB pending request count, queue depth, subscription lag, and active-plan
+cleanup state. Keep this out of normal PR CI at large sizes; the default test already exercises the
+transport lifecycle without turning every push into a capacity run.
+
 ## 10M Raw Worker Soak
 
 Run this before a serious production rollout, after the normal RC checklist is green:
