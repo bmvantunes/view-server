@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import type {
   EffectSourceContext,
   IdValue,
@@ -75,13 +76,20 @@ export function ingestKafkaBatch<TRow extends RowObject, TId extends keyof TRow 
             "view_server.kafka.offset": lastRecord.offset,
           }),
     });
-    const mutations = yield* Effect.forEach(args.batch.records, (record) =>
-      args.source
-        .decode(record)
-        .pipe(
-          Effect.flatMap((message) => kafkaSourceMutation(args.viewTopic, args.idField, message)),
-        ),
-    );
+    const mutations: SourceMutation<TRow, TId>[] = [];
+    for (const record of args.batch.records) {
+      const exit = yield* args.source.decode(record).pipe(
+        Effect.flatMap((message) => kafkaSourceMutation(args.viewTopic, args.idField, message)),
+        Effect.exit,
+      );
+      if (Exit.isFailure(exit)) {
+        if (mutations.length > 0) {
+          yield* args.runtime.mutateBatch(mutations);
+        }
+        return yield* Effect.failCause(exit.cause);
+      }
+      mutations.push(exit.value);
+    }
     yield* args.runtime.mutateBatch(mutations);
     if (metrics !== undefined && args.onBatchMetrics !== undefined) {
       yield* args.onBatchMetrics(metrics);
