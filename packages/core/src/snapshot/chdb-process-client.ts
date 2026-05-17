@@ -6,7 +6,8 @@ import type {
   ChdbQueryWorkerRequest,
   ChdbQueryWorkerResponse,
   ChdbQueryWorkerSuccessResponse,
-} from "./chdb-query-worker-protocol.ts";
+} from "./chdb-worker-protocol.ts";
+import { isChdbWorkerResponse } from "./chdb-worker-protocol.ts";
 import type { SnapshotBackendHealth } from "./snapshot-backend.ts";
 
 export type ChdbProcessClientOptions = {
@@ -220,7 +221,7 @@ export class ChdbProcessClient {
     });
     this.#options.onWorkerSpawn?.(worker.pid);
     worker.on("message", (response: unknown) => {
-      if (isChdbQueryWorkerResponse(response)) {
+      if (isChdbWorkerResponse(response)) {
         this.#handleResponse(response);
         return;
       }
@@ -312,21 +313,4 @@ function toWorkerUrl(value: string | URL): URL {
 
 function defaultExecArgv(workerEntryUrl: URL): string[] {
   return workerEntryUrl.pathname.endsWith(".ts") ? ["--experimental-strip-types"] : [];
-}
-
-function isChdbQueryWorkerResponse(value: unknown): value is ChdbQueryWorkerResponse {
-  if (!isReadonlyRecord(value)) {
-    return false;
-  }
-  if (typeof value.id !== "number" || typeof value.success !== "boolean") {
-    return false;
-  }
-  if (value.success) {
-    return value.result === undefined || isReadonlyRecord(value.result);
-  }
-  return typeof value.error === "string";
-}
-
-function isReadonlyRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null;
 }

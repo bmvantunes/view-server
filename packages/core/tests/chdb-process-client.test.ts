@@ -8,8 +8,9 @@ import {
 } from "../src/snapshot/row-wire-codec.ts";
 import type {
   ChdbQueryWorkerResponse,
+  ChdbWireHealth,
   ChdbWireSnapshotBackendResult,
-} from "../src/snapshot/chdb-query-worker-protocol.ts";
+} from "../src/snapshot/chdb-worker-protocol.ts";
 import { ChdbProcessClient } from "../src/snapshot/chdb-process-client.ts";
 import type { VersionedRow } from "../src/snapshot/index.ts";
 
@@ -47,6 +48,15 @@ describe("ChdbProcessClient", () => {
       });
       expect(client.health.pid).toBeGreaterThan(0);
 
+      const healthResponse = yield* client.request({
+        id: client.nextRequestId(),
+        type: "health",
+      });
+      expect(requireHealthResult(healthResponse)).toMatchObject({
+        status: "ready",
+        backendVersion: 1n,
+      });
+
       const response = yield* client.request({
         id: client.nextRequestId(),
         type: "snapshot",
@@ -63,6 +73,35 @@ describe("ChdbProcessClient", () => {
         rows: [
           { id: "o-1", symbol: "AAPL", price: 100 },
           { id: "o-2", symbol: "MSFT", price: 200 },
+        ],
+      });
+
+      const groupedResponse = yield* client.request({
+        id: client.nextRequestId(),
+        type: "groupedRefreshSnapshot",
+        args: {
+          query: encodeRuntimeQuery({
+            groupBy: ["symbol"],
+            aggregates: {
+              count: {
+                aggFunc: "count",
+                field: "id",
+              },
+            },
+            orderBy: [{ field: "symbol", direction: "asc" }],
+            limit: 10,
+          }),
+          targetVersion: 1n,
+        },
+      });
+      const groupedResult = decodeSnapshotBackendResult(requireSnapshotResult(groupedResponse));
+
+      expect(groupedResult).toEqual({
+        backendVersion: 1n,
+        totalRows: 2,
+        rows: [
+          { symbol: "AAPL", count: 1 },
+          { symbol: "MSFT", count: 1 },
         ],
       });
 
@@ -146,4 +185,13 @@ function requireSnapshotResult(
     throw new Error("Expected chDB worker snapshot result");
   }
   return response.result;
+}
+
+function requireHealthResult(
+  response: Extract<ChdbQueryWorkerResponse, { readonly success: true }>,
+): ChdbWireHealth {
+  if (response.health === undefined) {
+    throw new Error("Expected chDB worker health result");
+  }
+  return response.health;
 }

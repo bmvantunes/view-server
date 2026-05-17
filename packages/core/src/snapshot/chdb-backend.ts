@@ -13,7 +13,7 @@ import type {
   VersionedRow,
 } from "./snapshot-backend.ts";
 import { ChdbProcessClient } from "./chdb-process-client.ts";
-import type { ChdbQueryWorkerRequest } from "./chdb-query-worker-protocol.ts";
+import type { ChdbQueryWorkerRequest } from "./chdb-worker-protocol.ts";
 import {
   decodeSnapshotBackendResult,
   encodeMutationLogEntry,
@@ -147,6 +147,29 @@ class ChdbGroupedSnapshotWorkerClient {
         Effect.flatMap((response) =>
           response.result === undefined
             ? Effect.fail(snapshotBackendFailed(this.#topic, "chDB worker returned no snapshot"))
+            : Effect.succeed(decodeSnapshotBackendResult(response.result)),
+        ),
+      );
+  }
+
+  groupedRefreshSnapshot(
+    args: Parameters<SnapshotBackend["snapshot"]>[0],
+  ): Effect.Effect<SnapshotBackendResult, ViewServerError> {
+    return this.#process
+      .request({
+        id: this.#process.nextRequestId(),
+        type: "groupedRefreshSnapshot",
+        args: {
+          query: encodeRuntimeQuery(args.query),
+          targetVersion: args.targetVersion,
+        },
+      })
+      .pipe(
+        Effect.flatMap((response) =>
+          response.result === undefined
+            ? Effect.fail(
+                snapshotBackendFailed(this.#topic, "chDB worker returned no grouped snapshot"),
+              )
             : Effect.succeed(decodeSnapshotBackendResult(response.result)),
         ),
       );
@@ -290,7 +313,7 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
       backend: WorkerChdbSnapshotBackend,
     ) {
       const worker = yield* backend.#ensureWorker();
-      const result = yield* worker.snapshot(args).pipe(
+      const result = yield* worker.groupedRefreshSnapshot(args).pipe(
         Effect.tapError((error) =>
           Effect.sync(() => {
             backend.#lastError = error.message;
@@ -597,7 +620,7 @@ class ChdbSnapshotBackend implements SnapshotBackend {
           snapshotBackendFailed(backend.#topic, "chDB grouped refresh worker unavailable"),
         );
       }
-      return yield* groupedRefreshWorker.snapshot(args);
+      return yield* groupedRefreshWorker.groupedRefreshSnapshot(args);
     })(this);
   }
 

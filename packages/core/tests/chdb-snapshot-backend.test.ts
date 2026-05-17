@@ -990,7 +990,7 @@ describe("chDB snapshot backend", () => {
           groupedPid = pid;
         },
         onWorkerRequest: ({ pid, type }) => {
-          if (type === "snapshot" && !groupedKilled) {
+          if (type === "groupedRefreshSnapshot" && !groupedKilled) {
             groupedKilled = true;
             process.kill(expectPid(pid), "SIGKILL");
           }

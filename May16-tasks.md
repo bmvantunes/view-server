@@ -94,6 +94,9 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 40: WorkerProtocol module owns topic-worker RPC command names,
       payload/response schemas, metrics codecs, BigDecimal wire roundtrips,
       and node/in-process metrics protocol parity.
+- [x] Task 41: ChdbWorkerProtocol module owns chDB child command names,
+      request/response schemas, health/error responses, grouped refresh command
+      separation, invalid-message rejection, and BigDecimal worker wire roundtrips.
 - [x] Task 10: Aggregate Function Modules for count, sum, min, max, avg, count distinct,
       and string aggregates with focused BigDecimal/null/update tests.
 - [x] Task 9: GroupedAccumulator prototype for opt-in count/sum/min/max grouped subscriptions,

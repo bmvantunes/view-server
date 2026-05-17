@@ -17,7 +17,7 @@ import type {
   ChdbWireSnapshotBackendResult,
   ChdbWireValue,
   ChdbWireVersionedRow,
-} from "./chdb-query-worker-protocol.ts";
+} from "./chdb-worker-protocol.ts";
 
 export function encodeVersionedRow(row: VersionedRow): ChdbWireVersionedRow {
   return {

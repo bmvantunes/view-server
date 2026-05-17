@@ -12,7 +12,16 @@ import type {
   ChdbQueryWorkerInitStartRequest,
   ChdbQueryWorkerRequest,
   ChdbQueryWorkerResponse,
-} from "./chdb-query-worker-protocol.ts";
+  ChdbWireHealth,
+} from "./chdb-worker-protocol.ts";
+import {
+  chdbWorkerFailure,
+  chdbWorkerHealthSuccess,
+  chdbWorkerRequestId,
+  chdbWorkerSnapshotSuccess,
+  chdbWorkerSuccess,
+  decodeChdbWorkerRequest,
+} from "./chdb-worker-protocol.ts";
 import type { VersionedRow } from "./snapshot-backend.ts";
 
 const port = parentPort;
@@ -36,17 +45,27 @@ type PendingInit = ChdbQueryWorkerInitStartRequest["args"] & {
   readonly rows: VersionedRow[];
 };
 
-const onMessage = (request: ChdbQueryWorkerRequest): void => {
+const onMessage = (message: unknown): void => {
+  let request: ChdbQueryWorkerRequest;
+  try {
+    request = decodeChdbWorkerRequest(message);
+  } catch (error) {
+    sendResponse(
+      chdbWorkerFailure(
+        chdbWorkerRequestId(message),
+        error instanceof Error ? error.message : String(error),
+      ),
+    );
+    return;
+  }
   void Effect.runPromise(handleRequest(request)).then(
     (response) => {
       sendResponse(response);
     },
     (error: unknown) => {
-      sendResponse({
-        id: request.id,
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      } satisfies ChdbQueryWorkerResponse);
+      sendResponse(
+        chdbWorkerFailure(request.id, error instanceof Error ? error.message : String(error)),
+      );
     },
   );
 };
@@ -67,28 +86,28 @@ function handleRequest(
           ...request.args,
           rows: request.args.rows.map(decodeVersionedRow),
         })
-        .pipe(Effect.as(success(request.id)));
+        .pipe(Effect.as(chdbWorkerSuccess(request.id)));
     case "initStart":
       return Effect.sync(() => {
         pendingInit = {
           ...request.args,
           rows: [],
         };
-      }).pipe(Effect.as(success(request.id)));
+      }).pipe(Effect.as(chdbWorkerSuccess(request.id)));
     case "initRows":
       return Effect.sync(() => {
         pendingInit?.rows.push(...request.rows.map(decodeVersionedRow));
-      }).pipe(Effect.as(success(request.id)));
+      }).pipe(Effect.as(chdbWorkerSuccess(request.id)));
     case "initCommit":
       return pendingInit === undefined
-        ? Effect.succeed(failure(request.id, "chDB worker initCommit before initStart"))
+        ? Effect.succeed(chdbWorkerFailure(request.id, "chDB worker initCommit before initStart"))
         : backend.init(pendingInit).pipe(
             Effect.tap(() =>
               Effect.sync(() => {
                 pendingInit = undefined;
               }),
             ),
-            Effect.as(success(request.id)),
+            Effect.as(chdbWorkerSuccess(request.id)),
           );
     case "applyBatch":
       return backend
@@ -96,7 +115,7 @@ function handleRequest(
           mutations: request.args.mutations.map(decodeMutationLogEntry),
           highestVersion: request.args.highestVersion,
         })
-        .pipe(Effect.as(success(request.id)));
+        .pipe(Effect.as(chdbWorkerSuccess(request.id)));
     case "snapshot":
       return backend
         .snapshot({
@@ -104,35 +123,30 @@ function handleRequest(
           targetVersion: request.args.targetVersion,
         })
         .pipe(
-          Effect.map((result) => successSnapshot(request.id, encodeSnapshotBackendResult(result))),
+          Effect.map((result) =>
+            chdbWorkerSnapshotSuccess(request.id, encodeSnapshotBackendResult(result)),
+          ),
         );
+    case "groupedRefreshSnapshot":
+      return backend
+        .snapshot({
+          query: decodeRuntimeQuery(request.args.query),
+          targetVersion: request.args.targetVersion,
+        })
+        .pipe(
+          Effect.map((result) =>
+            chdbWorkerSnapshotSuccess(request.id, encodeSnapshotBackendResult(result)),
+          ),
+        );
+    case "health":
+      if (backend.health === undefined) {
+        const health = { status: "ready" } satisfies ChdbWireHealth;
+        return Effect.succeed(chdbWorkerHealthSuccess(request.id, health));
+      }
+      return backend.health.pipe(
+        Effect.map((health) => chdbWorkerHealthSuccess(request.id, health)),
+      );
     case "close":
-      return backend.close().pipe(Effect.as(success(request.id)));
+      return backend.close().pipe(Effect.as(chdbWorkerSuccess(request.id)));
   }
-}
-
-function failure(id: number, error: string): ChdbQueryWorkerResponse {
-  return {
-    id,
-    success: false,
-    error,
-  };
-}
-
-function success(id: number): ChdbQueryWorkerResponse {
-  return {
-    id,
-    success: true,
-  };
-}
-
-function successSnapshot(
-  id: number,
-  result: NonNullable<Extract<ChdbQueryWorkerResponse, { readonly success: true }>["result"]>,
-): ChdbQueryWorkerResponse {
-  return {
-    id,
-    success: true,
-    result,
-  };
 }
