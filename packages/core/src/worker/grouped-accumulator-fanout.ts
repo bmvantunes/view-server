@@ -12,7 +12,7 @@ import {
   matchesFilter,
   normalizeLimit,
   normalizeOffset,
-  stableSortRows,
+  selectWindowRows,
   type QueryExecutionOptions,
   type QueryExecutionResult,
 } from "./query-engine.ts";
@@ -82,14 +82,11 @@ export function groupedAccumulatorQueryResult(args: {
   readonly query: RuntimeGroupedQuery;
   readonly groupedAccumulator: GroupedAccumulator;
 }): QueryExecutionResult {
-  const sorted = stableSortRows(
-    args.groupedAccumulator.groupedRows(),
-    groupedQueryOrderBy(args.query),
-  );
+  const groupedRows = args.groupedAccumulator.groupedRows();
   const offset = normalizeOffset(args.query.offset);
   const limit = normalizeLimit(args.query.limit);
   return {
-    rows: sorted.slice(offset, offset + limit),
-    totalRows: sorted.length,
+    rows: selectWindowRows(groupedRows, groupedQueryOrderBy(args.query), offset, limit),
+    totalRows: groupedRows.length,
   };
 }

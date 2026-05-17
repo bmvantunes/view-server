@@ -169,13 +169,11 @@ export function executeGroupedQuery(
   const filter = compileFilter(query.where, options);
   const filtered = rows.filter(filter);
   const groups = buildGroups(filtered, query.groupBy, query.aggregates);
-  const sorted = stableSortRows(groups, groupedQueryOrderBy(query));
-  const totalRows = sorted.length;
   const offset = normalizeOffset(query.offset);
   const limit = normalizeLimit(query.limit);
   return {
-    rows: sorted.slice(offset, offset + limit),
-    totalRows,
+    rows: selectWindowRows(groups, groupedQueryOrderBy(query), offset, limit),
+    totalRows: groups.length,
   };
 }
 
@@ -210,15 +208,67 @@ export function executeGroupedQueryEffect(
       }
     }
 
-    const sorted = stableSortRows(result, groupedQueryOrderBy(query));
-    const totalRows = sorted.length;
     const offset = normalizeOffset(query.offset);
     const limit = normalizeLimit(query.limit);
     return {
-      rows: sorted.slice(offset, offset + limit),
-      totalRows,
+      rows: selectWindowRows(result, groupedQueryOrderBy(query), offset, limit),
+      totalRows: result.length,
     };
   });
+}
+
+export function selectWindowRows(
+  rows: readonly RuntimeRow[],
+  orderBy: OrderBy<RuntimeRow>,
+  offset: number,
+  limit: number,
+): readonly RuntimeRow[] {
+  const windowEnd = offset + limit;
+  if (windowEnd <= 0) {
+    return [];
+  }
+  if (windowEnd <= RAW_QUERY_WINDOW_SPLICE_LIMIT) {
+    return selectWindowRowsSplice(rows, orderBy, offset, limit);
+  }
+  if (windowEnd <= RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT) {
+    return selectWindowRowsHeap(rows, orderBy, offset, limit);
+  }
+  return stableSortRows(rows, orderBy).slice(offset, offset + limit);
+}
+
+function selectWindowRowsSplice(
+  rows: readonly RuntimeRow[],
+  orderBy: OrderBy<RuntimeRow>,
+  offset: number,
+  limit: number,
+): readonly RuntimeRow[] {
+  const windowEnd = offset + limit;
+  const topRows: SortEntry[] = [];
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    if (row !== undefined) {
+      insertTopSortEntry(topRows, { row, index }, orderBy, windowEnd);
+    }
+  }
+  return topRows.slice(offset, offset + limit).map((entry) => entry.row);
+}
+
+function selectWindowRowsHeap(
+  rows: readonly RuntimeRow[],
+  orderBy: OrderBy<RuntimeRow>,
+  offset: number,
+  limit: number,
+): readonly RuntimeRow[] {
+  const windowEnd = offset + limit;
+  const topRows: SortEntry[] = [];
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    if (row !== undefined) {
+      offerTopSortEntry(topRows, { row, index }, orderBy, windowEnd);
+    }
+  }
+  topRows.sort((left, right) => compareSortEntries(left, right, orderBy));
+  return topRows.slice(offset, offset + limit).map((entry) => entry.row);
 }
 
 export function matchesFilter(

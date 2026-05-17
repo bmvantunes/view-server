@@ -210,6 +210,40 @@ describe("query-engine grouped query execution", () => {
   );
 });
 
+describe("query-engine grouped window selection", () => {
+  it("matches full-sort semantics for large grouped offsets", () => {
+    const rows = Array.from({ length: 40_000 }, (_, index) => ({
+      id: `row-${index}`,
+      symbol: `sym-${index.toString().padStart(5, "0")}`,
+      quantity: index % 1_000,
+    }));
+    const query = {
+      groupBy: ["symbol"],
+      aggregates: {
+        orders: { aggFunc: "count", field: "id" },
+        totalQuantity: { aggFunc: "sum", field: "quantity" },
+      },
+      orderBy: [{ field: "totalQuantity", direction: "desc" }],
+      offset: 10_000,
+      limit: 50,
+    } satisfies RuntimeGroupedQuery;
+
+    const actual = executeGroupedQuery(rows, query);
+    const groupedRows = rows.map((row) => ({
+      symbol: row.symbol,
+      orders: 1,
+      totalQuantity: row.quantity,
+    }));
+    const fullSorted = stableSortRows(groupedRows, [
+      { field: "totalQuantity", direction: "desc" },
+      { field: "symbol", direction: "asc" },
+    ]);
+
+    expect(actual.rows).toEqual(fullSorted.slice(10_000, 10_050));
+    expect(actual.totalRows).toBe(40_000);
+  });
+});
+
 describe("query-engine raw query execution", () => {
   it("matches full-sort raw query semantics for small sorted windows", () => {
     const rows = Array.from({ length: 1_000 }, (_, index) => ({

@@ -7,6 +7,7 @@ import type {
   RuntimeRow,
 } from "../src/protocol/index.ts";
 import { makeIncrementalGroupedAccumulator } from "../src/worker/grouped-accumulator.ts";
+import { groupedAccumulatorQueryResult } from "../src/worker/grouped-accumulator-fanout.ts";
 import type { MutationLogEntry } from "../src/worker/mutation-log.ts";
 import { executeGroupedQuery, stableSortRows } from "../src/worker/query-engine.ts";
 import {
@@ -54,7 +55,10 @@ void Effect.runPromise(
         for (const mutation of mutationEntries) {
           accumulatorBuild.value.applyMutation(mutation);
         }
-        return accumulatorRows(accumulatorBuild.value.groupedRows(), query);
+        return groupedAccumulatorQueryResult({
+          query,
+          groupedAccumulator: accumulatorBuild.value,
+        }).rows;
       });
       const mutatedRows = applyMutations(sourceRows, mutationEntries);
       const recomputeAfterMutations = timeOnce(() => executeGroupedQuery(mutatedRows, query));
@@ -295,23 +299,6 @@ function applyMutations(
     }
   }
   return rows;
-}
-
-function accumulatorRows(
-  rows: readonly RuntimeRow[],
-  query: RuntimeGroupedQuery,
-): readonly RuntimeRow[] {
-  const sorted = stableSortRows(rows, groupedOrder(query));
-  return sorted.slice(0, 50);
-}
-
-function groupedOrder(query: RuntimeGroupedQuery) {
-  return [
-    ...(query.orderBy ?? []),
-    ...query.groupBy
-      .filter((field) => !query.orderBy?.some((order) => order.field === field))
-      .map((field) => ({ field, direction: "asc" as const })),
-  ];
 }
 
 function expectSameGroupedResult(left: readonly RuntimeRow[], right: readonly RuntimeRow[]): void {
