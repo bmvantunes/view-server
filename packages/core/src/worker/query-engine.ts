@@ -22,7 +22,7 @@ import {
   rawQueryOrderBy,
   stableSortRows,
   valuesEqual,
-} from "./compare-semantics.ts";
+} from "../protocol/query-semantics.ts";
 import { projectRow as projectRawRow, projectedRowsEqual as rowsEqual } from "./projection.ts";
 
 export {

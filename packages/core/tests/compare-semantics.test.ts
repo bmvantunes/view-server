@@ -7,13 +7,26 @@ import type { VersionedRow } from "../src/snapshot/index.ts";
 import {
   compareRowsForOrder,
   compareValues,
+  QUERY_SEMANTICS_CONTRACT,
   rawQueryOrderBy,
   stableSortRows,
   valuesEqual,
-} from "../src/worker/compare-semantics.ts";
+} from "../src/protocol/query-semantics.ts";
 import { executeRawQuery } from "../src/worker/query-engine.ts";
 
 describe("CompareSemantics", () => {
+  it("documents the shared query semantics seam and parity guard", () => {
+    expect(QUERY_SEMANTICS_CONTRACT.owner).toBe("protocol/query-semantics");
+    expect(QUERY_SEMANTICS_CONTRACT.parityTest).toBe("tests/query-semantics-parity.test.ts");
+    expect(QUERY_SEMANTICS_CONTRACT.rules).toEqual(
+      expect.arrayContaining([
+        "raw queries append the topic id field as the stable ascending tiebreak unless already ordered",
+        "filter string equality is case-insensitive except schema literal strings",
+        "BigDecimal values compare by Effect BigDecimal semantics",
+      ]),
+    );
+  });
+
   it("orders nulls first ascending and last descending", () => {
     const rows: readonly RuntimeRow[] = [
       { id: "value", rank: 1 },

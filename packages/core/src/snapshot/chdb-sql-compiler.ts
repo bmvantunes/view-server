@@ -4,6 +4,7 @@ import type {
   RuntimeGroupedQuery,
   RuntimeQuery,
 } from "../protocol/index.ts";
+import { rawQueryOrderBy } from "../protocol/query-semantics.ts";
 
 const BIG_DECIMAL_SCALE = 38;
 type BigDecimalColumnType = "Decimal(76, 38)";
@@ -64,14 +65,8 @@ export function compileQuerySql(
   );
   selected.add(idField);
   const where = query.where ? `WHERE ${compileFilter(query.where, literalStringFields)}` : "";
-  const orderBy = [
-    ...(query.orderBy ?? []),
-    ...(query.orderBy?.some((order) => order.field === idField)
-      ? []
-      : [{ field: idField, direction: "asc" as const }]),
-  ];
   return {
-    rowsSql: `SELECT ${Array.from(selected).map(quoteIdentifier).join(", ")} FROM (${source}) ${where} ${compileOrderBy(orderBy, columns)} ${compileLimit(query)}`,
+    rowsSql: `SELECT ${Array.from(selected).map(quoteIdentifier).join(", ")} FROM (${source}) ${where} ${compileOrderBy(rawQueryOrderBy(query, idField), columns)} ${compileLimit(query)}`,
     countSql: `SELECT count() AS totalRows FROM (${source}) ${where}`,
     decimalFields: selectedDecimalFields(Array.from(selected), columns),
     integerFields: selectedIntegerFields(Array.from(selected), columns),
