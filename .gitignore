@@ -12,6 +12,7 @@ node_modules
 dist
 dist-ssr
 coverage
+packages/*/src/**/*.d.ts
 *.local
 .view-server-test-server.pid
 .vitest-attachments
