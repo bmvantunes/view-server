@@ -307,6 +307,34 @@ describe("query-engine raw query execution", () => {
       totalRows: 2,
     });
   });
+
+  it("preserves one_of filter semantics after predicate compilation", () => {
+    const rows: RuntimeRow[] = [
+      { id: "a", status: "OPEN", price: 10 },
+      { id: "b", status: "closed", price: 20 },
+      { id: "c", status: "pending", price: 30 },
+    ];
+    const query = {
+      fields: {
+        id: true,
+        status: true,
+      },
+      where: {
+        field: "status",
+        comparator: "one_of",
+        value: ["open", "PENDING"],
+      },
+      orderBy: [{ field: "id", direction: "asc" }],
+    } satisfies RuntimeRawQuery;
+
+    expect(executeRawQuery(rows, query, "id").rows).toEqual([
+      { id: "a", status: "OPEN" },
+      { id: "c", status: "pending" },
+    ]);
+    expect(
+      executeRawQuery(rows, query, "id", { literalStringFields: new Set(["status"]) }).rows,
+    ).toEqual([]);
+  });
 });
 
 function keyById(row: RuntimeRow): RuntimeRowKey {

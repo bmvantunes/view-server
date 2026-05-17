@@ -9,6 +9,7 @@ import {
 import type {
   DeltaOperation,
   OrderBy,
+  RuntimeFilterNode,
   RuntimeRawQuery,
   RuntimeRow,
   RuntimeRowKey,
@@ -16,9 +17,9 @@ import type {
 } from "../src/protocol/index.ts";
 import {
   compareRowsForOrder,
+  compileFilter,
   diffVisibleRows,
   executeRawQuery,
-  matchesFilter,
   projectRawRow,
   rawQueryOrderBy,
   rowsEqual,
@@ -62,6 +63,17 @@ void Effect.runPromise(
           `scenario=worst-case-reorder`,
           `pageSize=${pageSize}`,
           ...diff.metrics.map((metric) => `${metric.name}=${formatMetric(metric.value)}`),
+        ].join(" "),
+      );
+
+      const filter = runCompiledFilterBenchmark(pageSize, config.iterations);
+      results.push(filter);
+      yield* Effect.logInfo(
+        [
+          `operation=filterPredicate`,
+          `scenario=nested-one-of-string`,
+          `rows=${pageSize}`,
+          ...filter.metrics.map((metric) => `${metric.name}=${formatMetric(metric.value)}`),
         ].join(" "),
       );
 
@@ -217,6 +229,43 @@ function runRawWindowBenchmark(
   return benchmarkResult("executeRawQuery", "top-window", windowEnd, metrics);
 }
 
+function runCompiledFilterBenchmark(rowCount: number, iterations: number): BenchmarkResult {
+  const rows = makeRows(rowCount);
+  const filter = filterBenchmarkNode();
+  const compiled = compileFilter(filter);
+  const compiledTime = timeRepeated(iterations, () => rows.filter(compiled));
+  const interpreted = timeRepeated(iterations, () =>
+    rows.filter((row) => legacyInterpretedMatchesFilter(row, filter)),
+  );
+  if (compiledTime.value.length !== interpreted.value.length) {
+    throw new Error(
+      `Filter count mismatch: compiled=${compiledTime.value.length} interpreted=${interpreted.value.length}`,
+    );
+  }
+  return benchmarkResult("filterPredicate", "nested-one-of-string", rowCount, [
+    { name: "compiledMs", value: compiledTime.ms, unit: "ms" },
+    { name: "interpretedMs", value: interpreted.ms, unit: "ms" },
+    {
+      name: "speedupRatio",
+      value: compiledTime.ms === 0 ? Number.MAX_SAFE_INTEGER : interpreted.ms / compiledTime.ms,
+      unit: "ratio",
+      lowerIsBetter: false,
+    },
+    {
+      name: "matchedRows",
+      value: compiledTime.value.length,
+      unit: "count",
+      lowerIsBetter: false,
+    },
+    {
+      name: "checksum",
+      value: rowsChecksum(compiledTime.value),
+      unit: "count",
+      lowerIsBetter: false,
+    },
+  ]);
+}
+
 function runStableSortBenchmark(pageSize: number, iterations: number): BenchmarkResult {
   const rows = makeRows(pageSize);
   const orderBy: OrderBy<RuntimeRow> = [
@@ -255,6 +304,34 @@ function benchmarkResult(
   };
 }
 
+function filterBenchmarkNode(): RuntimeFilterNode {
+  return {
+    op: "and",
+    conditions: [
+      {
+        field: "status",
+        comparator: "one_of",
+        value: ["OPEN", "pending", "closed"],
+      },
+      {
+        op: "or",
+        conditions: [
+          {
+            field: "bucket",
+            comparator: "starts_with",
+            value: "bucket-1",
+          },
+          {
+            field: "price",
+            comparator: "greater_than",
+            value: 5_000,
+          },
+        ],
+      },
+    ],
+  };
+}
+
 function rawWindowQuery(windowEnd: number): RuntimeRawQuery {
   return {
     fields: {
@@ -276,12 +353,60 @@ function rawWindowQuery(windowEnd: number): RuntimeRawQuery {
   };
 }
 
+function legacyInterpretedMatchesFilter(row: RuntimeRow, filter: RuntimeFilterNode): boolean {
+  if ("op" in filter) {
+    return filter.op === "and"
+      ? filter.conditions.every((condition) => legacyInterpretedMatchesFilter(row, condition))
+      : filter.conditions.some((condition) => legacyInterpretedMatchesFilter(row, condition));
+  }
+  const rowValue = row[filter.field];
+  const filterValue = filter.value;
+  switch (filter.comparator) {
+    case "equals":
+      return legacyValuesEqual(rowValue, filterValue);
+    case "not_equals":
+      return !legacyValuesEqual(rowValue, filterValue);
+    case "greater_than":
+      return Number(rowValue) > Number(filterValue);
+    case "greater_than_or_equal":
+      return Number(rowValue) >= Number(filterValue);
+    case "less_than":
+      return Number(rowValue) < Number(filterValue);
+    case "less_than_or_equal":
+      return Number(rowValue) <= Number(filterValue);
+    case "contains":
+      return (
+        typeof rowValue === "string" &&
+        typeof filterValue === "string" &&
+        rowValue.toLocaleLowerCase().includes(filterValue.toLocaleLowerCase())
+      );
+    case "starts_with":
+      return (
+        typeof rowValue === "string" &&
+        typeof filterValue === "string" &&
+        rowValue.toLocaleLowerCase().startsWith(filterValue.toLocaleLowerCase())
+      );
+    case "one_of":
+      return (
+        Array.isArray(filterValue) &&
+        filterValue.some((candidate) => legacyValuesEqual(rowValue, candidate))
+      );
+  }
+}
+
+function legacyValuesEqual(left: unknown, right: unknown): boolean {
+  return typeof left === "string" && typeof right === "string"
+    ? left.toLocaleLowerCase() === right.toLocaleLowerCase()
+    : Object.is(left, right);
+}
+
 function legacyExecuteRawQueryWindowed(
   rows: readonly RuntimeRow[],
   query: RuntimeRawQuery,
   idField: string,
 ): { readonly rows: readonly RuntimeRow[]; readonly totalRows: number } {
   const orderBy = rawQueryOrderBy(query, idField);
+  const filter = compileFilter(query.where);
   const offset = Math.max(0, Math.trunc(query.offset ?? 0));
   const limit = Math.max(0, Math.min(50, Math.trunc(query.limit ?? 50)));
   const windowEnd = offset + limit;
@@ -289,7 +414,7 @@ function legacyExecuteRawQueryWindowed(
   let totalRows = 0;
   for (let index = 0; index < rows.length; index++) {
     const row = rows[index];
-    if (row === undefined || !matchesFilter(row, query.where)) {
+    if (row === undefined || !filter(row)) {
       continue;
     }
     totalRows += 1;
@@ -323,7 +448,8 @@ function legacyExecuteRawQueryFullSort(
 ): { readonly rows: readonly RuntimeRow[]; readonly totalRows: number } {
   const offset = Math.max(0, Math.trunc(query.offset ?? 0));
   const limit = Math.max(0, Math.min(50, Math.trunc(query.limit ?? 50)));
-  const filtered = rows.filter((row) => matchesFilter(row, query.where));
+  const filter = compileFilter(query.where);
+  const filtered = rows.filter(filter);
   const sorted = stableSortRows(filtered, rawQueryOrderBy(query, idField));
   return {
     rows: sorted

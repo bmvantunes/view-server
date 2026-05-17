@@ -11,11 +11,12 @@ import {
 } from "./active-sorted-index.ts";
 import {
   compareRowsForOrder,
-  matchesFilter,
+  compileFilter,
   normalizeLimit,
   normalizeOffset,
   rawQueryOrderBy,
   rowId,
+  type CompiledFilter,
   type QueryExecutionOptions,
   type QueryExecutionResult,
 } from "./query-engine.ts";
@@ -105,9 +106,10 @@ export function estimateActiveRawPlanIndexBytes(
   options: ActiveRawViewOptions = {},
   stopAfterBytes?: number,
 ): number {
+  const filter = compileFilter(query.where, options);
   let matchingRows = 0;
   for (const row of rows) {
-    if (matchesFilter(row, query.where, options)) {
+    if (filter(row)) {
       matchingRows++;
       if (
         stopAfterBytes !== undefined &&
@@ -138,10 +140,11 @@ export function estimateActiveRawPlanIndexBytesEffect(
 ): Effect.Effect<number> {
   return Effect.gen(function* () {
     const chunkSize = normalizedBuildChunkSize(options.buildChunkSize);
+    const filter = compileFilter(query.where, options);
     let matchingRows = 0;
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index];
-      if (row !== undefined && matchesFilter(row, query.where, options)) {
+      if (row !== undefined && filter(row)) {
         matchingRows++;
         if (
           stopAfterBytes !== undefined &&
@@ -172,6 +175,7 @@ class CooperativeRawPlanBuilder {
   private readonly idField: string;
   private readonly options: ActiveRawViewOptions;
   private readonly orderBy;
+  private readonly filter: CompiledFilter;
   private readonly chunkSize: number;
   private readonly rowsById = new Map<RuntimeRowKey, RuntimeRow>();
   private readonly ids: RuntimeRowKey[] = [];
@@ -182,6 +186,7 @@ class CooperativeRawPlanBuilder {
     this.idField = idField;
     this.options = options;
     this.orderBy = rawQueryOrderBy(query, idField);
+    this.filter = compileFilter(query.where, options);
     this.chunkSize = normalizedBuildChunkSize(options.buildChunkSize);
   }
 
@@ -194,16 +199,15 @@ class CooperativeRawPlanBuilder {
   }
 
   collect(rows: readonly RuntimeRow[]): Effect.Effect<void> {
-    const query = this.query;
-    const options = this.options;
     const idField = this.idField;
+    const filter = this.filter;
     const rowsById = this.rowsById;
     const ids = this.ids;
     const chunkSize = this.chunkSize;
     return Effect.gen(function* () {
       for (let index = 0; index < rows.length; index++) {
         const row = rows[index];
-        if (row !== undefined && matchesFilter(row, query.where, options)) {
+        if (row !== undefined && filter(row)) {
           const id = rowId(row, idField);
           rowsById.set(id, row);
           ids.push(id);
@@ -263,6 +267,7 @@ class IncrementalRawPlan implements ActiveRawPlan {
   private readonly query: RuntimeRawQuery;
   private readonly idField: string;
   private readonly options: ActiveRawViewOptions;
+  private readonly filter: CompiledFilter;
   private readonly sortedIndex: ActiveSortedIndex;
 
   constructor(
@@ -278,12 +283,13 @@ class IncrementalRawPlan implements ActiveRawPlan {
     this.query = query;
     this.idField = idField;
     this.options = options;
+    this.filter = compileFilter(query.where, options);
     this.orderBy = rawQueryOrderBy(query, idField);
     this.key = activeRawPlanKey(query, idField);
     this.rowsById = seed?.rowsById ?? new Map();
     if (seed === undefined) {
       for (const row of rows) {
-        if (matchesFilter(row, query.where, options)) {
+        if (this.filter(row)) {
           this.rowsById.set(rowId(row, idField), row);
         }
       }
@@ -344,7 +350,7 @@ class IncrementalRawPlan implements ActiveRawPlan {
   }
 
   private addIfMatching(row: RuntimeRow): void {
-    if (!matchesFilter(row, this.query.where, this.options)) {
+    if (!this.filter(row)) {
       return;
     }
     const id = rowId(row, this.idField);
@@ -357,7 +363,7 @@ class IncrementalRawPlan implements ActiveRawPlan {
       throw new Error("Active view update mutation is missing after row");
     }
     const before = this.rowsById.get(mutation.id);
-    const afterMatches = matchesFilter(mutation.after, this.query.where, this.options);
+    const afterMatches = this.filter(mutation.after);
     if (before === undefined) {
       if (afterMatches) {
         this.addIfMatching(mutation.after);

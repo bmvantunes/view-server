@@ -44,6 +44,8 @@ export type QueryExecutionOptions = {
   readonly literalStringFields?: ReadonlySet<string> | undefined;
 };
 
+export type CompiledFilter = (row: RuntimeRow) => boolean;
+
 export type GroupedQueryExecutionEffectOptions = QueryExecutionOptions & {
   readonly chunkSize?: number | undefined;
   readonly aggregateYieldInterval?: number | undefined;
@@ -80,13 +82,14 @@ export function executeRawQuery(
   const limit = normalizeLimit(query.limit);
   const orderBy = rawQueryOrderBy(query, idField);
   const windowEnd = offset + limit;
+  const filter = compileFilter(query.where, options);
   if (windowEnd <= RAW_QUERY_WINDOW_SPLICE_LIMIT) {
-    return executeRawQueryWindowedSplice(rows, query, idField, options, orderBy, offset, limit);
+    return executeRawQueryWindowedSplice(rows, query, idField, filter, orderBy, offset, limit);
   }
   if (windowEnd <= RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT) {
-    return executeRawQueryWindowedHeap(rows, query, idField, options, orderBy, offset, limit);
+    return executeRawQueryWindowedHeap(rows, query, idField, filter, orderBy, offset, limit);
   }
-  const filtered = rows.filter((row) => matchesFilter(row, query.where, options));
+  const filtered = rows.filter(filter);
   const sorted = stableSortRows(filtered, orderBy);
   const totalRows = sorted.length;
   return {
@@ -101,7 +104,7 @@ function executeRawQueryWindowedSplice(
   rows: readonly RuntimeRow[],
   query: RuntimeRawQuery,
   idField: string,
-  options: QueryExecutionOptions,
+  filter: CompiledFilter,
   orderBy: OrderBy<RuntimeRow>,
   offset: number,
   limit: number,
@@ -111,7 +114,7 @@ function executeRawQueryWindowedSplice(
   let totalRows = 0;
   for (let index = 0; index < rows.length; index++) {
     const row = rows[index];
-    if (row === undefined || !matchesFilter(row, query.where, options)) {
+    if (row === undefined || !filter(row)) {
       continue;
     }
     totalRows += 1;
@@ -131,7 +134,7 @@ function executeRawQueryWindowedHeap(
   rows: readonly RuntimeRow[],
   query: RuntimeRawQuery,
   idField: string,
-  options: QueryExecutionOptions,
+  filter: CompiledFilter,
   orderBy: OrderBy<RuntimeRow>,
   offset: number,
   limit: number,
@@ -141,7 +144,7 @@ function executeRawQueryWindowedHeap(
   let totalRows = 0;
   for (let index = 0; index < rows.length; index++) {
     const row = rows[index];
-    if (row === undefined || !matchesFilter(row, query.where, options)) {
+    if (row === undefined || !filter(row)) {
       continue;
     }
     totalRows += 1;
@@ -163,7 +166,8 @@ export function executeGroupedQuery(
   query: RuntimeGroupedQuery,
   options: QueryExecutionOptions = {},
 ): QueryExecutionResult {
-  const filtered = rows.filter((row) => matchesFilter(row, query.where, options));
+  const filter = compileFilter(query.where, options);
+  const filtered = rows.filter(filter);
   const groups = buildGroups(filtered, query.groupBy, query.aggregates);
   const sorted = stableSortRows(groups, groupedQueryOrderBy(query));
   const totalRows = sorted.length;
@@ -185,9 +189,10 @@ export function executeGroupedQueryEffect(
     const aggregateYieldInterval = normalizePositiveInteger(options.aggregateYieldInterval, 50);
     const groups = new Map<string, RuntimeRow[]>();
     const aggregateDefinitions = Object.entries(query.aggregates);
+    const filter = compileFilter(query.where, options);
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index];
-      if (row !== undefined && matchesFilter(row, query.where, options)) {
+      if (row !== undefined && filter(row)) {
         addGroupedRow(groups, row, query.groupBy);
       }
       if ((index + 1) % chunkSize === 0) {
@@ -221,50 +226,190 @@ export function matchesFilter(
   filter: RuntimeFilterNode | undefined,
   options: QueryExecutionOptions = {},
 ): boolean {
+  return compileFilter(filter, options)(row);
+}
+
+export function compileFilter(
+  filter: RuntimeFilterNode | undefined,
+  options: QueryExecutionOptions = {},
+): CompiledFilter {
   if (filter === undefined) {
-    return true;
+    return () => true;
   }
   if ("op" in filter) {
+    const conditions = filter.conditions.map((condition) => compileFilter(condition, options));
     return filter.op === "and"
-      ? filter.conditions.every((condition) => matchesFilter(row, condition, options))
-      : filter.conditions.some((condition) => matchesFilter(row, condition, options));
+      ? (row) => conditions.every((condition) => condition(row))
+      : (row) => conditions.some((condition) => condition(row));
   }
 
-  const rowValue = row[filter.field];
-  const filterValue = filter.value;
   const strictStringEquality = options.literalStringFields?.has(filter.field) ?? false;
+  const equality = compileEqualityMatcher(filter.value, strictStringEquality);
 
   switch (filter.comparator) {
     case "equals":
-      return valuesEqual(rowValue, filterValue, strictStringEquality);
+      return (row) => equality(row[filter.field]);
     case "not_equals":
-      return !valuesEqual(rowValue, filterValue, strictStringEquality);
+      return (row) => !equality(row[filter.field]);
     case "greater_than":
-      return compareFilterValues(rowValue, filterValue) > 0;
+      return (row) => compareFilterValues(row[filter.field], filter.value) > 0;
     case "greater_than_or_equal":
-      return compareFilterValues(rowValue, filterValue) >= 0;
+      return (row) => compareFilterValues(row[filter.field], filter.value) >= 0;
     case "less_than":
-      return compareFilterValues(rowValue, filterValue) < 0;
+      return (row) => compareFilterValues(row[filter.field], filter.value) < 0;
     case "less_than_or_equal":
-      return compareFilterValues(rowValue, filterValue) <= 0;
+      return (row) => compareFilterValues(row[filter.field], filter.value) <= 0;
     case "contains":
-      return (
-        typeof rowValue === "string" &&
-        typeof filterValue === "string" &&
-        rowValue.toLocaleLowerCase().includes(filterValue.toLocaleLowerCase())
-      );
+      return compileStringMatcher(filter.field, filter.value, "contains");
     case "starts_with":
-      return (
-        typeof rowValue === "string" &&
-        typeof filterValue === "string" &&
-        rowValue.toLocaleLowerCase().startsWith(filterValue.toLocaleLowerCase())
-      );
+      return compileStringMatcher(filter.field, filter.value, "starts_with");
     case "one_of":
-      return (
-        Array.isArray(filterValue) &&
-        filterValue.some((candidate) => valuesEqual(rowValue, candidate, strictStringEquality))
-      );
+      return compileOneOfMatcher(filter.field, filter.value, strictStringEquality);
   }
+}
+
+function compileEqualityMatcher(
+  filterValue: unknown,
+  strictStringEquality: boolean,
+): (rowValue: unknown) => boolean {
+  if (typeof filterValue === "string") {
+    const expected = strictStringEquality ? filterValue : filterValue.toLocaleLowerCase();
+    return (rowValue) =>
+      typeof rowValue === "string"
+        ? (strictStringEquality ? rowValue : rowValue.toLocaleLowerCase()) === expected
+        : valuesEqual(rowValue, filterValue, strictStringEquality);
+  }
+  if (
+    filterValue === null ||
+    filterValue === undefined ||
+    typeof filterValue === "number" ||
+    typeof filterValue === "bigint" ||
+    typeof filterValue === "boolean"
+  ) {
+    return (rowValue) =>
+      Object.is(rowValue, filterValue) || valuesEqual(rowValue, filterValue, strictStringEquality);
+  }
+  return (rowValue) => {
+    return valuesEqual(rowValue, filterValue, strictStringEquality);
+  };
+}
+
+function compileStringMatcher(
+  field: string,
+  filterValue: unknown,
+  comparator: "contains" | "starts_with",
+): CompiledFilter {
+  if (typeof filterValue !== "string") {
+    return () => false;
+  }
+  const needle = filterValue.toLocaleLowerCase();
+  return (row) => {
+    const rowValue = row[field];
+    if (typeof rowValue !== "string") {
+      return false;
+    }
+    const haystack = rowValue.toLocaleLowerCase();
+    return comparator === "contains" ? haystack.includes(needle) : haystack.startsWith(needle);
+  };
+}
+
+function compileOneOfMatcher(
+  field: string,
+  filterValue: unknown,
+  strictStringEquality: boolean,
+): CompiledFilter {
+  if (!Array.isArray(filterValue)) {
+    return () => false;
+  }
+  const strings = new Set<string>();
+  const numbers = new Set<number>();
+  const bigints = new Set<bigint>();
+  const booleans = new Set<boolean>();
+  let hasPositiveZero = false;
+  let hasNegativeZero = false;
+  let hasNull = false;
+  let hasUndefined = false;
+  const fallbackCandidates: unknown[] = [];
+  for (const candidate of filterValue) {
+    switch (typeof candidate) {
+      case "string": {
+        strings.add(strictStringEquality ? candidate : candidate.toLocaleLowerCase());
+        break;
+      }
+      case "number": {
+        if (Object.is(candidate, -0)) {
+          hasNegativeZero = true;
+        } else if (Object.is(candidate, 0)) {
+          hasPositiveZero = true;
+        } else {
+          numbers.add(candidate);
+        }
+        break;
+      }
+      case "bigint": {
+        bigints.add(candidate);
+        break;
+      }
+      case "boolean": {
+        booleans.add(candidate);
+        break;
+      }
+      case "undefined": {
+        hasUndefined = true;
+        break;
+      }
+      default: {
+        if (candidate === null) {
+          hasNull = true;
+        } else {
+          fallbackCandidates.push(candidate);
+        }
+      }
+    }
+  }
+  return (row) => {
+    const rowValue = row[field];
+    switch (typeof rowValue) {
+      case "string":
+        if (strings.has(strictStringEquality ? rowValue : rowValue.toLocaleLowerCase())) {
+          return true;
+        }
+        break;
+      case "number":
+        if (
+          (Object.is(rowValue, -0) && hasNegativeZero) ||
+          (Object.is(rowValue, 0) && hasPositiveZero) ||
+          (!Object.is(rowValue, -0) && !Object.is(rowValue, 0) && numbers.has(rowValue))
+        ) {
+          return true;
+        }
+        break;
+      case "bigint":
+        if (bigints.has(rowValue)) {
+          return true;
+        }
+        break;
+      case "boolean":
+        if (booleans.has(rowValue)) {
+          return true;
+        }
+        break;
+      case "undefined":
+        if (hasUndefined) {
+          return true;
+        }
+        break;
+      default:
+        if (rowValue === null && hasNull) {
+          return true;
+        }
+    }
+    const candidates =
+      rowValue === null || (typeof rowValue !== "object" && typeof rowValue !== "function")
+        ? fallbackCandidates
+        : filterValue;
+    return candidates.some((candidate) => valuesEqual(rowValue, candidate, strictStringEquality));
+  };
 }
 
 export function diffVisibleRows(
