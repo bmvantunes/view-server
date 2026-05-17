@@ -52,6 +52,14 @@ Non-finite JavaScript numbers (`NaN`, `Infinity`, `-Infinity`) are not part of t
 Topic schemas should reject them before rows reach the runtime. Query parity tests intentionally do
 not normalize non-finite numbers into valid values.
 
+## Intentional Divergences
+
+There are no intentional query-result semantic divergences from the chDB SQL path. Memory queries,
+active raw views, grouped accumulators, and client-applied deltas must match chDB snapshots.
+
+The only materialization constraint currently documented is JavaScript `-0` becoming `0` at the
+row serialization boundary. Non-finite numbers are unsupported inputs, not alternate semantics.
+
 ## Parity Guard
 
 `packages/core/tests/query-semantics-parity.test.ts` compares:
@@ -60,7 +68,7 @@ not normalize non-finite numbers into valid values.
 - active raw views,
 - grouped accumulators when eligible,
 - chDB snapshots,
-- client-visible rows after applying deltas.
+- client-visible rows after applying per-mutation and coalesced multi-mutation deltas.
 
 The test preserves row order. It only normalizes representation details such as BigDecimal display
 strings and bigint display strings in failure output. If chDB and memory disagree, the implementation

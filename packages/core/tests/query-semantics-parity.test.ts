@@ -254,6 +254,7 @@ describe("query semantics parity", () => {
       });
 
       const mutations = edgeCaseMutations(rows);
+      const coalescedInitial = view.snapshot();
       for (const mutation of mutations) {
         const previous = view.snapshot();
         rows = applyMutation(rows, mutation);
@@ -274,6 +275,7 @@ describe("query semantics parity", () => {
           { rows, mutations, seed: edgeSeed },
         );
       }
+      const coalescedNext = view.snapshot();
 
       yield* backend.applyBatch({
         mutations,
@@ -287,6 +289,34 @@ describe("query semantics parity", () => {
       expectParity(
         "client delta convergence",
         { rows: clientRows, totalRows: chdb.totalRows },
+        chdb,
+        query,
+        {
+          rows,
+          mutations,
+          seed: edgeSeed,
+        },
+      );
+
+      const coalescedOps = diffVisibleRows(
+        coalescedInitial.rows,
+        coalescedNext.rows,
+        rowKeyForQuery(query, "id"),
+      );
+      const coalescedClientRows = applyDeltaOperations(
+        coalescedInitial.rows,
+        deltaEventForRange(
+          mutations[0]?.version === undefined ? 1n : mutations[0].version - 1n,
+          mutations[mutations.length - 1]?.version ?? 1n,
+          coalescedOps,
+          coalescedNext.totalRows,
+        ),
+        "id",
+      );
+
+      expectParity(
+        "coalesced multi-mutation delta convergence",
+        { rows: coalescedClientRows, totalRows: chdb.totalRows },
         chdb,
         query,
         {
@@ -985,8 +1015,13 @@ function edgeCaseMutations(rows: readonly RuntimeRow[]): readonly MutationLogEnt
   const enteringBefore = rows.find((row) => row.id === "edge-01");
   const leavingBefore = rows.find((row) => row.id === "edge-02");
   const movingBefore = rows.find((row) => row.id === "edge-06");
+  const missingToValueBefore = rows.find((row) => row.id === "edge-05");
   const hiddenBefore = rows.find((row) => row.id === "edge-00");
   const deleteBefore = rows.find((row) => row.id === "edge-03");
+  const valueToNullAfter: RuntimeRow = {
+    ...safeRow(leavingBefore),
+    nullableRank: null,
+  };
   const reinsertAfter: RuntimeRow = {
     id: "edge-03",
     symbol: "MSFT",
@@ -1006,21 +1041,29 @@ function edgeCaseMutations(rows: readonly RuntimeRow[]): readonly MutationLogEnt
       status: "open",
       price: -30,
     }),
-    update(3n, "edge-02", leavingBefore, {
-      ...safeRow(leavingBefore),
+    update(3n, "edge-02", leavingBefore, valueToNullAfter),
+    update(4n, "edge-02", valueToNullAfter, {
+      ...valueToNullAfter,
       status: "closed",
     }),
-    update(4n, "edge-06", movingBefore, {
+    update(5n, "edge-06", movingBefore, {
       ...safeRow(movingBefore),
       status: "open",
       price: 500,
+      nullableRank: 6,
     }),
-    update(5n, "edge-00", hiddenBefore, {
+    update(6n, "edge-05", missingToValueBefore, {
+      ...safeRow(missingToValueBefore),
+      symbol: "AMZN",
+      status: "open",
+      nullableRank: 4,
+    }),
+    update(7n, "edge-00", hiddenBefore, {
       ...safeRow(hiddenBefore),
       hidden: "hidden-only-change",
     }),
-    remove(6n, "edge-03", deleteBefore),
-    insert(7n, "edge-03", reinsertAfter),
+    remove(8n, "edge-03", deleteBefore),
+    insert(9n, "edge-03", reinsertAfter),
   ];
 }
 
@@ -1203,13 +1246,22 @@ function deltaEvent(
   ops: readonly DeltaOperation<RuntimeRow>[],
   totalRows: number,
 ): DeltaEvent<readonly RuntimeRow[]> {
+  return deltaEventForRange(mutation.version - 1n, mutation.version, ops, totalRows);
+}
+
+function deltaEventForRange(
+  fromVersion: WorkerVersion,
+  toVersion: WorkerVersion,
+  ops: readonly DeltaOperation<RuntimeRow>[],
+  totalRows: number,
+): DeltaEvent<readonly RuntimeRow[]> {
   return {
     type: "delta",
     requestId: "query-semantics-parity",
     ops,
     meta: {
-      fromVersion: String(mutation.version - 1n),
-      toVersion: String(mutation.version),
+      fromVersion: String(fromVersion),
+      toVersion: String(toVersion),
       totalRows,
       serverTime: 0,
     },
