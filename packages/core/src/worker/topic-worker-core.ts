@@ -1113,21 +1113,21 @@ export function makeTopicWorkerCore(
       publish: (input) =>
         gate.withPermit(
           Effect.fnUntraced(function* () {
-            yield* mutateBatchUntraced([{ type: "publish", row: input }]);
+            return yield* mutateBatchUntraced([{ type: "publish", row: input }]);
           })(),
         ),
 
       deltaPublish: (patch) =>
         gate.withPermit(
           Effect.fnUntraced(function* () {
-            yield* mutateBatchUntraced([{ type: "delta-publish", patch }]);
+            return yield* mutateBatchUntraced([{ type: "delta-publish", patch }]);
           })(),
         ),
 
       deleteById: (id) =>
         gate.withPermit(
           Effect.fnUntraced(function* () {
-            yield* mutateBatchUntraced([{ type: "delete", id }]);
+            return yield* mutateBatchUntraced([{ type: "delete", id }]);
           })(),
         ),
 
@@ -1139,7 +1139,7 @@ export function makeTopicWorkerCore(
               "view_server.batch_size": mutations.length,
               "view_server.worker_version": mutationStore.version().toString(),
             });
-            yield* mutateBatchUntraced(mutations);
+            return yield* mutateBatchUntraced(mutations);
           })(),
         ),
 
