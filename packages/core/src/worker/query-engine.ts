@@ -51,7 +51,8 @@ export type GroupedQueryExecutionEffectOptions = QueryExecutionOptions & {
 
 export const DEFAULT_QUERY_LIMIT = 50;
 export const DEFAULT_QUERY_OFFSET = 0;
-export const RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT = 10_000;
+export const RAW_QUERY_WINDOW_SPLICE_LIMIT = 10_000;
+export const RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT = 100_000;
 
 type SortEntry = {
   readonly row: RuntimeRow;
@@ -79,8 +80,11 @@ export function executeRawQuery(
   const limit = normalizeLimit(query.limit);
   const orderBy = rawQueryOrderBy(query, idField);
   const windowEnd = offset + limit;
+  if (windowEnd <= RAW_QUERY_WINDOW_SPLICE_LIMIT) {
+    return executeRawQueryWindowedSplice(rows, query, idField, options, orderBy, offset, limit);
+  }
   if (windowEnd <= RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT) {
-    return executeRawQueryWindowed(rows, query, idField, options, orderBy, offset, limit);
+    return executeRawQueryWindowedHeap(rows, query, idField, options, orderBy, offset, limit);
   }
   const filtered = rows.filter((row) => matchesFilter(row, query.where, options));
   const sorted = stableSortRows(filtered, orderBy);
@@ -93,7 +97,7 @@ export function executeRawQuery(
   };
 }
 
-function executeRawQueryWindowed(
+function executeRawQueryWindowedSplice(
   rows: readonly RuntimeRow[],
   query: RuntimeRawQuery,
   idField: string,
@@ -115,6 +119,37 @@ function executeRawQueryWindowed(
       insertTopSortEntry(topRows, { row, index }, orderBy, windowEnd);
     }
   }
+  return {
+    rows: topRows
+      .slice(offset, offset + limit)
+      .map((entry) => projectRawRow(entry.row, query.fields, idField)),
+    totalRows,
+  };
+}
+
+function executeRawQueryWindowedHeap(
+  rows: readonly RuntimeRow[],
+  query: RuntimeRawQuery,
+  idField: string,
+  options: QueryExecutionOptions,
+  orderBy: OrderBy<RuntimeRow>,
+  offset: number,
+  limit: number,
+): QueryExecutionResult {
+  const windowEnd = offset + limit;
+  const topRows: SortEntry[] = [];
+  let totalRows = 0;
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    if (row === undefined || !matchesFilter(row, query.where, options)) {
+      continue;
+    }
+    totalRows += 1;
+    if (windowEnd > 0) {
+      offerTopSortEntry(topRows, { row, index }, orderBy, windowEnd);
+    }
+  }
+  topRows.sort((left, right) => compareSortEntries(left, right, orderBy));
   return {
     rows: topRows
       .slice(offset, offset + limit)
@@ -380,6 +415,90 @@ function sortEntryInsertionIndex(
     }
   }
   return low;
+}
+
+function offerTopSortEntry(
+  heap: SortEntry[],
+  candidate: SortEntry,
+  orderBy: OrderBy<RuntimeRow>,
+  limit: number,
+): void {
+  const worst = heap[0];
+  if (
+    heap.length >= limit &&
+    worst !== undefined &&
+    compareSortEntries(candidate, worst, orderBy) >= 0
+  ) {
+    return;
+  }
+  if (heap.length < limit) {
+    heap.push(candidate);
+    siftTopSortEntryUp(heap, heap.length - 1, orderBy);
+    return;
+  }
+  heap[0] = candidate;
+  siftTopSortEntryDown(heap, 0, orderBy);
+}
+
+function siftTopSortEntryUp(
+  heap: SortEntry[],
+  startIndex: number,
+  orderBy: OrderBy<RuntimeRow>,
+): void {
+  let index = startIndex;
+  while (index > 0) {
+    const parentIndex = Math.floor((index - 1) / 2);
+    const parent = heap[parentIndex];
+    const current = heap[index];
+    if (
+      parent === undefined ||
+      current === undefined ||
+      compareSortEntries(parent, current, orderBy) >= 0
+    ) {
+      return;
+    }
+    heap[parentIndex] = current;
+    heap[index] = parent;
+    index = parentIndex;
+  }
+}
+
+function siftTopSortEntryDown(
+  heap: SortEntry[],
+  startIndex: number,
+  orderBy: OrderBy<RuntimeRow>,
+): void {
+  let index = startIndex;
+  while (true) {
+    const leftIndex = index * 2 + 1;
+    const rightIndex = leftIndex + 1;
+    let worstIndex = index;
+    const left = heap[leftIndex];
+    const right = heap[rightIndex];
+    const worst = heap[worstIndex];
+    if (left !== undefined && worst !== undefined && compareSortEntries(left, worst, orderBy) > 0) {
+      worstIndex = leftIndex;
+    }
+    const currentWorst = heap[worstIndex];
+    if (
+      right !== undefined &&
+      currentWorst !== undefined &&
+      compareSortEntries(right, currentWorst, orderBy) > 0
+    ) {
+      worstIndex = rightIndex;
+    }
+    if (worstIndex === index) {
+      return;
+    }
+    const next = heap[worstIndex];
+    const current = heap[index];
+    if (next === undefined || current === undefined) {
+      return;
+    }
+    heap[index] = next;
+    heap[worstIndex] = current;
+    index = worstIndex;
+  }
 }
 
 function compareSortEntries(

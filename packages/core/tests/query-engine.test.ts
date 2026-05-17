@@ -260,6 +260,35 @@ describe("query-engine raw query execution", () => {
     expect(executeRawQuery(rows, query, "id")).toEqual(legacyExecuteRawQuery(rows, query, "id"));
   });
 
+  it("matches full-sort semantics for a large offset window", () => {
+    const rows = Array.from({ length: 30_000 }, (_, index) => ({
+      id: `row-${index.toString().padStart(5, "0")}`,
+      price: (index * 197) % 10_003,
+      bucket: index % 37 === 0 ? null : `bucket-${index % 211}`,
+      status: index % 2 === 0 ? "open" : "closed",
+    }));
+    const query = {
+      fields: {
+        id: true,
+        price: true,
+        bucket: true,
+      },
+      where: {
+        field: "status",
+        comparator: "equals",
+        value: "open",
+      },
+      orderBy: [
+        { field: "bucket", direction: "asc" },
+        { field: "price", direction: "desc" },
+      ],
+      offset: 10_000,
+      limit: 50,
+    } satisfies RuntimeRawQuery;
+
+    expect(executeRawQuery(rows, query, "id")).toEqual(legacyExecuteRawQuery(rows, query, "id"));
+  });
+
   it("returns exact totalRows when the requested raw window is empty", () => {
     const rows: RuntimeRow[] = [
       { id: "a", price: 10 },

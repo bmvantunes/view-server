@@ -9,6 +9,7 @@ import {
 import type {
   DeltaOperation,
   OrderBy,
+  RuntimeRawQuery,
   RuntimeRow,
   RuntimeRowKey,
   RuntimeRowKeyFn,
@@ -16,6 +17,10 @@ import type {
 import {
   compareRowsForOrder,
   diffVisibleRows,
+  executeRawQuery,
+  matchesFilter,
+  projectRawRow,
+  rawQueryOrderBy,
   rowsEqual,
   stableSortRows,
 } from "../src/worker/query-engine.ts";
@@ -23,7 +28,9 @@ import {
 type BenchConfig = {
   readonly pageSizes: readonly number[];
   readonly legacyMaxSize: number;
+  readonly rawLegacyMaxSize: number;
   readonly iterations: number;
+  readonly rawRows: number;
 };
 
 type Timed<T> = {
@@ -34,7 +41,9 @@ type Timed<T> = {
 const config: BenchConfig = {
   pageSizes: pageSizes(),
   legacyMaxSize: envNumber("VS_QUERY_ENGINE_LEGACY_MAX_SIZE", 10_000),
+  rawLegacyMaxSize: envNumber("VS_QUERY_ENGINE_RAW_LEGACY_MAX_SIZE", 1_000),
   iterations: envNumber("VS_QUERY_ENGINE_ITERATIONS", 1),
+  rawRows: envNumber("VS_QUERY_ENGINE_RAW_ROWS", 100_000),
 };
 
 void Effect.runPromise(
@@ -56,6 +65,22 @@ void Effect.runPromise(
         ].join(" "),
       );
 
+      const rawWindow = runRawWindowBenchmark(
+        pageSize,
+        config.rawRows,
+        config.iterations,
+        config.rawLegacyMaxSize,
+      );
+      results.push(rawWindow);
+      yield* Effect.logInfo(
+        [
+          `operation=executeRawQuery`,
+          `scenario=top-window`,
+          `windowEnd=${pageSize}`,
+          ...rawWindow.metrics.map((metric) => `${metric.name}=${formatMetric(metric.value)}`),
+        ].join(" "),
+      );
+
       const sort = runStableSortBenchmark(pageSize, config.iterations);
       results.push(sort);
       yield* Effect.logInfo(
@@ -73,12 +98,15 @@ void Effect.runPromise(
       {
         pageSizes: config.pageSizes.join(","),
         legacyMaxSize: config.legacyMaxSize,
+        rawLegacyMaxSize: config.rawLegacyMaxSize,
         iterations: config.iterations,
+        rawRows: config.rawRows,
       },
       results,
       {
         notes: [
           "diffVisibleRows compares optimized output against the legacy O(n^2) algorithm up to legacyMaxSize.",
+          "executeRawQuery top-window compares the bounded-heap runtime path against the previous splice-maintained window path.",
           "stableSortRows index-array timing is exploratory and is not used by runtime unless it beats the current implementation.",
         ],
       },
@@ -129,6 +157,66 @@ function runDiffBenchmark(
   return benchmarkResult("diffVisibleRows", "worst-case-reorder", pageSize, metrics);
 }
 
+function runRawWindowBenchmark(
+  windowEnd: number,
+  rowCount: number,
+  iterations: number,
+  legacyMaxSize: number,
+): BenchmarkResult {
+  const rows = makeRows(Math.max(rowCount, windowEnd * 4));
+  const query = rawWindowQuery(windowEnd);
+  const current = timeRepeated(iterations, () => executeRawQuery(rows, query, "id"));
+  const metrics: BenchmarkMetric[] = [
+    { name: "rows", value: rows.length, unit: "count", lowerIsBetter: false },
+    { name: "currentMs", value: current.ms, unit: "ms" },
+    {
+      name: "checksum",
+      value: rowsChecksum(current.value.rows),
+      unit: "count",
+      lowerIsBetter: false,
+    },
+  ];
+  if (windowEnd <= legacyMaxSize) {
+    const legacy = timeRepeated(iterations, () => legacyExecuteRawQueryWindowed(rows, query, "id"));
+    expectSameRows(current.value.rows, legacy.value.rows);
+    if (current.value.totalRows !== legacy.value.totalRows) {
+      throw new Error(
+        `Raw query totalRows mismatch: current=${current.value.totalRows} legacy=${legacy.value.totalRows}`,
+      );
+    }
+    metrics.push(
+      { name: "legacySpliceMs", value: legacy.ms, unit: "ms" },
+      {
+        name: "speedupRatio",
+        value: current.ms === 0 ? Number.MAX_SAFE_INTEGER : legacy.ms / current.ms,
+        unit: "ratio",
+        lowerIsBetter: false,
+      },
+    );
+  }
+  if (windowEnd > 10_000) {
+    const legacyFullSort = timeRepeated(iterations, () =>
+      legacyExecuteRawQueryFullSort(rows, query, "id"),
+    );
+    expectSameRows(current.value.rows, legacyFullSort.value.rows);
+    if (current.value.totalRows !== legacyFullSort.value.totalRows) {
+      throw new Error(
+        `Raw query full-sort totalRows mismatch: current=${current.value.totalRows} legacy=${legacyFullSort.value.totalRows}`,
+      );
+    }
+    metrics.push(
+      { name: "legacyFullSortMs", value: legacyFullSort.ms, unit: "ms" },
+      {
+        name: "fullSortSpeedupRatio",
+        value: current.ms === 0 ? Number.MAX_SAFE_INTEGER : legacyFullSort.ms / current.ms,
+        unit: "ratio",
+        lowerIsBetter: false,
+      },
+    );
+  }
+  return benchmarkResult("executeRawQuery", "top-window", windowEnd, metrics);
+}
+
 function runStableSortBenchmark(pageSize: number, iterations: number): BenchmarkResult {
   const rows = makeRows(pageSize);
   const orderBy: OrderBy<RuntimeRow> = [
@@ -165,6 +253,112 @@ function benchmarkResult(
     },
     metrics,
   };
+}
+
+function rawWindowQuery(windowEnd: number): RuntimeRawQuery {
+  return {
+    fields: {
+      id: true,
+      bucket: true,
+      price: true,
+    },
+    where: {
+      field: "status",
+      comparator: "equals",
+      value: "open",
+    },
+    orderBy: [
+      { field: "bucket", direction: "asc" },
+      { field: "price", direction: "desc" },
+    ],
+    offset: Math.max(0, windowEnd - 50),
+    limit: 50,
+  };
+}
+
+function legacyExecuteRawQueryWindowed(
+  rows: readonly RuntimeRow[],
+  query: RuntimeRawQuery,
+  idField: string,
+): { readonly rows: readonly RuntimeRow[]; readonly totalRows: number } {
+  const orderBy = rawQueryOrderBy(query, idField);
+  const offset = Math.max(0, Math.trunc(query.offset ?? 0));
+  const limit = Math.max(0, Math.min(50, Math.trunc(query.limit ?? 50)));
+  const windowEnd = offset + limit;
+  const topRows: Array<{ readonly row: RuntimeRow; readonly index: number }> = [];
+  let totalRows = 0;
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    if (row === undefined || !matchesFilter(row, query.where)) {
+      continue;
+    }
+    totalRows += 1;
+    const candidate = { row, index };
+    const worst = topRows[topRows.length - 1];
+    if (
+      topRows.length >= windowEnd &&
+      worst !== undefined &&
+      compareLegacySortEntries(candidate, worst, orderBy) >= 0
+    ) {
+      continue;
+    }
+    const insertIndex = legacyInsertionIndex(topRows, candidate, orderBy);
+    topRows.splice(insertIndex, 0, candidate);
+    if (topRows.length > windowEnd) {
+      topRows.pop();
+    }
+  }
+  return {
+    rows: topRows
+      .slice(offset, offset + limit)
+      .map((entry) => projectRawRow(entry.row, query.fields, idField)),
+    totalRows,
+  };
+}
+
+function legacyExecuteRawQueryFullSort(
+  rows: readonly RuntimeRow[],
+  query: RuntimeRawQuery,
+  idField: string,
+): { readonly rows: readonly RuntimeRow[]; readonly totalRows: number } {
+  const offset = Math.max(0, Math.trunc(query.offset ?? 0));
+  const limit = Math.max(0, Math.min(50, Math.trunc(query.limit ?? 50)));
+  const filtered = rows.filter((row) => matchesFilter(row, query.where));
+  const sorted = stableSortRows(filtered, rawQueryOrderBy(query, idField));
+  return {
+    rows: sorted
+      .slice(offset, offset + limit)
+      .map((row) => projectRawRow(row, query.fields, idField)),
+    totalRows: sorted.length,
+  };
+}
+
+function legacyInsertionIndex(
+  entries: readonly { readonly row: RuntimeRow; readonly index: number }[],
+  candidate: { readonly row: RuntimeRow; readonly index: number },
+  orderBy: OrderBy<RuntimeRow>,
+): number {
+  let low = 0;
+  let high = entries.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const entry = entries[middle];
+    if (entry !== undefined && compareLegacySortEntries(candidate, entry, orderBy) < 0) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+  return low;
+}
+
+function compareLegacySortEntries(
+  left: { readonly row: RuntimeRow; readonly index: number },
+  right: { readonly row: RuntimeRow; readonly index: number },
+  orderBy: OrderBy<RuntimeRow>,
+): number {
+  const compared = compareRowsForOrder(left.row, right.row, orderBy);
+  return compared !== 0 ? compared : left.index - right.index;
 }
 
 function timeRepeated<T>(iterations: number, run: () => T): Timed<T> {
