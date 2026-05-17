@@ -5,6 +5,7 @@ import type * as Cause from "effect/Cause";
 import type { ViewServerError } from "../errors.ts";
 import type {
   DeltaEvent,
+  DeltaOperation,
   LiveQueryStatusEvent,
   RuntimeRow,
   SnapshotEvent,
@@ -13,6 +14,8 @@ import type {
 
 export type FanoutQueueState = {
   pendingLagVersions: bigint;
+  pendingDeltaEvent?: MutableDeltaEvent | undefined;
+  pendingDeltaOps?: DeltaOperation<RuntimeRow>[] | undefined;
 };
 
 export type FanoutQueue = {
@@ -41,6 +44,18 @@ export type SubscriptionEventQueue = Queue.Queue<
   ViewServerError | Cause.Done
 >;
 
+type MutableDeltaEvent = {
+  type: "delta";
+  requestId: string;
+  ops: DeltaOperation<RuntimeRow>[];
+  meta: {
+    fromVersion: string;
+    toVersion: string;
+    totalRows: number;
+    serverTime: number;
+  };
+};
+
 export function makeFanoutQueue(options: {
   readonly maxQueueDepth: number;
   readonly deltaCoalescing: boolean;
@@ -61,28 +76,34 @@ export function makeFanoutQueue(options: {
         yield* Queue.offer(queue, event);
         return true;
       }
-      const queued = yield* drainQueuedEvents(queue);
-      const queuedPrefix = queued.filter((queuedEvent) => queuedEvent.type !== "delta");
-      const queuedDeltas = queued.filter((queuedEvent) => queuedEvent.type === "delta");
-      const nextQueued = coalescedQueueEvents(queuedPrefix, queuedDeltas, event);
-      if (
-        nextQueued.length > options.maxQueueDepth ||
-        (queuedDeltas.length === 0 && wouldExceedQueueLimit(queuedPrefix.length))
-      ) {
-        yield* offerQueuedEvents(queue, queued);
+      const depth = yield* Queue.size(queue);
+      if (depth === 0) {
+        clearPendingDelta(state);
+      }
+      if (state.pendingDeltaEvent !== undefined && state.pendingDeltaOps !== undefined) {
+        const nextLag = state.pendingLagVersions + deltaVersionSpan(event);
+        if (options.maxQueueDepth > 0 && nextLag > BigInt(options.maxQueueDepth)) {
+          return false;
+        }
+        state.pendingDeltaOps.push(...event.ops);
+        state.pendingDeltaEvent.requestId = event.requestId;
+        state.pendingDeltaEvent.meta.toVersion = event.meta.toVersion;
+        state.pendingDeltaEvent.meta.totalRows = event.meta.totalRows;
+        state.pendingDeltaEvent.meta.serverTime = event.meta.serverTime;
+        state.pendingLagVersions = nextLag;
+        return true;
+      }
+      if (wouldExceedQueueLimit(depth)) {
         return false;
       }
-      const coalesced = nextQueued[nextQueued.length - 1];
-      if (
-        coalesced?.type === "delta" &&
-        options.maxQueueDepth > 0 &&
-        deltaVersionSpan(coalesced) > BigInt(options.maxQueueDepth)
-      ) {
-        yield* offerQueuedEvents(queue, queued);
+      if (options.maxQueueDepth > 0 && deltaVersionSpan(event) > BigInt(options.maxQueueDepth)) {
         return false;
       }
-      yield* offerQueuedEvents(queue, nextQueued);
-      state.pendingLagVersions = queueEventsVersionLag(nextQueued);
+      const pendingDelta = mutableDeltaEvent(event);
+      yield* Queue.offer(queue, pendingDelta);
+      state.pendingDeltaEvent = pendingDelta;
+      state.pendingDeltaOps = pendingDelta.ops;
+      state.pendingLagVersions = deltaVersionSpan(pendingDelta);
       return true;
     }),
 
@@ -94,6 +115,7 @@ export function makeFanoutQueue(options: {
         return false;
       }
       yield* offerQueuedEvents(queue, nextQueued);
+      clearPendingDelta(state);
       state.pendingLagVersions = queueEventsVersionLag(nextQueued);
       return true;
     }),
@@ -106,6 +128,7 @@ export function makeFanoutQueue(options: {
         return false;
       }
       yield* offerQueuedEvents(queue, nextQueued);
+      clearPendingDelta(state);
       state.pendingLagVersions = queueEventsVersionLag(nextQueued);
       return true;
     }),
@@ -115,6 +138,26 @@ export function makeFanoutQueue(options: {
     lagForDepth: (queueDepth, pendingLagVersions) =>
       subscriptionLagVersionsForQueueDepth(queueDepth, pendingLagVersions, options.deltaCoalescing),
   };
+}
+
+function mutableDeltaEvent(event: DeltaEvent<readonly RuntimeRow[]>): MutableDeltaEvent {
+  return {
+    type: "delta",
+    requestId: event.requestId,
+    ops: [...event.ops],
+    meta: {
+      fromVersion: event.meta.fromVersion,
+      toVersion: event.meta.toVersion,
+      totalRows: event.meta.totalRows,
+      serverTime: event.meta.serverTime,
+    },
+  };
+}
+
+function clearPendingDelta(state: FanoutQueueState): void {
+  state.pendingDeltaEvent = undefined;
+  state.pendingDeltaOps = undefined;
+  state.pendingLagVersions = 0n;
 }
 
 export function coalescedQueueEvents(

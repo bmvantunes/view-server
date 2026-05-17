@@ -34,6 +34,31 @@ describe("FanoutQueue", () => {
     }),
   );
 
+  it.effect("mutates the queued coalesced delta without growing physical queue depth", () =>
+    Effect.gen(function* () {
+      const queue = yield* Queue.unbounded<
+        SubscriptionEvent<readonly RuntimeRow[]>,
+        ViewServerError | Cause.Done
+      >();
+      const state = { pendingLagVersions: 0n };
+      const fanout = makeFanoutQueue({ maxQueueDepth: 10, deltaCoalescing: true });
+
+      expect(yield* fanout.offerDelta(queue, state, delta("1", "2", "row-1"))).toBe(true);
+      expect(yield* fanout.offerDelta(queue, state, delta("2", "3", "row-2"))).toBe(true);
+      expect(yield* fanout.offerDelta(queue, state, delta("3", "4", "row-3"))).toBe(true);
+
+      expect(yield* Queue.size(queue)).toBe(1);
+      const event = yield* Queue.take(queue);
+      expect(event.type).toBe("delta");
+      if (event.type === "delta") {
+        expect(event.meta.toVersion).toBe("4");
+        expect(
+          event.ops.flatMap((operation) => (operation.type === "upsert" ? [operation.row.id] : [])),
+        ).toEqual(["row-1", "row-2", "row-3"]);
+      }
+    }),
+  );
+
   it.effect("keeps physical queue depth semantics when coalescing is disabled", () =>
     Effect.gen(function* () {
       const queue = yield* Queue.unbounded<
@@ -76,11 +101,22 @@ describe("FanoutQueue", () => {
   });
 });
 
-function delta(fromVersion: string, toVersion: string): DeltaEvent<readonly RuntimeRow[]> {
+function delta(
+  fromVersion: string,
+  toVersion: string,
+  id = "row",
+): DeltaEvent<readonly RuntimeRow[]> {
   return {
     type: "delta",
     requestId: "request",
-    ops: [],
+    ops: [
+      {
+        type: "upsert",
+        row: {
+          id,
+        },
+      },
+    ],
     meta: {
       fromVersion,
       toVersion,
