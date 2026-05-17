@@ -103,6 +103,10 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 43: Orders demo contract is covered by source-level public import
       tests, real websocket browser smoke at desktop/mobile widths, demo build,
       and browser bundle forbidden-dependency grep.
+- [x] Task 44: Documentation source map now points README to authoritative
+      architecture, quickstart, testing, production, fault-tolerance, benchmark,
+      and API-audit docs, adds docs/architecture.md, checks links, and marks
+      root plan.md as historical implementation context.
 - [x] Task 10: Aggregate Function Modules for count, sum, min, max, avg, count distinct,
       and string aggregates with focused BigDecimal/null/update tests.
 - [x] Task 9: GroupedAccumulator prototype for opt-in count/sum/min/max grouped subscriptions,

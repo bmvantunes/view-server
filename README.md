@@ -106,7 +106,12 @@ export function App() {
 ## Docs
 
 - `CONTEXT.md` is the compact architecture and domain map for future agents.
+- `docs/architecture.md` is the current implementation architecture contract.
 - `docs/quickstart.md` shows the run-server, publish, and browser flow.
+- `docs/testing.md` covers package tests, real-server app tests, and isolationId conventions.
+- `docs/production-readiness.md` covers production startup, shutdown, guardrails, and rollout.
+- `docs/fault-tolerance.md` documents expected behavior under Kafka, chDB, websocket, slow-client,
+  shutdown, and memory-pressure failures.
 - `docs/operations.md` documents stale/waiting semantics, `totalRows`, version fencing, health metrics, active plan limits, and troubleshooting.
 - `docs/hello-production.md` shows a Kafka + chDB + metrics UI configuration.
 - `docs/benchmarks.md` covers benchmark artifact output, summaries, and baseline refresh.
@@ -115,6 +120,10 @@ export function App() {
 - `docs/release-checklist.md` lists the release-candidate validation and dry-run steps.
 - `docs/worker-state-machine-review.md` records the hardening checklist and soak shape.
 - `docs/adr/` records the load-bearing architecture decisions.
+
+The original root `plan.md` is the historical implementation plan. The current contracts are the
+README, `CONTEXT.md`, `docs/architecture.md`, the ADRs, and the focused operations/testing/release
+docs above.
 
 ## Validation
 
