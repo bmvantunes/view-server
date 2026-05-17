@@ -35,11 +35,11 @@ describe("GroupedRefreshCoordinator", () => {
       const snapshot = coordinator.begin({
         key: groupedRefreshKey(groupedQuery),
         subscriptions: registry([first, second]),
-        rows: [{ id: "a", symbol: "AAPL" }],
         version: 1n,
       });
 
       expect(snapshot?.requestIds).toEqual(["request-1", "request-2"]);
+      expect(snapshot).not.toHaveProperty("rows");
       expect(first.groupedRefreshInFlight).toBe(true);
       expect(second.groupedRefreshInFlight).toBe(true);
     }),
@@ -54,7 +54,6 @@ describe("GroupedRefreshCoordinator", () => {
       const snapshot = coordinator.begin({
         key: groupedRefreshKey(groupedQuery),
         subscriptions: registry([active]),
-        rows: [],
         version: 1n,
       });
       if (snapshot === undefined) {
@@ -86,7 +85,6 @@ describe("GroupedRefreshCoordinator", () => {
       const snapshot = coordinator.begin({
         key: groupedRefreshKey(groupedQuery),
         subscriptions: registry([first, second]),
-        rows: [],
         version: 1n,
       });
       expect(snapshot?.requestIds).toEqual(["request-2"]);

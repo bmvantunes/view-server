@@ -40,6 +40,7 @@ import type { ActiveRawViewChange } from "./active-view.ts";
 import { makeFanoutQueue } from "./fanout-queue.ts";
 import {
   GroupedRefreshCoordinator,
+  type GroupedRefreshMemorySnapshot,
   type GroupedRefreshSnapshot,
 } from "./grouped-refresh-coordinator.ts";
 import { type MutationLogEntry, type WorkerVersion } from "./mutation-log.ts";
@@ -552,7 +553,6 @@ export function makeTopicWorkerCore(
           groupedRefreshCoordinator.begin({
             key,
             subscriptions,
-            rows: mutationStore.rows().slice(),
             version: mutationStore.version(),
           }),
         ),
@@ -564,14 +564,17 @@ export function makeTopicWorkerCore(
         "view_server.topic": topic,
         "view_server.worker_version": snapshot.version.toString(),
         "view_server.batch_size": snapshot.requestIds.length,
-        "view_server.rows": snapshot.rows.length,
       });
-      const result = yield* groupedRefreshQuery(snapshot);
+      const refreshed = yield* groupedRefreshQuery(snapshot);
+      if (refreshed === undefined) {
+        yield* gate.withPermit(resetGroupedRefresh(snapshot.key));
+        return;
+      }
       yield* Effect.annotateCurrentSpan({
-        "view_server.rows": result.rows.length,
-        "view_server.total_rows": result.totalRows,
+        "view_server.rows": refreshed.result.rows.length,
+        "view_server.total_rows": refreshed.result.totalRows,
       });
-      yield* gate.withPermit(installGroupedRefresh(snapshot, result));
+      yield* gate.withPermit(installGroupedRefresh(refreshed.snapshot, refreshed.result));
     });
 
     const groupedRefreshQuery = Effect.fn("view-server.worker.grouped.snapshot")(function* (
@@ -611,14 +614,48 @@ export function makeTopicWorkerCore(
           yield* Effect.annotateCurrentSpan({
             "view_server.backend_version": snapshot.version.toString(),
           });
-          return accelerated.value;
+          return { snapshot, result: accelerated.value };
         }
       }
-      return yield* executeGroupedQueryEffect(snapshot.rows, snapshot.query, {
+      const memorySnapshot = yield* gate.withPermit(captureGroupedRefreshMemorySnapshot(snapshot));
+      if (memorySnapshot === undefined) {
+        return undefined;
+      }
+      yield* Effect.annotateCurrentSpan({
+        "view_server.worker_version": memorySnapshot.version.toString(),
+        "view_server.rows": memorySnapshot.rows.length,
+      });
+      const result = yield* executeGroupedQueryEffect(memorySnapshot.rows, memorySnapshot.query, {
         literalStringFields,
         chunkSize: groupedRefreshChunkSize,
       });
+      return { snapshot: memorySnapshot, result };
     });
+
+    function captureGroupedRefreshMemorySnapshot(
+      snapshot: GroupedRefreshSnapshot,
+    ): Effect.Effect<GroupedRefreshMemorySnapshot | undefined> {
+      return Effect.sync(() => {
+        const requestIds = snapshot.requestIds.filter((requestId) => {
+          const subscription = subscriptions.get(requestId);
+          return (
+            subscription !== undefined &&
+            isGroupedQuery(subscription.query) &&
+            subscriptions.dirtyTargetVersion(subscription) !== undefined
+          );
+        });
+        if (requestIds.length === 0) {
+          return undefined;
+        }
+        return {
+          ...snapshot,
+          requestId: requestIds[0] ?? snapshot.requestId,
+          requestIds,
+          rows: mutationStore.rows().slice(),
+          version: mutationStore.version(),
+        };
+      });
+    }
 
     function installGroupedRefresh(
       snapshot: GroupedRefreshSnapshot,

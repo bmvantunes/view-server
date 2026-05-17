@@ -9,8 +9,11 @@ export type GroupedRefreshSnapshot = {
   readonly requestId: string;
   readonly requestIds: readonly string[];
   readonly query: RuntimeGroupedQuery;
-  readonly rows: readonly RuntimeRow[];
   readonly version: WorkerVersion;
+};
+
+export type GroupedRefreshMemorySnapshot = GroupedRefreshSnapshot & {
+  readonly rows: readonly RuntimeRow[];
 };
 
 export type GroupedRefreshInstall = {
@@ -82,7 +85,6 @@ export class GroupedRefreshCoordinator {
   begin(args: {
     readonly key: string;
     readonly subscriptions: { readonly get: (requestId: string) => ActiveSubscription | undefined };
-    readonly rows: readonly RuntimeRow[];
     readonly version: WorkerVersion;
   }): GroupedRefreshSnapshot | undefined {
     const entry = this.#entries.get(args.key);
@@ -116,7 +118,6 @@ export class GroupedRefreshCoordinator {
       requestId: requestIds[0] ?? entry.key,
       requestIds,
       query: entry.query,
-      rows: args.rows,
       version: args.version,
     };
   }
