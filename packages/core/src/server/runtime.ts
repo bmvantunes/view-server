@@ -9,7 +9,7 @@ import {
   type ViewServerConfig,
   VIEW_SERVER_HEALTH_TOPIC,
 } from "../config/index.ts";
-import { invalidConfig, missingTopic, type ViewServerError } from "../errors.ts";
+import { invalidConfig, type ViewServerError } from "../errors.ts";
 import type {
   QueryResponse,
   RuntimeQuery,
@@ -24,6 +24,7 @@ import {
   type HealthResponse,
   type RuntimeHealthProjectionTopicInput,
 } from "./runtime-health-projection.ts";
+import { makeRuntimeOperations } from "./runtime-operations.ts";
 import { RuntimeShutdownController } from "./runtime-shutdown-controller.ts";
 import {
   createRuntimeSourceGraph,
@@ -112,17 +113,6 @@ function makeViewServerRuntimeInternal(
     const authPolicy = options.authPolicy ?? defaultAuthPolicy(normalized);
     const shutdownController = new RuntimeShutdownController();
 
-    const workerFor = (topic: string) => {
-      const worker = workers.get(topic);
-      return worker === undefined ? Effect.fail(missingTopic(topic)) : Effect.succeed(worker);
-    };
-
-    const ensureRuntimeOpen = (
-      operation: "query" | "subscribe" | "publish" | "delta-publish" | "delete",
-      topic: string,
-      requestId?: string,
-    ) => shutdownController.ensureOpen(operation, topic, requestId);
-
     const collectHealth = Effect.fn("view-server.runtime.health")(function* () {
       const topics: Record<string, RuntimeHealthProjectionTopicInput> = {};
       for (const [topic, worker] of workers) {
@@ -151,159 +141,14 @@ function makeViewServerRuntimeInternal(
 
     const syncHealthTopicIgnoringErrors = syncHealthTopic().pipe(Effect.ignore);
 
-    const publishWithTransportUntraced = Effect.fnUntraced(function* (
-      topic: string,
-      row: unknown,
-      transport: "rpc" | "testing" | "internal",
-    ) {
-      yield* ensureRuntimeOpen("publish", topic);
-      yield* authPolicy.canPublishTopic({ topic, operation: "publish", payload: row, transport });
-      const worker = yield* workerFor(topic);
-      yield* worker.publish(row);
-      if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
-        yield* syncHealthTopic();
-      }
-    });
-
-    const publishWithTransport = (
-      topic: string,
-      row: unknown,
-      transport: "rpc" | "testing" | "internal",
-    ) =>
-      transport === "internal"
-        ? publishWithTransportUntraced(topic, row, transport)
-        : Effect.fn("view-server.runtime.publish")(function* () {
-            yield* Effect.annotateCurrentSpan({
-              "view_server.topic": topic,
-            });
-            return yield* publishWithTransportUntraced(topic, row, transport);
-          })();
-
-    const deltaPublishWithTransportUntraced = Effect.fnUntraced(function* (
-      topic: string,
-      patch: RuntimeRow,
-      transport: "rpc" | "testing" | "internal",
-    ) {
-      yield* ensureRuntimeOpen("delta-publish", topic);
-      yield* authPolicy.canPublishTopic({
-        topic,
-        operation: "delta-publish",
-        payload: patch,
-        transport,
-      });
-      const worker = yield* workerFor(topic);
-      yield* worker.deltaPublish(patch);
-      if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
-        yield* syncHealthTopic();
-      }
-    });
-
-    const deltaPublishWithTransport = (
-      topic: string,
-      patch: RuntimeRow,
-      transport: "rpc" | "testing" | "internal",
-    ) =>
-      transport === "internal"
-        ? deltaPublishWithTransportUntraced(topic, patch, transport)
-        : Effect.fn("view-server.runtime.delta_publish")(function* () {
-            yield* Effect.annotateCurrentSpan({
-              "view_server.topic": topic,
-            });
-            return yield* deltaPublishWithTransportUntraced(topic, patch, transport);
-          })();
-
-    const deleteByIdWithTransportUntraced = Effect.fnUntraced(function* (
-      topic: string,
-      id: string | number,
-      transport: "rpc" | "testing" | "internal",
-    ) {
-      yield* ensureRuntimeOpen("delete", topic);
-      yield* authPolicy.canPublishTopic({ topic, operation: "delete", payload: id, transport });
-      const worker = yield* workerFor(topic);
-      yield* worker.deleteById(id);
-      if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
-        yield* syncHealthTopic();
-      }
-    });
-
-    const deleteByIdWithTransport = (
-      topic: string,
-      id: string | number,
-      transport: "rpc" | "testing" | "internal",
-    ) =>
-      transport === "internal"
-        ? deleteByIdWithTransportUntraced(topic, id, transport)
-        : Effect.fn("view-server.runtime.delete")(function* () {
-            yield* Effect.annotateCurrentSpan({
-              "view_server.topic": topic,
-            });
-            return yield* deleteByIdWithTransportUntraced(topic, id, transport);
-          })();
-
-    const queryRuntime = Effect.fn("view-server.runtime.query")(function* (
-      topic: string,
-      query: RuntimeQuery,
-    ) {
-      yield* Effect.annotateCurrentSpan({
-        "view_server.topic": topic,
-      });
-      yield* ensureRuntimeOpen("query", topic);
-      yield* authPolicy.canReadTopic({ topic, operation: "query" });
-      const guardedQuery = yield* queryLimitPolicy.validate(
-        topic,
-        query,
-        columnCatalogs.get(topic),
-      );
-      yield* authPolicy.canReadTopic({ topic, operation: "query", payload: guardedQuery });
-      if (topic === VIEW_SERVER_HEALTH_TOPIC) {
-        yield* syncHealthTopicIgnoringErrors;
-      }
-      const worker = yield* workerFor(topic);
-      const response = yield* worker.query(guardedQuery);
-      yield* Effect.annotateCurrentSpan({
-        "view_server.rows": response.rows.length,
-        "view_server.total_rows": response.totalRows,
-        "view_server.worker_version": response.version,
-      });
-      return response;
-    });
-
-    const subscribeRuntime = Effect.fn("view-server.runtime.subscribe")(function* (
-      requestId: string,
-      topic: string,
-      query: RuntimeQuery,
-    ) {
-      yield* Effect.annotateCurrentSpan({
-        "view_server.request_id": requestId,
-        "view_server.subscription_id": requestId,
-        "view_server.topic": topic,
-      });
-      yield* ensureRuntimeOpen("subscribe", topic, requestId);
-      yield* authPolicy.canSubscribe({ topic, requestId });
-      const guardedQuery = yield* queryLimitPolicy.validate(
-        topic,
-        query,
-        columnCatalogs.get(topic),
-      );
-      yield* authPolicy.canSubscribe({ topic, requestId, payload: guardedQuery });
-      const worker = yield* workerFor(topic);
-      return worker.subscribe(requestId, guardedQuery).pipe(
-        Stream.onFirst(() => syncHealthTopicIgnoringErrors),
-        Stream.ensuring(syncHealthTopicIgnoringErrors),
-      );
-    });
-
-    const unsubscribeRuntime = Effect.fn("view-server.runtime.unsubscribe")(function* (
-      requestId: string,
-    ) {
-      yield* Effect.annotateCurrentSpan({
-        "view_server.request_id": requestId,
-        "view_server.subscription_id": requestId,
-      });
-      yield* Effect.forEach(workers.values(), (worker) => worker.unsubscribe(requestId), {
-        discard: true,
-      });
-      yield* syncHealthTopicIgnoringErrors;
+    const operations = makeRuntimeOperations({
+      workers,
+      columnCatalogs,
+      authPolicy,
+      queryLimitPolicy,
+      shutdownController,
+      syncHealthTopic: syncHealthTopic(),
+      syncHealthTopicIgnoringErrors,
     });
 
     const closeRuntime = Effect.fn("view-server.runtime.close")(function* () {
@@ -317,18 +162,18 @@ function makeViewServerRuntimeInternal(
     const runtime: ViewServerRuntimeShape = {
       config: normalized,
 
-      query: queryRuntime,
+      query: operations.query,
 
       subscribe: (requestId, topic, query) =>
-        Stream.unwrap(subscribeRuntime(requestId, topic, query)),
+        Stream.unwrap(operations.subscribe(requestId, topic, query)),
 
-      unsubscribe: unsubscribeRuntime,
+      unsubscribe: operations.unsubscribe,
 
-      publish: (topic, row) => publishWithTransport(topic, row, "rpc"),
+      publish: (topic, row) => operations.publishWithTransport(topic, row, "rpc"),
 
-      deltaPublish: (topic, patch) => deltaPublishWithTransport(topic, patch, "rpc"),
+      deltaPublish: (topic, patch) => operations.deltaPublishWithTransport(topic, patch, "rpc"),
 
-      deleteById: (topic, id) => deleteByIdWithTransport(topic, id, "rpc"),
+      deleteById: (topic, id) => operations.deleteByIdWithTransport(topic, id, "rpc"),
 
       health: collectHealth(),
 
@@ -337,9 +182,10 @@ function makeViewServerRuntimeInternal(
 
     yield* syncHealthTopic();
     yield* sourceSupervisor.start({
-      publish: (topic, row) => publishWithTransport(topic, row, "internal"),
-      deltaPublish: (topic, patch) => deltaPublishWithTransport(topic, patch, "internal"),
-      deleteById: (topic, id) => deleteByIdWithTransport(topic, id, "internal"),
+      publish: (topic, row) => operations.publishWithTransport(topic, row, "internal"),
+      deltaPublish: (topic, patch) =>
+        operations.deltaPublishWithTransport(topic, patch, "internal"),
+      deleteById: (topic, id) => operations.deleteByIdWithTransport(topic, id, "internal"),
       syncHealth: syncHealthTopicIgnoringErrors,
     });
 
