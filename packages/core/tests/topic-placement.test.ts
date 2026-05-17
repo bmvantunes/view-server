@@ -3,8 +3,11 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { defineConfig, normalizeConfig, VIEW_SERVER_HEALTH_TOPIC } from "../src/config/index.ts";
-import { createMemorySnapshotBackend, type SnapshotBackend } from "../src/snapshot/index.ts";
-import { makeViewServerRuntime } from "../src/server/index.ts";
+import {
+  createMemorySnapshotBackend,
+  type SnapshotBackend,
+} from "../src/snapshot/snapshot-backend.ts";
+import { makeInternalTestingViewServerRuntime } from "../src/server/index.ts";
 import { createTopicPlacements } from "../src/server/topic-placement.ts";
 import type {
   TopicWorkerHost,
@@ -76,7 +79,7 @@ describe("TopicPlacement", () => {
     Effect.gen(function* () {
       const workerBackends = new Map<string, SnapshotBackend | undefined>();
 
-      const runtime = yield* makeViewServerRuntime(config, {
+      const runtime = yield* makeInternalTestingViewServerRuntime(config, {
         __testingSnapshotBackendFactory: () => createMemorySnapshotBackend(),
         topicWorkerFactory: (topic, _topicConfig, options) =>
           Effect.sync(() => {

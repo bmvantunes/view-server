@@ -45,6 +45,7 @@ const publicPackages = [
       "./client",
       "./config",
       "./errors",
+      "./internal/testing",
       "./kafka",
       "./kafka/platformatic",
       "./query",
@@ -103,7 +104,25 @@ describe("release package audit", () => {
       expect(Object.keys(corePackage.exports)).not.toContain("./worker");
       expect(Object.keys(corePackage.exports)).not.toContain("./worker/core");
       expect(Object.keys(corePackage.exports)).not.toContain("./snapshot/chdb-query-worker-entry");
+      expect(Object.keys(corePackage.exports)).not.toContain("./snapshot/snapshot-backend");
       expect(Object.keys(corePackage.exports)).not.toContain("./testing");
+    }),
+  );
+
+  it.effect("keeps memory snapshot backend behind the internal testing seam", () =>
+    Effect.gen(function* () {
+      const coreSnapshotEntry = yield* readSources(["packages/core/src/snapshot.ts"]);
+      const internalSnapshotBarrel = yield* readSources(["packages/core/src/snapshot/index.ts"]);
+      const nodeWorkerHost = yield* readSources([
+        "packages/core/src/worker/topic-worker-node-host.ts",
+      ]);
+      const runtimePublicEntry = yield* readSources(["packages/core/src/runtime.ts"]);
+
+      expect(coreSnapshotEntry).not.toContain("createMemorySnapshotBackend");
+      expect(internalSnapshotBarrel).not.toContain("createMemorySnapshotBackend");
+      expect(nodeWorkerHost).not.toContain("TopicWorkerSnapshotBackendMode");
+      expect(nodeWorkerHost).not.toContain("snapshotBackend?");
+      expect(runtimePublicEntry).not.toContain("makeInternalTestingViewServerRuntime");
     }),
   );
 

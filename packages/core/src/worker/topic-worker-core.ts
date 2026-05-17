@@ -28,8 +28,7 @@ import type {
 } from "../protocol/index.ts";
 import { makeRowKey } from "../protocol/row-key.ts";
 import { isStableKey } from "../protocol/stable-key.ts";
-import type { SnapshotBackend } from "../snapshot/index.ts";
-import { createMemorySnapshotBackend } from "../snapshot/index.ts";
+import { createMemorySnapshotBackend, type SnapshotBackend } from "../snapshot/snapshot-backend.ts";
 import {
   estimateActiveRawPlanIndexBytesEffect,
   makeActiveRawPlanEffect,

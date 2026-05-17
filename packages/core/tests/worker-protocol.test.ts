@@ -29,8 +29,6 @@ describe("WorkerProtocol", () => {
     expect(() =>
       decodeInitial({
         configModuleUrl: "file:///view-server.config.ts",
-        topic: "orders",
-        snapshotBackend: "sqlite",
       }),
     ).toThrow();
     expect(() => decodeDelete({ id: { nested: "not-a-stable-key" } })).toThrow();

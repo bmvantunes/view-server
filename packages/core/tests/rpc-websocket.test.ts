@@ -19,7 +19,10 @@ import { backpressureExceeded, transportError, type ViewServerError } from "../s
 import type { RawQuery, RuntimeRow, SubscriptionEvent } from "../src/protocol/index.ts";
 import { ViewServerRpcs } from "../src/rpc/index.ts";
 import { layerViewServerWebsocketServer, makeNodeWebsocketClient } from "../src/rpc/websocket.ts";
-import { layerViewServerRuntime } from "../src/server/index.ts";
+import {
+  layerInternalTestingViewServerRuntime,
+  layerViewServerRuntime,
+} from "../src/server/index.ts";
 import { createChdbSnapshotBackendFactory } from "../src/snapshot/chdb-backend.ts";
 import { makeInProcessTopicWorkerHost, type TopicWorkerHost } from "../src/worker/index.ts";
 
@@ -1201,7 +1204,7 @@ describe("Effect RPC websocket", () => {
     Effect.gen(function* () {
       const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
         Layer.provide(
-          layerViewServerRuntime(chdbConfig, {
+          layerInternalTestingViewServerRuntime(chdbConfig, {
             __testingSnapshotBackendFactory: createChdbSnapshotBackendFactory(),
             initialRows: {
               orders: [

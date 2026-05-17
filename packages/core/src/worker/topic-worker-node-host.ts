@@ -23,13 +23,9 @@ import {
 } from "./worker-protocol.ts";
 import type { TopicWorkerHost, TopicWorkerHostFactory } from "./topic-worker-host.ts";
 
-export type TopicWorkerSnapshotBackendMode = "memory" | "chdb";
-
 export type NodeThreadTopicWorkerHostFactoryOptions = {
   readonly configModuleUrl: string | URL;
   readonly workerEntryUrl?: string | URL | undefined;
-  /** @internal Test-only override. Production node workers use chDB. */
-  readonly snapshotBackend?: TopicWorkerSnapshotBackendMode | undefined;
   readonly rpcConcurrency?: number | undefined;
   readonly workerNamePrefix?: string | undefined;
   readonly workerOptions?: Omit<WorkerOptions, "name" | "execArgv" | "workerData"> | undefined;
@@ -45,7 +41,6 @@ export const makeNodeThreadTopicWorkerHostFactory = (
   options: NodeThreadTopicWorkerHostFactoryOptions,
 ): TopicWorkerHostFactory => {
   const configModuleUrl = toImportUrl(options.configModuleUrl);
-  const snapshotBackend = options.snapshotBackend ?? "chdb";
   const rpcConcurrency = options.rpcConcurrency ?? 64;
   const workerNamePrefix = options.workerNamePrefix ?? "view-server-topic";
   return (topic, config, hostOptions) =>
@@ -85,7 +80,6 @@ export const makeNodeThreadTopicWorkerHostFactory = (
         ...(hostOptions.groupedRefreshDebounceMs === undefined
           ? {}
           : { groupedRefreshDebounceMs: hostOptions.groupedRefreshDebounceMs }),
-        snapshotBackend,
       };
       const layer = RpcClient.layerProtocolWorker({ size: 1, concurrency: rpcConcurrency }).pipe(
         Layer.provide(

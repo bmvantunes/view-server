@@ -24,6 +24,10 @@
       "types": "./dist/errors.d.mts",
       "import": "./dist/errors.mjs"
     },
+    "./internal/testing": {
+      "types": "./dist/internal/testing.d.mts",
+      "import": "./dist/internal/testing.mjs"
+    },
     "./kafka": {
       "types": "./dist/kafka.d.mts",
       "import": "./dist/kafka.mjs"

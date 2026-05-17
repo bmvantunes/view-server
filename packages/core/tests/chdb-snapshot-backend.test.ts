@@ -10,7 +10,11 @@ import { snapshotBackendFailed, type ViewServerError } from "../src/errors.ts";
 import type { RuntimeQuery, RuntimeRow } from "../src/protocol/index.ts";
 import { createChdbSnapshotBackend } from "../src/snapshot/chdb-backend.ts";
 import type { SnapshotBackend, SnapshotBackendHealth } from "../src/snapshot/index.ts";
-import { makeViewServerRuntime, type HealthResponse } from "../src/server/index.ts";
+import {
+  makeInternalTestingViewServerRuntime,
+  makeViewServerRuntime,
+  type HealthResponse,
+} from "../src/server/index.ts";
 import { makeTopicWorkerCore } from "../src/worker/index.ts";
 import type { MutationLogEntry, WorkerVersion } from "../src/worker/mutation-log.ts";
 
@@ -779,7 +783,7 @@ describe("chDB snapshot backend", () => {
         },
       });
 
-      const error = yield* makeViewServerRuntime(config, {
+      const error = yield* makeInternalTestingViewServerRuntime(config, {
         __testingSnapshotBackendFactory: () => failingInitBackend(),
       }).pipe(Effect.flip);
 
@@ -790,7 +794,7 @@ describe("chDB snapshot backend", () => {
   it.effect("reports degraded runtime health when the chDB child process exits unexpectedly", () =>
     Effect.gen(function* () {
       let childPid: number | undefined;
-      const runtime = yield* makeViewServerRuntime(
+      const runtime = yield* makeInternalTestingViewServerRuntime(
         defineConfig({
           topics: {
             orders: {
@@ -836,7 +840,7 @@ describe("chDB snapshot backend", () => {
   it.effect("mirrors ready chDB child health in runtime health and the health topic", () =>
     Effect.gen(function* () {
       let childPid: number | undefined;
-      const runtime = yield* makeViewServerRuntime(
+      const runtime = yield* makeInternalTestingViewServerRuntime(
         defineConfig({
           topics: {
             orders: {
@@ -891,7 +895,7 @@ describe("chDB snapshot backend", () => {
   it.effect("keeps chDB child failure isolated to its owning topic", () =>
     Effect.gen(function* () {
       const childPids = new Map<string, number>();
-      const runtime = yield* makeViewServerRuntime(
+      const runtime = yield* makeInternalTestingViewServerRuntime(
         defineConfig({
           topics: {
             orders: {

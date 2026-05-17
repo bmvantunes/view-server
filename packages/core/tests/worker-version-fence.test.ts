@@ -8,7 +8,7 @@ import {
   createMemorySnapshotBackend,
   type SnapshotBackend,
   type SnapshotBackendResult,
-} from "../src/snapshot/index.ts";
+} from "../src/snapshot/snapshot-backend.ts";
 import type { RuntimeQuery } from "../src/protocol/index.ts";
 import { makeTopicWorkerCore } from "../src/worker/index.ts";
 

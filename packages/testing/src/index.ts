@@ -24,11 +24,8 @@ import type {
   RuntimeRow,
   SubscriptionEvent,
 } from "@view-server/core/query";
-import {
-  makeViewServerRuntime,
-  type HealthResponse,
-  type ViewServerRuntimeShape,
-} from "@view-server/core/runtime";
+import { type HealthResponse, type ViewServerRuntimeShape } from "@view-server/core/runtime";
+import { makeInternalTestingViewServerRuntime } from "@view-server/core/internal/testing";
 import {
   fromWireRow,
   ViewServerRpcs,
@@ -169,7 +166,7 @@ export function inMemoryViewServer<const TConfig extends ViewServerConfig>(
   options: InMemoryViewServerOptions<TConfig> = {},
 ): Effect.Effect<InMemoryViewServer<TConfig>, ViewServerError, import("effect/Scope").Scope> {
   return Effect.fn("view-server.testing.in_memory.make")(function* () {
-    const runtime = yield* makeViewServerRuntime(config, {
+    const runtime = yield* makeInternalTestingViewServerRuntime(config, {
       initialRows: normalizeInitialRows(options.initialRows),
       __testingUseMemorySnapshotBackend: true,
     });
@@ -206,7 +203,7 @@ export function isolatedInMemoryViewServer<const TConfig extends ViewServerConfi
 > {
   return Effect.fn("view-server.testing.in_memory.isolated.make")(function* () {
     const isolationId = validateTestingIsolationId(options.isolationId);
-    const runtime = yield* makeViewServerRuntime(config, {
+    const runtime = yield* makeInternalTestingViewServerRuntime(config, {
       initialRows: normalizeTestingInitialRows(options.initialRows, isolationId),
       __testingUseMemorySnapshotBackend: true,
     });

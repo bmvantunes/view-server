@@ -16,9 +16,13 @@ import {
 import type { GroupedQuery, RawQuery, RuntimeFilterNode } from "../src/protocol/index.ts";
 import {
   loadViewServerProductionConfigFromEnv,
+  makeInternalTestingViewServerRuntime,
   makeViewServerRuntime,
 } from "../src/server/index.ts";
-import { createMemorySnapshotBackend, type SnapshotBackend } from "../src/snapshot/index.ts";
+import {
+  createMemorySnapshotBackend,
+  type SnapshotBackend,
+} from "../src/snapshot/snapshot-backend.ts";
 import { makeTopicWorkerCore } from "../src/worker/index.ts";
 
 const Order = Schema.Struct({
@@ -399,7 +403,7 @@ describe("production readiness", () => {
         const refreshStarted = yield* Deferred.make<void>();
         const releaseRefresh = yield* Deferred.make<void>();
         const backend = blockingGroupedRefreshBackend(refreshStarted, releaseRefresh);
-        const runtime = yield* makeViewServerRuntime(groupedShutdownConfig, {
+        const runtime = yield* makeInternalTestingViewServerRuntime(groupedShutdownConfig, {
           initialRows: {
             orders: Array.from({ length: 500 }, (_, index) => orderRow(index)),
           },

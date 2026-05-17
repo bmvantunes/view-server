@@ -39,7 +39,6 @@ export const TopicWorkerInitialMessage = Schema.Struct({
   activePlanAutoBuildMaxRows: Schema.optional(Schema.Number),
   activePlanBuildConcurrency: Schema.optional(Schema.Number),
   groupedRefreshDebounceMs: Schema.optional(Schema.Number),
-  snapshotBackend: Schema.optional(Schema.Literals(["memory", "chdb"])),
 });
 
 export const TopicWorkerSubscribePayload = Schema.Struct({

@@ -55,13 +55,44 @@ export class ViewServerRuntime extends Context.Service<ViewServerRuntime, ViewSe
   "@view-server/core/ViewServerRuntime",
 ) {}
 
-export type ViewServerRuntimeOptions = RuntimeSourceGraphOptions & {
+type InternalViewServerRuntimeOptions = RuntimeSourceGraphOptions & {
+  readonly authPolicy?: AuthPolicy | undefined;
+};
+
+export type ViewServerRuntimeOptions = Omit<
+  RuntimeSourceGraphOptions,
+  | "__testingSnapshotBackends"
+  | "__testingSnapshotBackendFactory"
+  | "__testingUseMemorySnapshotBackend"
+> & {
   readonly authPolicy?: AuthPolicy | undefined;
 };
 
 export function makeViewServerRuntime(
   config: ViewServerConfig,
   options: ViewServerRuntimeOptions = {},
+): Effect.Effect<ViewServerRuntimeShape, ViewServerError, import("effect/Scope").Scope> {
+  return makeViewServerRuntimeInternal(config, options);
+}
+
+export type InternalTestingViewServerRuntimeOptions = InternalViewServerRuntimeOptions;
+
+export function makeInternalTestingViewServerRuntime(
+  config: ViewServerConfig,
+  options: InternalTestingViewServerRuntimeOptions = {},
+): Effect.Effect<ViewServerRuntimeShape, ViewServerError, import("effect/Scope").Scope> {
+  return makeViewServerRuntimeInternal(config, options);
+}
+
+export const layerInternalTestingViewServerRuntime = (
+  config: ViewServerConfig,
+  options?: InternalTestingViewServerRuntimeOptions,
+): Layer.Layer<ViewServerRuntime, ViewServerError> =>
+  Layer.effect(ViewServerRuntime, makeInternalTestingViewServerRuntime(config, options));
+
+function makeViewServerRuntimeInternal(
+  config: ViewServerConfig,
+  options: InternalViewServerRuntimeOptions,
 ): Effect.Effect<ViewServerRuntimeShape, ViewServerError, import("effect/Scope").Scope> {
   return Effect.fn("view-server.runtime.make")(function* () {
     const normalized = yield* Effect.try({

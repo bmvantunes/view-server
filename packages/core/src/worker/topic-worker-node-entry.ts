@@ -10,19 +10,16 @@ import {
   type NormalizedViewServerConfig,
   normalizeConfig,
   readViewServerConfigExport,
-  type TopicConfig,
   type ViewServerConfig,
 } from "../config/index.ts";
 import { missingTopic, schemaDecodeFailed, type ViewServerError } from "../errors.ts";
 import { toWireRow, wireQueryResponse, wireSubscriptionEvent } from "../rpc/index.ts";
 import { createChdbSnapshotBackend } from "../snapshot/chdb-backend.ts";
-import { createMemorySnapshotBackend, type SnapshotBackend } from "../snapshot/index.ts";
 import { makeTopicWorkerCore } from "./topic-worker-core.ts";
 import {
   TopicWorkerInitialMessage,
   TopicWorkerRpcs,
   encodeTopicWorkerMetrics,
-  type TopicWorkerInitialMessage as TopicWorkerInitialMessageType,
 } from "./worker-protocol.ts";
 
 const TopicWorkerHandlersLive = TopicWorkerRpcs.toLayer(
@@ -49,7 +46,7 @@ const TopicWorkerHandlersLive = TopicWorkerRpcs.toLayer(
       activePlanAutoBuildMaxRows: initialMessage.activePlanAutoBuildMaxRows,
       activePlanBuildConcurrency: initialMessage.activePlanBuildConcurrency,
       groupedRefreshDebounceMs: initialMessage.groupedRefreshDebounceMs,
-      snapshotBackend: makeSnapshotBackend(initialMessage, topicConfig),
+      snapshotBackend: createChdbSnapshotBackend(),
     });
 
     return TopicWorkerRpcs.of({
@@ -128,17 +125,6 @@ Effect.runFork(
     ),
   ),
 );
-
-function makeSnapshotBackend(
-  initialMessage: TopicWorkerInitialMessageType,
-  _topicConfig: TopicConfig,
-): SnapshotBackend {
-  const mode = initialMessage.snapshotBackend ?? "chdb";
-  if (mode === "memory") {
-    return createMemorySnapshotBackend();
-  }
-  return createChdbSnapshotBackend();
-}
 
 function loadConfig(
   configModuleUrl: string,

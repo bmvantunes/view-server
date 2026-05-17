@@ -38,11 +38,15 @@ import type {
 } from "../src/protocol/index.ts";
 import { layerViewServerWebsocketServer, makeNodeWebsocketClient } from "../src/rpc/websocket.ts";
 import {
+  makeInternalTestingViewServerRuntime,
   layerViewServerRuntime,
   makeViewServerRuntime,
   type HealthResponse,
 } from "../src/server/index.ts";
-import { createMemorySnapshotBackend, type SnapshotBackend } from "../src/snapshot/index.ts";
+import {
+  createMemorySnapshotBackend,
+  type SnapshotBackend,
+} from "../src/snapshot/snapshot-backend.ts";
 import {
   makeTopicWorkerCore,
   type TopicWorkerCore,
@@ -241,7 +245,7 @@ describe("fault injection", () => {
         backend.failSnapshots = 1;
         backend.failApplyBatches = 1;
         backend.failGroupedRefreshes = 1;
-        const runtime = yield* makeViewServerRuntime(
+        const runtime = yield* makeInternalTestingViewServerRuntime(
           defineConfig({
             worker: {
               groupedRefreshDebounceMs: 0,

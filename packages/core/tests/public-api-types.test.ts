@@ -2,10 +2,11 @@ import { describe, expect, it } from "@effect/vitest";
 import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { defineConfig, type TopicName } from "@view-server/core/config";
+import { defineConfig, type TopicConfig, type TopicName } from "@view-server/core/config";
 import type { GroupedQuery, InferQueryResult, RawQuery } from "@view-server/core/query";
 import type { LiveQueryInitialData, ViewServerClient } from "@view-server/core/client";
 import type { ViewServerError } from "@view-server/core/errors";
+import { makeViewServerRuntime } from "@view-server/core/runtime";
 
 const Order = Schema.Struct({
   id: Schema.String,
@@ -201,9 +202,30 @@ function invalidQuerySamples() {
   } satisfies GroupedQuery<OrderRow>).toBeDefined();
 }
 
+function invalidRuntimeSamples() {
+  const _invalidSnapshotBackend = {
+    id: "id",
+    schema: Order,
+    snapshot: {
+      flushBatchSize: 100,
+      // @ts-expect-error production config cannot select a memory backend.
+      backend: "memory",
+    },
+  } satisfies TopicConfig<OrderRow, "id">;
+  expect(_invalidSnapshotBackend).toBeDefined();
+
+  expect(
+    makeViewServerRuntime(config, {
+      // @ts-expect-error testing memory backend is not part of public runtime options.
+      __testingUseMemorySnapshotBackend: true,
+    }),
+  ).toBeDefined();
+}
+
 describe("public API type contracts", () => {
   it("keeps config-derived client and query types strict", () => {
     expect(typeof typedClientSamples).toBe("function");
     expect(typeof invalidQuerySamples).toBe("function");
+    expect(typeof invalidRuntimeSamples).toBe("function");
   });
 });
