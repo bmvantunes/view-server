@@ -32,6 +32,17 @@ counts, final health, chDB pending request count, queue depth, subscription lag,
 cleanup state. Keep this out of normal PR CI at large sizes; the default test already exercises the
 transport lifecycle without turning every push into a capacity run.
 
+Latest local runtime websocket soak results, May 17 2026:
+
+| profile |   rows | websocket clients | raw/grouped | mutations | reconnects | duration | mutation p50/p95/p99/max        | events                                      | cleanup                                                          |
+| ------- | -----: | ----------------: | ----------: | --------: | ---------: | -------: | ------------------------------- | ------------------------------------------- | ---------------------------------------------------------------- |
+| default |    500 |                15 |        12/3 |       120 |         10 |    1.07s | 3.01 / 10.88 / 24.53 / 30.43ms  | 25 snapshots, 854 deltas, 216 status        | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+| manual  | 10,000 |               100 |       80/20 |     1,000 |         50 |   13.78s | 5.96 / 27.35 / 38.41 / 177.09ms | 150 snapshots, 47,990 deltas, 12,000 status | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+
+Both runs reported `retries=0`, `backpressureErrors=0`, and `chdbBackendVersionBeforeCleanup`
+matching the worker version. The manual profile intentionally leaves grouped subscriptions stale
+before cleanup while refreshes are advisory; after unsubscribe, lag and queues must return to zero.
+
 ## 10M Raw Worker Soak
 
 Run this before a serious production rollout, after the normal RC checklist is green:

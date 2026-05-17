@@ -112,9 +112,8 @@ export class ChdbProcessClient {
             return;
           }
           this.#pending.set(request.id, { resolve, reject });
-          let sent = false;
           try {
-            sent = this.#worker.send(request, (error) => {
+            this.#worker.send(request, (error) => {
               if (error === null) {
                 return;
               }
@@ -128,11 +127,6 @@ export class ChdbProcessClient {
           } catch (error) {
             this.#pending.delete(request.id);
             reject(error);
-            return;
-          }
-          if (!sent) {
-            this.#pending.delete(request.id);
-            reject(new Error("chDB worker IPC channel is not writable"));
             return;
           }
           this.#options.onWorkerRequest?.({ pid: this.#worker.pid, type: request.type });

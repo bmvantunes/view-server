@@ -97,7 +97,6 @@ describe("runtime websocket soak", () => {
           const clients: SoakClient[] = [];
           let activeClients: SoakClient[] = [];
           let reconnects = 0;
-          let retries = 0;
           let nextId = shape.rows;
           let deleteCursor = 0;
           const mutationLatenciesMs: number[] = [];
@@ -175,7 +174,6 @@ describe("runtime websocket soak", () => {
             expect(
               client.requestIds.every((requestId) => requestId === client.subscription.requestId),
             ).toBe(true);
-            retries += client.lifecycle.retries;
           }
 
           const cleanupStartedAt = performance.now();
@@ -207,6 +205,7 @@ describe("runtime websocket soak", () => {
           expect(released.topics.orders?.activePlanIndexEstimatedBytes).toBe(0);
 
           const events = totalEvents(clients);
+          const lifecycle = totalLifecycle(clients);
           expect(events.snapshots).toBeGreaterThanOrEqual(descriptors.length + reconnects);
           expect(events.deltas + events.status).toBeGreaterThan(0);
 
@@ -242,7 +241,8 @@ describe("runtime websocket soak", () => {
             chdbStatusAfterCleanup: released.topics.orders?.chdbStatus ?? "stopped",
             chdbPendingRequestsAfterCleanup: released.topics.orders?.chdbPendingRequests ?? -1,
             events,
-            retries,
+            retries: lifecycle.retries,
+            backpressureErrors: lifecycle.backpressureErrors,
             reconnects,
           };
           yield* writeRuntimeWebsocketSoakSummary(summary);
@@ -291,6 +291,7 @@ type RuntimeWebsocketSoakSummary = {
   readonly chdbPendingRequestsAfterCleanup: number;
   readonly events: SoakEventCounts;
   readonly retries: number;
+  readonly backpressureErrors: number;
   readonly reconnects: number;
 };
 
@@ -318,6 +319,7 @@ type SoakClient = {
 type SoakLifecycleCounts = {
   attempts: number;
   retries: number;
+  backpressureErrors: number;
 };
 
 type SoakEventCounts = {
@@ -348,7 +350,7 @@ function connectSoakClient(
     const client = yield* makeNodeWebsocketClient(url, runtimeWebsocketSoakConfig);
     const firstSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
     const events: SoakEventCounts = eventCounts();
-    const lifecycle: SoakLifecycleCounts = { attempts: 0, retries: 0 };
+    const lifecycle: SoakLifecycleCounts = { attempts: 0, retries: 0, backpressureErrors: 0 };
     const requestIds: string[] = [];
     const subscription = yield* client.subscribe(
       "orders",
@@ -371,6 +373,9 @@ function connectSoakClient(
             return;
           }
           lifecycle.retries += 1;
+          if (event.error._tag === "BackpressureExceeded") {
+            lifecycle.backpressureErrors += 1;
+          }
         }),
     );
     const snapshot = yield* Deferred.await(firstSnapshot).pipe(
@@ -560,6 +565,17 @@ function totalEvents(clients: readonly SoakClient[]): SoakEventCounts {
       status: total.status + client.events.status,
     }),
     eventCounts(),
+  );
+}
+
+function totalLifecycle(clients: readonly SoakClient[]): SoakLifecycleCounts {
+  return clients.reduce(
+    (total, client) => ({
+      attempts: total.attempts + client.lifecycle.attempts,
+      retries: total.retries + client.lifecycle.retries,
+      backpressureErrors: total.backpressureErrors + client.lifecycle.backpressureErrors,
+    }),
+    { attempts: 0, retries: 0, backpressureErrors: 0 },
   );
 }
 

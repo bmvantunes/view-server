@@ -95,6 +95,7 @@ class WorkerChdbSnapshotBackend implements SnapshotBackend {
     return Effect.fnUntraced(function* (backend: WorkerChdbSnapshotBackend) {
       backend.#applyBatchToMirror(args);
       yield* backend.#supervisor.applyBatch(args);
+      backend.#knownBackendVersion = backend.#mirrorVersion;
     })(this);
   }
 

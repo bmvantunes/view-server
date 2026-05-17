@@ -301,8 +301,14 @@ describe("chDB snapshot backend", () => {
       });
       yield* flushChdb();
 
+      const healthEffect = backend.health;
+      if (healthEffect === undefined) {
+        return yield* Effect.die(new Error("Expected chDB backend health"));
+      }
+      const health = yield* healthEffect;
       const result = yield* backend.snapshot({ query: allOrdersQuery, targetVersion: 4n });
 
+      expect(health.backendVersion).toBe(4n);
       expect(result.backendVersion).toBe(4n);
       expect(result.replayRows).toBeUndefined();
       expect(result.totalRows).toBe(2);
