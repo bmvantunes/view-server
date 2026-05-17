@@ -10,9 +10,11 @@ import type { ViewServerError } from "../src/errors.ts";
 import type {
   GroupedQuery,
   RawQuery,
+  RuntimeMutation,
   RuntimeRow,
   SubscriptionEvent,
 } from "../src/protocol/index.ts";
+import type { SnapshotBackend } from "../src/snapshot/index.ts";
 import { makeTopicWorkerCore, type TopicWorkerMetrics } from "../src/worker/topic-worker-core.ts";
 import { RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT } from "../src/worker/query-engine.ts";
 import { planQuery } from "../src/worker/query-planner.ts";
@@ -89,6 +91,7 @@ describe("topic worker soak", () => {
         const workerSeedStartedAt = performance.now();
         const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
           initialRows,
+          snapshotBackend: soakSnapshotBackend(),
           activePlanAutoBuildMaxRows: shape.activePlanAutoBuildMaxRows,
           groupedRefreshDebounceMs: shape.groupedRefreshDebounceMs,
         });
@@ -204,45 +207,51 @@ describe("topic worker soak", () => {
         );
         const subscribedHeap = process.memoryUsage().heapUsed;
         const subscriptionSetupMs = performance.now() - subscriptionSetupStartedAt;
-        const liveIds = initialRows.map((row) => row.id);
         let nextId = shape.rows;
         let deleteCursor = 0;
         const mutationLatenciesMs: number[] = [];
         const mutationLoopStartedAt = performance.now();
+        let pendingMutations: RuntimeMutation[] = [];
+        const flushMutations = Effect.fnUntraced(function* () {
+          if (pendingMutations.length === 0) {
+            return;
+          }
+          const mutations = pendingMutations;
+          pendingMutations = [];
+          const mutationStartedAt = performance.now();
+          yield* worker.mutateBatch(mutations);
+          mutationLatenciesMs.push(performance.now() - mutationStartedAt);
+        });
 
         for (let index = 0; index < shape.mutations; index++) {
-          const mutationStartedAt = performance.now();
           const operation = index % 10;
           if (operation < 5) {
             const row = orderRow(nextId);
             nextId += 1;
-            liveIds.push(row.id);
-            yield* worker.publish(row);
+            pendingMutations.push({ type: "publish", row });
           } else if (operation < 8) {
-            const id = liveIds[(index * 17) % liveIds.length];
-            if (id !== undefined) {
-              yield* worker.deltaPublish({
-                id,
+            pendingMutations.push({
+              type: "delta-publish",
+              patch: {
+                id: stableDeltaId(shape, index),
                 price: (index % 1_000) + 10_000,
-              });
-            }
+              },
+            });
           } else {
-            const id = liveIds[deleteCursor % liveIds.length];
+            const id = stableDeleteId(deleteCursor);
             deleteCursor += 1;
-            if (id !== undefined) {
-              yield* worker.deleteById(id);
-              const removedIndex = liveIds.indexOf(id);
-              if (removedIndex >= 0) {
-                liveIds.splice(removedIndex, 1);
-              }
-            }
+            pendingMutations.push({ type: "delete", id });
           }
-          mutationLatenciesMs.push(performance.now() - mutationStartedAt);
+          if (pendingMutations.length >= shape.mutationBatchSize) {
+            yield* flushMutations();
+          }
           if ((index + 1) % 100 === 0) {
             const currentLatency = latencyStats(mutationLatenciesMs);
             yield* reportSoakProgress(progress, "mutating", {
               mutation: index + 1,
               mutations: shape.mutations,
+              mutationBatches: mutationLatenciesMs.length,
+              mutationBatchSize: shape.mutationBatchSize,
               mutationP50Ms: currentLatency.p50Ms,
               mutationP95Ms: currentLatency.p95Ms,
               mutationP99Ms: currentLatency.p99Ms,
@@ -251,6 +260,7 @@ describe("topic worker soak", () => {
             yield* Effect.yieldNow;
           }
         }
+        yield* flushMutations();
         const mutationLoopMs = performance.now() - mutationLoopStartedAt;
         const mutationLatency = latencyStats(mutationLatenciesMs);
         yield* reportSoakProgress(
@@ -258,6 +268,8 @@ describe("topic worker soak", () => {
           "mutations_complete",
           {
             mutations: shape.mutations,
+            mutationBatches: mutationLatenciesMs.length,
+            mutationBatchSize: shape.mutationBatchSize,
             mutationLoopMs: roundMs(mutationLoopMs),
             mutationP50Ms: mutationLatency.p50Ms,
             mutationP95Ms: mutationLatency.p95Ms,
@@ -357,6 +369,8 @@ describe("topic worker soak", () => {
           workerSeedMs: roundMs(workerSeedMs),
           subscriptionSetupMs: roundMs(subscriptionSetupMs),
           mutationLoopMs: roundMs(mutationLoopMs),
+          mutationBatchSize: shape.mutationBatchSize,
+          mutationBatches: mutationLatenciesMs.length,
           mutationAndSettleMs: Math.round(settledAt - startedAt),
           settleMs: roundMs(settleMs),
           cleanupMs: roundMs(cleanupMs),
@@ -413,6 +427,7 @@ type SoakShape = {
   readonly rawSubscriptions: number;
   readonly groupedSubscriptions: number;
   readonly mutations: number;
+  readonly mutationBatchSize: number;
   readonly rawPageCycle: number;
   readonly groupedRefreshDebounceMs: number;
   readonly activePlanAutoBuildMaxRows: number;
@@ -449,6 +464,8 @@ type SoakSummary = {
   readonly workerSeedMs: number;
   readonly subscriptionSetupMs: number;
   readonly mutationLoopMs: number;
+  readonly mutationBatchSize: number;
+  readonly mutationBatches: number;
   readonly mutationAndSettleMs: number;
   readonly settleMs: number;
   readonly cleanupMs: number;
@@ -566,6 +583,7 @@ function reportSoakProgress(
       rawSubscriptions: progress.shape.rawSubscriptions,
       groupedSubscriptions: progress.shape.groupedSubscriptions,
       mutations: progress.shape.mutations,
+      mutationBatchSize: progress.shape.mutationBatchSize,
       activePlanAutoBuildMaxRows: progress.shape.activePlanAutoBuildMaxRows,
       ...fields,
     };
@@ -700,6 +718,7 @@ function soakShape(): SoakShape {
     rawSubscriptions: envNumber("VS_WORKER_SOAK_RAW_SUBSCRIPTIONS", 25),
     groupedSubscriptions: envNumber("VS_WORKER_SOAK_GROUPED_SUBSCRIPTIONS", 3),
     mutations: envNumber("VS_WORKER_SOAK_MUTATIONS", 500),
+    mutationBatchSize: Math.max(1, envNumber("VS_WORKER_SOAK_MUTATION_BATCH_SIZE", 1)),
     rawPageCycle: envNumber("VS_WORKER_SOAK_RAW_PAGE_CYCLE", 10),
     groupedRefreshDebounceMs: envNumber("VS_WORKER_SOAK_GROUPED_DEBOUNCE_MS", 0),
     activePlanAutoBuildMaxRows: envNumber(
@@ -733,6 +752,29 @@ function orderRow(index: number): OrderRow {
     symbol: `SYM-${index % 100}`,
     price: index % 10_000,
   };
+}
+
+function soakSnapshotBackend(): SnapshotBackend {
+  return {
+    init: () => Effect.void,
+    applyBatch: () => Effect.void,
+    snapshot: () =>
+      Effect.succeed({
+        rows: [],
+        totalRows: 0,
+        backendVersion: -1n,
+      }),
+    close: () => Effect.void,
+  };
+}
+
+function stableDeltaId(shape: SoakShape, index: number): string {
+  const tailWindow = Math.max(1, Math.min(shape.rows, 100_000));
+  return `o-${Math.max(0, shape.rows - 1 - ((index * 17) % tailWindow))}`;
+}
+
+function stableDeleteId(deleteCursor: number): string {
+  return `o-${deleteCursor}`;
 }
 
 function waitForMetrics<E>(

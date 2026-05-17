@@ -18,6 +18,7 @@ The script runs `packages/core/tests/worker-soak.test.ts` with:
 - `VS_WORKER_SOAK_RAW_SUBSCRIPTIONS=250`
 - `VS_WORKER_SOAK_GROUPED_SUBSCRIPTIONS=0`
 - `VS_WORKER_SOAK_MUTATIONS=10000`
+- `VS_WORKER_SOAK_MUTATION_BATCH_SIZE=1000`
 - `VS_WORKER_SOAK_ACTIVE_PLAN_AUTO_BUILD_MAX_ROWS=1000000`
 - `node --expose-gc`
 - a JSON summary under `/private/tmp/view-server-worker-soak-10m-<timestamp>.json`
@@ -34,6 +35,10 @@ ${VS_WORKER_SOAK_SUMMARY_PATH}.progress.jsonl
 Each line includes the current phase, elapsed time, shape, and phase-specific counters. A healthy long run should emit progress for row generation, worker seed, subscriptions, mutation progress, settle, and cleanup at least every `VS_WORKER_SOAK_PROGRESS_INTERVAL_MS` milliseconds.
 
 The 10M profile intentionally uses the runtime active-plan admission policy. When a topic has more rows than `VS_WORKER_SOAK_ACTIVE_PLAN_AUTO_BUILD_MAX_ROWS`, raw subscriptions still receive their initial snapshot, but automatic active-plan construction is skipped and later mutations mark the view stale instead of building a 10M-row plan on subscription setup. The summary exposes `activePlanAutoBuildSkippedCountBeforeCleanup` so this is visible rather than hidden as a test-only switch.
+
+The direct worker soak disables the test-only memory snapshot accelerator so the hot mutation phase is not dominated by a duplicate in-process backend mirror scanning 10M rows. Production runtime still requires chDB; validate chDB ingestion and grouped refresh with the dedicated chDB benchmarks below.
+
+When `VS_WORKER_SOAK_MUTATION_BATCH_SIZE > 1`, mutation latency fields are batch latency fields. The default 10M profile uses 10 batches of 1,000 mutations to exercise the firehose batch path.
 
 Use these timeout expectations as rough operator guidance, not SLAs:
 

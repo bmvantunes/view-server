@@ -15,6 +15,7 @@ type BenchConfig = {
   readonly columns: number;
   readonly mutations: number;
   readonly gc: boolean;
+  readonly compareLegacy: boolean;
 };
 
 const config: BenchConfig = {
@@ -22,30 +23,64 @@ const config: BenchConfig = {
   columns: envNumber("VS_CHDB_SQL_MIRROR_COLUMNS", 25),
   mutations: envNumber("VS_CHDB_SQL_MIRROR_MUTATIONS", 10_000),
   gc: process.env.VS_CHDB_SQL_MIRROR_GC === "1",
+  compareLegacy: process.env.VS_CHDB_SQL_MIRROR_COMPARE_LEGACY === "1",
 };
 
 void Effect.runPromise(
   Effect.gen(function* () {
     yield* Effect.logInfo(
-      `chdb sql mirror benchmark rows=${config.rows} columns=${config.columns} mutations=${config.mutations} gc=${config.gc ? "on" : "off"}`,
+      `chdb sql mirror benchmark rows=${config.rows} columns=${config.columns} mutations=${config.mutations} gc=${config.gc ? "on" : "off"} compareLegacy=${config.compareLegacy ? "on" : "off"}`,
     );
     const rows = makeRows(config.rows, config.columns);
     const mutations = makeMutations(config.mutations, config.rows, config.columns);
     const session = new Session();
+    const mirrors: ChdbSqlMirror[] = [];
     try {
       forceGc(config.gc);
       const before = process.memoryUsage();
-      const mirror = new ChdbSqlMirror(session, `bench_mirror_${Date.now()}`);
-      const init = timed(() =>
-        mirror.init({
-          idField: "id",
-          rows,
-          version: 1n,
-        }),
-      );
-      const apply = timed(() => mirror.applyMutations(mutations));
+      const batched = runMirror(session, mirrors, rows, mutations, "batched");
+      const legacy = config.compareLegacy
+        ? runMirror(session, mirrors, rows, mutations, "legacy-single-mutation")
+        : undefined;
       forceGc(config.gc);
       const after = process.memoryUsage();
+      const metrics: BenchmarkMetric[] = [
+        { name: "initMs", value: batched.initMs, unit: "ms" },
+        { name: "applyMutationsMs", value: batched.applyMs, unit: "ms" },
+        {
+          name: "batchedMutationsPerSecond",
+          value: perSecond(config.mutations, batched.applyMs),
+          unit: "count",
+          lowerIsBetter: false,
+        },
+        {
+          name: "columns",
+          value: batched.columns,
+          unit: "count",
+          lowerIsBetter: false,
+        },
+        { name: "heapDeltaBytes", value: after.heapUsed - before.heapUsed, unit: "bytes" },
+        { name: "rssDeltaBytes", value: after.rss - before.rss, unit: "bytes" },
+      ];
+      if (legacy !== undefined) {
+        metrics.push(
+          { name: "legacyInitMs", value: legacy.initMs, unit: "ms" },
+          { name: "legacySingleMutationApplyMs", value: legacy.applyMs, unit: "ms" },
+          {
+            name: "legacyMutationsPerSecond",
+            value: perSecond(config.mutations, legacy.applyMs),
+            unit: "count",
+            lowerIsBetter: false,
+          },
+          {
+            name: "applySpeedupRatio",
+            value:
+              batched.applyMs === 0 ? Number.MAX_SAFE_INTEGER : legacy.applyMs / batched.applyMs,
+            unit: "ratio",
+            lowerIsBetter: false,
+          },
+        );
+      }
       const result: BenchmarkResult = {
         case: {
           operation: "chdbSqlMirror",
@@ -54,18 +89,7 @@ void Effect.runPromise(
           columns: config.columns,
           mutations: config.mutations,
         },
-        metrics: [
-          { name: "initMs", value: init.ms, unit: "ms" },
-          { name: "applyMutationsMs", value: apply.ms, unit: "ms" },
-          {
-            name: "columns",
-            value: mirror.columns.length,
-            unit: "count",
-            lowerIsBetter: false,
-          },
-          { name: "heapDeltaBytes", value: after.heapUsed - before.heapUsed, unit: "bytes" },
-          { name: "rssDeltaBytes", value: after.rss - before.rss, unit: "bytes" },
-        ] satisfies BenchmarkMetric[],
+        metrics,
       };
       const artifact = yield* writeBenchmarkArtifact(
         "chdb-sql-mirror",
@@ -74,11 +98,13 @@ void Effect.runPromise(
           columns: config.columns,
           mutations: config.mutations,
           gc: config.gc,
+          compareLegacy: config.compareLegacy,
         },
         [result],
         {
           notes: [
             "Measures chDB SQL mirror streaming column inference and one-pass JSONEachRow payload construction.",
+            "When VS_CHDB_SQL_MIRROR_COMPARE_LEGACY=1, compares one applyMutations call against the legacy one-mutation apply loop.",
             "Run with --expose-gc and VS_CHDB_SQL_MIRROR_GC=1 for a stronger retained heap signal.",
           ],
         },
@@ -86,26 +112,72 @@ void Effect.runPromise(
       yield* Effect.logInfo(
         [
           `chdb sql mirror result`,
-          `initMs=${init.ms.toFixed(2)}`,
-          `applyMutationsMs=${apply.ms.toFixed(2)}`,
-          `columns=${mirror.columns.length}`,
+          `initMs=${batched.initMs.toFixed(2)}`,
+          `applyMutationsMs=${batched.applyMs.toFixed(2)}`,
+          `batchedMutationsPerSecond=${perSecond(config.mutations, batched.applyMs).toFixed(2)}`,
+          ...(legacy === undefined
+            ? []
+            : [
+                `legacySingleMutationApplyMs=${legacy.applyMs.toFixed(2)}`,
+                `legacyMutationsPerSecond=${perSecond(config.mutations, legacy.applyMs).toFixed(2)}`,
+                `applySpeedupRatio=${(legacy.applyMs / batched.applyMs).toFixed(2)}`,
+              ]),
+          `columns=${batched.columns}`,
           `heapDeltaBytes=${after.heapUsed - before.heapUsed}`,
           `rssDeltaBytes=${after.rss - before.rss}`,
           `artifact=${artifact.artifactPath}`,
           `baselineCompared=${artifact.compared}`,
         ].join(" "),
       );
-      mirror.drop();
+      for (const mirror of mirrors) {
+        mirror.drop();
+      }
     } finally {
       session.cleanup();
     }
   }),
 );
 
+function runMirror(
+  session: Session,
+  mirrors: ChdbSqlMirror[],
+  rows: readonly RuntimeRow[],
+  mutations: readonly MutationLogEntry[],
+  mode: "batched" | "legacy-single-mutation",
+): { readonly initMs: number; readonly applyMs: number; readonly columns: number } {
+  const mirror = new ChdbSqlMirror(session, `bench_mirror_${mode}_${Date.now()}`);
+  mirrors.push(mirror);
+  const init = timed(() =>
+    mirror.init({
+      idField: "id",
+      rows,
+      version: 1n,
+    }),
+  );
+  const apply = timed(() => {
+    if (mode === "batched") {
+      mirror.applyMutations(mutations);
+      return;
+    }
+    for (const mutation of mutations) {
+      mirror.applyMutations([mutation]);
+    }
+  });
+  return {
+    initMs: init.ms,
+    applyMs: apply.ms,
+    columns: mirror.columns.length,
+  };
+}
+
 function timed(run: () => void): { readonly ms: number } {
   const started = performance.now();
   run();
   return { ms: performance.now() - started };
+}
+
+function perSecond(count: number, ms: number): number {
+  return ms === 0 ? Number.MAX_SAFE_INTEGER : count / (ms / 1_000);
 }
 
 function makeRows(count: number, columns: number): readonly RuntimeRow[] {

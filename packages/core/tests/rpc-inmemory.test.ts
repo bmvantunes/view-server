@@ -731,6 +731,42 @@ describe("Effect RPC in-memory", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("coalesces skipped active-plan batch fanout into one stale status", () =>
+    Effect.gen(function* () {
+      const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
+        initialRows: [
+          { id: "o-1", symbol: "AAPL", price: 100 },
+          { id: "o-2", symbol: "MSFT", price: 200 },
+          { id: "o-3", symbol: "NVDA", price: 300 },
+        ],
+        activePlanAutoBuildMaxRows: 2,
+      });
+      const events = yield* worker
+        .subscribe("active-plan-admission-batch-skip", coalesceQuery)
+        .pipe(Stream.toQueue({ capacity: 16 }));
+      const snapshot = yield* Queue.take(events);
+      expect(snapshot.type).toBe("snapshot");
+
+      yield* worker.mutateBatch([
+        { type: "publish", row: { id: "o-4", symbol: "TSLA", price: 150 } },
+        { type: "publish", row: { id: "o-5", symbol: "ORCL", price: 175 } },
+        { type: "delete", id: "o-1" },
+      ]);
+
+      const stale = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+      expect(stale.type).toBe("status");
+      if (stale.type !== "status") {
+        throw new Error("Expected stale status");
+      }
+      expect(stale.status).toBe("stale");
+      expect(stale.meta.version).toBe("3");
+      expect(stale.meta.totalRows).toBe(4);
+      expect(yield* Queue.size(events)).toBe(0);
+
+      yield* worker.unsubscribe("active-plan-admission-batch-skip");
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("keeps the topic worker responsive during active plan construction", () =>
     Effect.gen(function* () {
       const initialRows = Array.from({ length: 5_000 }, (_, index) => ({

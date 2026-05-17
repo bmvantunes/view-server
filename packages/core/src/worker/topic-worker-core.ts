@@ -438,6 +438,41 @@ export function makeTopicWorkerCore(
       }
     });
 
+    const markPendingActivePlanSubscriptionDirtyForBatch = Effect.fnUntraced(function* (
+      subscription: ActiveSubscription,
+      changes: readonly MutationStoreChange[],
+      targetVersion: WorkerVersion,
+    ) {
+      if (isGroupedQuery(subscription.query)) {
+        return;
+      }
+      let totalRows = subscription.lastTotalRows;
+      for (const change of changes) {
+        totalRows = pendingActivePlanTotalRows(totalRows, subscription.query, change.entry);
+      }
+      subscriptions.markDirty(subscription, targetVersion, totalRows);
+      const offered = yield* fanoutQueue.offerStatus(subscription.queue, subscription, {
+        type: "status",
+        requestId: subscription.requestId,
+        status: "stale",
+        meta: {
+          version: targetVersion.toString(),
+          totalRows,
+          serverTime: Date.now(),
+        },
+      });
+      if (!offered) {
+        removeSubscription(subscription.requestId);
+        yield* Queue.fail(
+          subscription.queue,
+          backpressureExceeded(
+            subscription.requestId,
+            `Subscription ${subscription.requestId} exceeded maxQueueDepth ${maxQueueDepth}`,
+          ),
+        );
+      }
+    });
+
     const markGroupedSubscriptionDirty = Effect.fnUntraced(function* (
       subscription: ActiveSubscription,
       targetVersion: WorkerVersion,
@@ -730,6 +765,55 @@ export function makeTopicWorkerCore(
             yield* fanoutUntraced(fromVersion, toVersion, mutation);
           })();
 
+    const canFanoutPendingActivePlanBatch = (): boolean =>
+      subscriptions.size > 0 &&
+      [...subscriptions.values()].every(
+        (subscription) =>
+          !isGroupedQuery(subscription.query) && isPendingActivePlanSubscription(subscription),
+      );
+
+    const fanoutPendingActivePlanBatch = Effect.fn("view-server.worker.fanout.pending_batch")(
+      function* (changes: readonly MutationStoreChange[]) {
+        const lastChange = changes[changes.length - 1];
+        if (lastChange === undefined) {
+          return;
+        }
+        yield* Effect.annotateCurrentSpan({
+          "view_server.topic": topic,
+          "view_server.worker_version": lastChange.toVersion.toString(),
+          "view_server.batch_size": changes.length,
+        });
+        for (const change of changes) {
+          activePlanCoordinator.applyMutation(change.entry);
+        }
+        yield* Effect.forEach(
+          subscriptions.values(),
+          (subscription) => {
+            if (
+              isGroupedQuery(subscription.query) ||
+              !isPendingActivePlanSubscription(subscription)
+            ) {
+              return Effect.void;
+            }
+            const relevantChanges = changes.filter(
+              (change) =>
+                change.entry.kind !== "update" ||
+                hasDependency(subscription.dependencyFields, change.entry.changedFields),
+            );
+            if (relevantChanges.length === 0) {
+              return Effect.void;
+            }
+            return markPendingActivePlanSubscriptionDirtyForBatch(
+              subscription,
+              relevantChanges,
+              lastChange.toVersion,
+            );
+          },
+          { discard: true },
+        );
+      },
+    );
+
     const prepareActivePlan = Effect.fnUntraced(function* (subscription: ActiveSubscription) {
       if (isGroupedQuery(subscription.query)) {
         prepareGroupedAccumulator(subscription);
@@ -959,6 +1043,10 @@ export function makeTopicWorkerCore(
           ),
           Effect.forkIn(scope),
         );
+      if (canFanoutPendingActivePlanBatch()) {
+        yield* fanoutPendingActivePlanBatch(changes);
+        return;
+      }
       yield* Effect.forEach(
         changes,
         (change) => fanout(change.fromVersion, change.toVersion, change.entry),
