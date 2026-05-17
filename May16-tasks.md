@@ -100,6 +100,17 @@ focused tests and the relevant integration tests still pass.
       span annotations, and soak progress plannedStrategy fields.
 - [x] Task 14: LiveQueryLifecycle module extracted for AsyncResult connecting, live,
       stale, reconnecting, failure-with-previous, and closed transition semantics.
+- [x] Task 15: ChdbProcessClient module owns chDB child request, health,
+      restart, shutdown, pending-request failure, and bounded process lifecycle semantics.
+- [x] Task 16: ChdbSqlMirror module owns table mirror SQL, mutation event SQL,
+      raw/grouped snapshot SQL, count SQL, identifier escaping, and Decimal mapping tests.
+- [x] Task 17: ColumnCatalog module owns schema-derived id fields, columns,
+      literal strings, BigDecimal columns, query validation, and SQL column metadata.
+- [x] Task 18: RowWireCodec module owns row/query/mutation worker wire
+      encoding with exact BigDecimal roundtrips and no assertion casts.
+- [x] Task 20: Metrics UI data model module owns stable health row formatting,
+      degraded-topic display, lag/queue/active-plan/grouped/Kafka/chDB fields,
+      and browser forbidden-import coverage.
 - [x] Task 1: Topic Worker State Machine Split. MutationStore, SnapshotReconciler,
       ActivePlanCoordinator, FanoutQueue, SubscriptionRegistry, GroupedRefreshCoordinator,
       WorkerHealthProjection, RuntimeHealthProjection, and RuntimeShutdownController are extracted
