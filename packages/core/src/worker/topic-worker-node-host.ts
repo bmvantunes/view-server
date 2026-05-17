@@ -13,13 +13,14 @@ import {
   type ViewServerError,
   workerUnavailable,
 } from "../errors.ts";
-import type { RuntimeQuery } from "../protocol/index.ts";
+import type { RuntimeMutation, RuntimeQuery } from "../protocol/index.ts";
 import { fromWireRows, toWireRow, type RpcWireValue } from "../rpc/index.ts";
 import {
   TopicWorkerRpcs,
   decodeTopicWorkerMetrics,
   encodeTopicWorkerRows,
   type TopicWorkerInitialMessage as TopicWorkerInitialMessageType,
+  type TopicWorkerMutationWire,
 } from "./worker-protocol.ts";
 import type { TopicWorkerHost, TopicWorkerHostFactory } from "./topic-worker-host.ts";
 
@@ -171,6 +172,13 @@ function topicWorkerHostFromClient(
       Effect.fnUntraced(function* () {
         yield* client.DeleteById({ id });
       })().pipe(Effect.mapError((error) => toWorkerError(topic, error))),
+    mutateBatch: (mutations) =>
+      Effect.fnUntraced(function* () {
+        const rpcMutations = yield* Effect.forEach(mutations, (mutation) =>
+          toRpcMutation(topic, mutation),
+        );
+        yield* client.MutateBatch({ mutations: rpcMutations });
+      })().pipe(Effect.mapError((error) => toWorkerError(topic, error))),
     getRowsForTest: client.RowsForTest().pipe(
       Effect.map(fromWireRows),
       Effect.mapError((error) => toWorkerError(topic, error)),
@@ -239,4 +247,29 @@ function toRpcRow(
     return Effect.succeed(toWireRow(row));
   }
   return Effect.fail(invalidPublish(topic, "Worker publish requires an object row"));
+}
+
+function toRpcMutation(
+  topic: string,
+  mutation: RuntimeMutation,
+): Effect.Effect<TopicWorkerMutationWire, ViewServerError> {
+  switch (mutation.type) {
+    case "publish":
+      return toRpcRow(topic, mutation.row).pipe(
+        Effect.map((row) => ({
+          type: "publish",
+          row,
+        })),
+      );
+    case "delta-publish":
+      return Effect.succeed({
+        type: "delta-publish",
+        patch: toWireRow(mutation.patch),
+      });
+    case "delete":
+      return Effect.succeed({
+        type: "delete",
+        id: mutation.id,
+      });
+  }
 }

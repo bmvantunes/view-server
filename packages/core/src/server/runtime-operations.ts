@@ -8,6 +8,7 @@ import {
 import { missingTopic, type ViewServerError } from "../errors.ts";
 import type {
   QueryResponse,
+  RuntimeMutation,
   RuntimeQuery,
   RuntimeRow,
   SubscriptionEvent,
@@ -48,6 +49,11 @@ export type RuntimeOperations = {
     id: string | number,
     transport: AuthorizationContext["transport"],
   ) => Effect.Effect<void, ViewServerError>;
+  readonly mutateBatchWithTransport: (
+    topic: string,
+    mutations: readonly RuntimeMutation[],
+    transport: AuthorizationContext["transport"],
+  ) => Effect.Effect<void, ViewServerError>;
 };
 
 export function makeRuntimeOperations(args: {
@@ -83,6 +89,46 @@ export function makeRuntimeOperations(args: {
         yield* args.syncHealthTopic;
       }
     })();
+
+  const runMutationBatchUntraced = (
+    topic: string,
+    mutations: readonly RuntimeMutation[],
+    transport: AuthorizationContext["transport"],
+  ) =>
+    Effect.fnUntraced(function* () {
+      if (mutations.length === 0) {
+        return;
+      }
+      yield* ensureRuntimeOpen("publish", topic);
+      for (const mutation of mutations) {
+        yield* args.authPolicy.canPublishTopic({
+          topic,
+          operation: mutation.type,
+          payload: mutationPayload(mutation),
+          transport,
+        });
+      }
+      const worker = yield* workerFor(topic);
+      yield* worker.mutateBatch(mutations);
+      if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
+        yield* args.syncHealthTopic;
+      }
+    })();
+
+  const runMutationBatch = (
+    topic: string,
+    mutations: readonly RuntimeMutation[],
+    transport: AuthorizationContext["transport"],
+  ) =>
+    transport === "internal"
+      ? runMutationBatchUntraced(topic, mutations, transport)
+      : Effect.fn("view-server.runtime.mutation_batch")(function* () {
+          yield* Effect.annotateCurrentSpan({
+            "view_server.topic": topic,
+            "view_server.batch_size": mutations.length,
+          });
+          return yield* runMutationBatchUntraced(topic, mutations, transport);
+        })();
 
   const runMutation = <Payload>(
     topic: string,
@@ -176,9 +222,21 @@ export function makeRuntimeOperations(args: {
       ),
     deleteByIdWithTransport: (topic, id, transport) =>
       runMutation(topic, id, "delete", transport, (worker, payload) => worker.deleteById(payload)),
+    mutateBatchWithTransport: runMutationBatch,
   };
 }
 
 function runtimeSpanOperation(operation: "publish" | "delta-publish" | "delete"): string {
   return operation === "delta-publish" ? "delta_publish" : operation;
+}
+
+function mutationPayload(mutation: RuntimeMutation): unknown {
+  switch (mutation.type) {
+    case "publish":
+      return mutation.row;
+    case "delta-publish":
+      return mutation.patch;
+    case "delete":
+      return mutation.id;
+  }
 }

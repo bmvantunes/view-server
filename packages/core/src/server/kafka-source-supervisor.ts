@@ -17,6 +17,7 @@ import {
   type KafkaTopicVerifier,
 } from "../kafka/index.ts";
 import type { RuntimeRow } from "../protocol/index.ts";
+import type { RuntimeMutation } from "../protocol/index.ts";
 import {
   emptyKafkaRuntimeMetrics,
   kafkaRuntimeMetrics,
@@ -36,6 +37,10 @@ export type KafkaSourceSupervisorRuntime = {
   readonly publish: (topic: string, row: RowObject) => Effect.Effect<void, ViewServerError>;
   readonly deltaPublish: (topic: string, patch: RuntimeRow) => Effect.Effect<void, ViewServerError>;
   readonly deleteById: (topic: string, id: string | number) => Effect.Effect<void, ViewServerError>;
+  readonly mutateBatch: (
+    topic: string,
+    mutations: readonly RuntimeMutation[],
+  ) => Effect.Effect<void, ViewServerError>;
   readonly syncHealth: Effect.Effect<void>;
 };
 
@@ -127,6 +132,7 @@ export class KafkaSourceSupervisor {
               publish: (row) => runtime.publish(topic, row),
               deltaPublish: (patch) => runtime.deltaPublish(topic, patch),
               deleteById: (id) => runtime.deleteById(topic, id),
+              mutateBatch: (mutations) => runtime.mutateBatch(topic, mutations),
             };
             if (topicConfig.source._tag === "EffectSource") {
               const fiber = yield* supervisor

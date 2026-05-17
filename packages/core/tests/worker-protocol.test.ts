@@ -9,6 +9,7 @@ import {
   TopicWorkerDeltaPublishPayload,
   TopicWorkerInitialMessage,
   TopicWorkerMetricsSchema,
+  TopicWorkerMutateBatchPayload,
   TopicWorkerPublishPayload,
   TopicWorkerQueryPayload,
   TopicWorkerQueryResponse,
@@ -80,6 +81,38 @@ describe("WorkerProtocol", () => {
     const decodedDeltaPayload = decodeAfterEncode(TopicWorkerDeltaPublishPayload, deltaPayload);
 
     expect(isBigDecimalEqual(decodedDeltaPayload.patch.amount, amount)).toBe(true);
+
+    const batchPayload = {
+      mutations: [
+        {
+          type: "publish",
+          row: {
+            id: "order-1",
+            amount,
+          },
+        },
+        {
+          type: "delta-publish",
+          patch: {
+            id: "order-1",
+            amount,
+          },
+        },
+        {
+          type: "delete",
+          id: "order-1",
+        },
+      ],
+    } satisfies typeof TopicWorkerMutateBatchPayload.Type;
+    const decodedBatchPayload = decodeAfterEncode(TopicWorkerMutateBatchPayload, batchPayload);
+
+    const publishMutation = decodedBatchPayload.mutations[0];
+    const deltaMutation = decodedBatchPayload.mutations[1];
+    if (publishMutation?.type !== "publish" || deltaMutation?.type !== "delta-publish") {
+      throw new Error("Expected decoded batch mutation payload");
+    }
+    expect(isBigDecimalEqual(publishMutation.row.amount, amount)).toBe(true);
+    expect(isBigDecimalEqual(deltaMutation.patch.amount, amount)).toBe(true);
 
     const queryResponse = {
       rows: [
@@ -158,6 +191,7 @@ describe("WorkerProtocol", () => {
       "Publish",
       "DeltaPublish",
       "DeleteById",
+      "MutateBatch",
       "RowsForTest",
       "Metrics",
       "Shutdown",

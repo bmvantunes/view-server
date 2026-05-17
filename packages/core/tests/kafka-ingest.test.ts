@@ -17,6 +17,7 @@ import {
 } from "../src/config/index.ts";
 import {
   decodeJsonRecord,
+  ingestKafkaBatch,
   kafkaRecordLag,
   protobufDecimalToBigDecimal,
   unscaledDecimalToBigDecimal,
@@ -203,6 +204,77 @@ describe("Kafka ingestion", () => {
       });
       expect(consumer.commits).toBe(1);
     }).pipe(Effect.scoped),
+  );
+
+  it.effect("decodes a Kafka batch into one runtime mutation batch", () =>
+    Effect.gen(function* () {
+      let singleCalls = 0;
+      const seenBatches: unknown[][] = [];
+
+      yield* ingestKafkaBatch({
+        viewTopic: "orders",
+        idField: "id",
+        source: KafkaSource<OrderRow, "id">({
+          brokers: ["127.0.0.1:9092"],
+          topic: "orders-events",
+          groupId: "view-server-orders",
+          decode: decodeJsonRecord<OrderRow, "id">({ topic: "orders", schema: Order }),
+        }),
+        runtime: {
+          publish: () =>
+            Effect.sync(() => {
+              singleCalls += 1;
+            }),
+          deltaPublish: () =>
+            Effect.sync(() => {
+              singleCalls += 1;
+            }),
+          deleteById: () =>
+            Effect.sync(() => {
+              singleCalls += 1;
+            }),
+          mutateBatch: (mutations) =>
+            Effect.sync(() => {
+              seenBatches.push([...mutations]);
+            }),
+        },
+        batch: {
+          records: [
+            {
+              topic: "orders-events",
+              key: "o-1",
+              offset: "1",
+              value: JSON.stringify({ id: "o-1", symbol: "AAPL", price: 100 }),
+            },
+            {
+              topic: "orders-events",
+              key: "o-2",
+              offset: "2",
+              value: JSON.stringify({
+                type: "delta-publish",
+                patch: { id: "o-1", price: 125 },
+              }),
+            },
+            {
+              topic: "orders-events",
+              key: "o-3",
+              offset: "3",
+              value: JSON.stringify({ type: "delete", id: "o-1" }),
+            },
+          ],
+          commit: Effect.void,
+        },
+        commitPolicy: "after-ingest",
+      });
+
+      expect(singleCalls).toBe(0);
+      expect(seenBatches).toHaveLength(1);
+      expect(seenBatches[0]).toEqual([
+        { type: "publish", row: { id: "o-1", symbol: "AAPL", price: 100 } },
+        { type: "delta-publish", patch: { id: "o-1", price: 125 } },
+        { type: "delete", id: "o-1" },
+      ]);
+    }),
   );
 
   it.effect("streams Kafka-ingested batches through the real websocket RPC path", () =>

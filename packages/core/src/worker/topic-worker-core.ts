@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -19,6 +20,7 @@ import {
 import type {
   DeltaEvent,
   QueryResponse,
+  RuntimeMutation,
   RuntimeQuery,
   RuntimeRawQuery,
   RuntimeRow,
@@ -85,6 +87,9 @@ export type TopicWorkerCore = {
   readonly publish: (row: unknown) => Effect.Effect<void, ViewServerError>;
   readonly deltaPublish: (patch: RuntimeRow) => Effect.Effect<void, ViewServerError>;
   readonly deleteById: (id: string | number) => Effect.Effect<void, ViewServerError>;
+  readonly mutateBatch: (
+    mutations: readonly RuntimeMutation[],
+  ) => Effect.Effect<void, ViewServerError>;
   readonly getRowsForTest: Effect.Effect<readonly RuntimeRow[], ViewServerError>;
   readonly shutdown: Effect.Effect<void, ViewServerError>;
 };
@@ -890,11 +895,17 @@ export function makeTopicWorkerCore(
       return subscriptions.removeForQueue(requestId, queue);
     };
 
-    const persistAndFanoutMutation = Effect.fnUntraced(function* (change: MutationStoreChange) {
+    const persistAndFanoutMutationBatch = Effect.fnUntraced(function* (
+      changes: readonly MutationStoreChange[],
+    ) {
+      const lastChange = changes[changes.length - 1];
+      if (lastChange === undefined) {
+        return;
+      }
       yield* backend
         .applyBatch({
-          mutations: [change.entry],
-          highestVersion: change.toVersion,
+          mutations: changes.map((change) => change.entry),
+          highestVersion: lastChange.toVersion,
         })
         .pipe(
           Effect.tap(() =>
@@ -909,12 +920,62 @@ export function makeTopicWorkerCore(
           ),
           Effect.forkIn(scope),
         );
-      yield* fanout(change.fromVersion, change.toVersion, change.entry);
+      yield* Effect.forEach(
+        changes,
+        (change) => fanout(change.fromVersion, change.toVersion, change.entry),
+        { discard: true },
+      );
     });
 
-    const publishDecoded = Effect.fnUntraced(function* (decoded: RuntimeRow) {
+    const publishDecodedChange = Effect.fnUntraced(function* (decoded: RuntimeRow) {
       const id = yield* ensureId(decoded);
-      yield* persistAndFanoutMutation(mutationStore.publish(decoded, id));
+      return mutationStore.publish(decoded, id);
+    });
+
+    const mutationInputChange = Effect.fnUntraced(function* (mutation: RuntimeMutation) {
+      switch (mutation.type) {
+        case "publish": {
+          const decoded = yield* decodeRow(mutation.row);
+          return yield* publishDecodedChange(decoded);
+        }
+        case "delta-publish": {
+          const id = mutation.patch[idField];
+          if (!isStableKey(id)) {
+            return yield* Effect.fail(missingTopicId(topic, idField));
+          }
+          const before = mutationStore.rowById(id);
+          if (before === undefined) {
+            return yield* Effect.fail(
+              invalidPublish(topic, `Cannot deltaPublish missing row ${String(id)}`),
+            );
+          }
+          const merged = { ...before, ...mutation.patch };
+          const decoded = yield* decodeRow(merged);
+          return mutationStore.updateExisting(id, decoded);
+        }
+        case "delete":
+          return mutationStore.deleteById(mutation.id);
+      }
+    });
+
+    const mutateBatchUntraced = Effect.fnUntraced(function* (
+      mutations: readonly RuntimeMutation[],
+    ) {
+      const changes: MutationStoreChange[] = [];
+      for (const mutation of mutations) {
+        const exit = yield* mutationInputChange(mutation).pipe(Effect.exit);
+        if (Exit.isFailure(exit)) {
+          if (changes.length > 0) {
+            yield* persistAndFanoutMutationBatch(changes);
+          }
+          return yield* Effect.failCause(exit.cause);
+        }
+        const change = exit.value;
+        if (change !== undefined) {
+          changes.push(change);
+        }
+      }
+      yield* persistAndFanoutMutationBatch(changes);
     });
 
     const worker: TopicWorkerCore = {
@@ -1013,40 +1074,33 @@ export function makeTopicWorkerCore(
       publish: (input) =>
         gate.withPermit(
           Effect.fnUntraced(function* () {
-            const decoded = yield* decodeRow(input);
-            yield* publishDecoded(decoded);
+            yield* mutateBatchUntraced([{ type: "publish", row: input }]);
           })(),
         ),
 
       deltaPublish: (patch) =>
         gate.withPermit(
           Effect.fnUntraced(function* () {
-            const id = patch[idField];
-            if (!isStableKey(id)) {
-              return yield* Effect.fail(missingTopicId(topic, idField));
-            }
-            const before = mutationStore.rowById(id);
-            if (before === undefined) {
-              return yield* Effect.fail(
-                invalidPublish(topic, `Cannot deltaPublish missing row ${String(id)}`),
-              );
-            }
-            const merged = { ...before, ...patch };
-            const decoded = yield* decodeRow(merged);
-            const change = mutationStore.updateExisting(id, decoded);
-            if (change !== undefined) {
-              yield* persistAndFanoutMutation(change);
-            }
+            yield* mutateBatchUntraced([{ type: "delta-publish", patch }]);
           })(),
         ),
 
       deleteById: (id) =>
         gate.withPermit(
           Effect.fnUntraced(function* () {
-            const change = mutationStore.deleteById(id);
-            if (change !== undefined) {
-              yield* persistAndFanoutMutation(change);
-            }
+            yield* mutateBatchUntraced([{ type: "delete", id }]);
+          })(),
+        ),
+
+      mutateBatch: (mutations) =>
+        gate.withPermit(
+          Effect.fn("view-server.worker.mutation.batch")(function* () {
+            yield* Effect.annotateCurrentSpan({
+              "view_server.topic": topic,
+              "view_server.batch_size": mutations.length,
+              "view_server.worker_version": mutationStore.version().toString(),
+            });
+            yield* mutateBatchUntraced(mutations);
           })(),
         ),
 

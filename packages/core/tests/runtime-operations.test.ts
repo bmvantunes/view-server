@@ -41,6 +41,15 @@ describe("RuntimeOperations", () => {
       yield* operations.publishWithTransport("orders", { id: "o-1", price: 100 }, "rpc");
       yield* operations.deltaPublishWithTransport("orders", { id: "o-1", price: 101 }, "rpc");
       yield* operations.deleteByIdWithTransport("orders", "o-1", "rpc");
+      yield* operations.mutateBatchWithTransport(
+        "orders",
+        [
+          { type: "publish", row: { id: "o-2", price: 200 } },
+          { type: "delta-publish", patch: { id: "o-2", price: 201 } },
+          { type: "delete", id: "o-2" },
+        ],
+        "internal",
+      );
 
       expect(calls).toEqual([
         "auth:publish:rpc",
@@ -49,8 +58,12 @@ describe("RuntimeOperations", () => {
         "worker:delta",
         "auth:delete:rpc",
         "worker:delete",
+        "auth:publish:internal",
+        "auth:delta-publish:internal",
+        "auth:delete:internal",
+        "worker:batch:3",
       ]);
-      expect(healthSyncs).toBe(3);
+      expect(healthSyncs).toBe(4);
     }),
   );
 
@@ -154,6 +167,10 @@ function fakeWorker(calls: string[]): TopicWorkerCore {
     deleteById: () =>
       Effect.sync(() => {
         calls.push("worker:delete");
+      }),
+    mutateBatch: (mutations) =>
+      Effect.sync(() => {
+        calls.push(`worker:batch:${mutations.length}`);
       }),
     getRowsForTest: Effect.succeed([]),
     shutdown: Effect.void,

@@ -27,11 +27,14 @@ export type MigrationContext = {
   readonly toVersion: number | undefined;
 };
 
-export type KafkaSourceMessage<TRow extends RowObject, TId extends keyof TRow & string> =
-  | TRow
+export type SourceMutation<TRow extends RowObject, TId extends keyof TRow & string> =
   | { readonly type: "publish"; readonly row: TRow }
   | { readonly type: "delta-publish"; readonly patch: Partial<TRow> & Pick<TRow, TId> }
   | { readonly type: "delete"; readonly id: Extract<TRow[TId], IdValue> };
+
+export type KafkaSourceMessage<TRow extends RowObject, TId extends keyof TRow & string> =
+  | TRow
+  | SourceMutation<TRow, TId>;
 
 export type KafkaSourceConfig<TRow extends RowObject, TId extends keyof TRow & string> = {
   readonly _tag: "KafkaSource";
@@ -53,6 +56,9 @@ export type EffectSourceContext<TRow extends RowObject, TId extends keyof TRow &
     patch: Partial<TRow> & Pick<TRow, TId>,
   ) => Effect.Effect<void, ViewServerError>;
   readonly deleteById: (id: Extract<TRow[TId], IdValue>) => Effect.Effect<void, ViewServerError>;
+  readonly mutateBatch: (
+    mutations: readonly SourceMutation<TRow, TId>[],
+  ) => Effect.Effect<void, ViewServerError>;
 };
 
 export type EffectSourceConfig<TRow extends RowObject, TId extends keyof TRow & string> = {

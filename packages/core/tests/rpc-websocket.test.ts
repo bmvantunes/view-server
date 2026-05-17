@@ -302,6 +302,27 @@ function makeRetryWorker(topic: string, idField: string): Effect.Effect<TopicWor
           rows = rows.filter((row) => row[idField] !== id);
           version += 1n;
         }),
+      mutateBatch: (mutations) =>
+        Effect.forEach(
+          mutations,
+          (mutation) => {
+            switch (mutation.type) {
+              case "publish":
+                return isRuntimeRow(mutation.row) ? publish(mutation.row) : Effect.void;
+              case "delta-publish":
+                return Effect.gen(function* () {
+                  const current = rows.find((row) => row[idField] === mutation.patch[idField]);
+                  yield* publish({ ...current, ...mutation.patch });
+                });
+              case "delete":
+                return Effect.sync(() => {
+                  rows = rows.filter((row) => row[idField] !== mutation.id);
+                  version += 1n;
+                });
+            }
+          },
+          { discard: true },
+        ),
       getRowsForTest: Effect.sync(() => rows.map((row) => ({ ...row }))),
       shutdown: Effect.sync(() => {
         active = undefined;
@@ -417,6 +438,7 @@ function makeStaleReconnectWorker(topic: string, idField: string): Effect.Effect
       publish: () => Effect.void,
       deltaPublish: () => Effect.void,
       deleteById: () => Effect.void,
+      mutateBatch: () => Effect.void,
       getRowsForTest: Effect.sync(() => rows.map((row) => ({ ...row }))),
       shutdown: Effect.sync(() => {
         active = undefined;

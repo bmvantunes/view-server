@@ -3,6 +3,7 @@ import { Rpc, RpcGroup } from "effect/unstable/rpc";
 import { ViewServerError } from "../errors.ts";
 import {
   fromWireRows,
+  fromWireRow,
   RpcQuery,
   RpcQueryResponse,
   RpcRow,
@@ -10,7 +11,7 @@ import {
   RpcSubscriptionEvent,
   toWireRow,
 } from "../rpc/index.ts";
-import type { RuntimeRow } from "../protocol/index.ts";
+import type { RuntimeMutation, RuntimeRow } from "../protocol/index.ts";
 import type { TopicWorkerMetrics } from "./worker-health-projection.ts";
 
 export const TOPIC_WORKER_RPC_NAMES = [
@@ -20,6 +21,7 @@ export const TOPIC_WORKER_RPC_NAMES = [
   "Publish",
   "DeltaPublish",
   "DeleteById",
+  "MutateBatch",
   "RowsForTest",
   "Metrics",
   "Shutdown",
@@ -64,6 +66,25 @@ export const TopicWorkerDeltaPublishPayload = Schema.Struct({
 
 export const TopicWorkerDeleteByIdPayload = Schema.Struct({
   id: Schema.Union([Schema.String, Schema.Number]),
+});
+
+export const TopicWorkerMutation = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("publish"),
+    row: RpcRow,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("delta-publish"),
+    patch: RpcRow,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("delete"),
+    id: Schema.Union([Schema.String, Schema.Number]),
+  }),
+]);
+
+export const TopicWorkerMutateBatchPayload = Schema.Struct({
+  mutations: Schema.Array(TopicWorkerMutation),
 });
 
 export const TopicWorkerQueryResponse = RpcQueryResponse;
@@ -130,6 +151,11 @@ export const TopicWorkerRpcs = RpcGroup.make(
     success: Schema.Void,
     error: ViewServerError,
   }),
+  Rpc.make("MutateBatch", {
+    payload: TopicWorkerMutateBatchPayload,
+    success: Schema.Void,
+    error: ViewServerError,
+  }),
   Rpc.make("RowsForTest", {
     success: TopicWorkerRows,
     error: ViewServerError,
@@ -145,6 +171,7 @@ export const TopicWorkerRpcs = RpcGroup.make(
 );
 
 export type TopicWorkerInitialMessage = typeof TopicWorkerInitialMessage.Type;
+export type TopicWorkerMutationWire = typeof TopicWorkerMutation.Type;
 export type TopicWorkerMetricsWire = typeof TopicWorkerMetricsSchema.Type;
 
 export function encodeTopicWorkerRows(rows: readonly RuntimeRow[]): typeof TopicWorkerRows.Type {
@@ -153,6 +180,26 @@ export function encodeTopicWorkerRows(rows: readonly RuntimeRow[]): typeof Topic
 
 export function decodeTopicWorkerRows(rows: typeof TopicWorkerRows.Type): readonly RuntimeRow[] {
   return fromWireRows(rows);
+}
+
+export function decodeTopicWorkerMutation(mutation: TopicWorkerMutationWire): RuntimeMutation {
+  switch (mutation.type) {
+    case "publish":
+      return {
+        type: "publish",
+        row: fromWireRow(mutation.row),
+      };
+    case "delta-publish":
+      return {
+        type: "delta-publish",
+        patch: fromWireRow(mutation.patch),
+      };
+    case "delete":
+      return {
+        type: "delete",
+        id: mutation.id,
+      };
+  }
 }
 
 export function encodeTopicWorkerMetrics(metrics: TopicWorkerMetrics): TopicWorkerMetricsWire {

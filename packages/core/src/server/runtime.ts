@@ -186,6 +186,8 @@ function makeViewServerRuntimeInternal(
       deltaPublish: (topic, patch) =>
         operations.deltaPublishWithTransport(topic, patch, "internal"),
       deleteById: (topic, id) => operations.deleteByIdWithTransport(topic, id, "internal"),
+      mutateBatch: (topic, mutations) =>
+        operations.mutateBatchWithTransport(topic, mutations, "internal"),
       syncHealth: syncHealthTopicIgnoringErrors,
     });
 

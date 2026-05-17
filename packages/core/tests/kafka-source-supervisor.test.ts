@@ -70,6 +70,14 @@ describe("KafkaSourceSupervisor", () => {
           }),
         deltaPublish: () => Effect.void,
         deleteById: () => Effect.void,
+        mutateBatch: (_topic, mutations) =>
+          Effect.sync(() => {
+            for (const mutation of mutations) {
+              if (mutation.type === "publish" && isRowObject(mutation.row)) {
+                publishedRows.push(mutation.row);
+              }
+            }
+          }),
         syncHealth: Effect.sync(() => {
           healthSyncs += 1;
         }),
@@ -139,6 +147,7 @@ describe("KafkaSourceSupervisor", () => {
         publish: () => Effect.void,
         deltaPublish: () => Effect.void,
         deleteById: () => Effect.void,
+        mutateBatch: () => Effect.void,
         syncHealth: Effect.sync(() => {
           failedHealthSyncs += 1;
         }),
@@ -172,6 +181,7 @@ describe("KafkaSourceSupervisor", () => {
         publish: () => Effect.void,
         deltaPublish: () => Effect.void,
         deleteById: () => Effect.void,
+        mutateBatch: () => Effect.void,
         syncHealth: Effect.void,
       });
       yield* stuckSupervisor.shutdown().pipe(Effect.timeout("1 second"));
@@ -275,6 +285,10 @@ function kafkaRecord(key: string, offset: string, row: OrderRow) {
     offset,
     value: JSON.stringify(row),
   };
+}
+
+function isRowObject(value: unknown): value is RowObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function waitForCondition(predicate: () => boolean): Effect.Effect<void> {

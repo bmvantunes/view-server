@@ -51,6 +51,7 @@ function workerHost(onShutdown: () => void): TopicWorkerHost {
     publish: () => Effect.void,
     deltaPublish: () => Effect.void,
     deleteById: () => Effect.void,
+    mutateBatch: () => Effect.void,
     getRowsForTest: Effect.succeed([]),
     shutdown: Effect.sync(onShutdown),
   };

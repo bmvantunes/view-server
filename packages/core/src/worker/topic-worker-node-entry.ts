@@ -19,6 +19,7 @@ import { makeTopicWorkerCore } from "./topic-worker-core.ts";
 import {
   TopicWorkerInitialMessage,
   TopicWorkerRpcs,
+  decodeTopicWorkerMutation,
   encodeTopicWorkerMetrics,
 } from "./worker-protocol.ts";
 
@@ -95,6 +96,10 @@ const TopicWorkerHandlersLive = TopicWorkerRpcs.toLayer(
       DeleteById: (payload) =>
         Effect.fnUntraced(function* () {
           yield* worker.deleteById(payload.id);
+        })(),
+      MutateBatch: (payload) =>
+        Effect.fnUntraced(function* () {
+          yield* worker.mutateBatch(payload.mutations.map(decodeTopicWorkerMutation));
         })(),
       RowsForTest: () => worker.getRowsForTest.pipe(Effect.map((rows) => rows.map(toWireRow))),
       Metrics: () => worker.metrics.pipe(Effect.map(encodeTopicWorkerMetrics)),

@@ -6,13 +6,14 @@ import type {
   KafkaSourceConfig,
   KafkaSourceMessage,
   RowObject,
+  SourceMutation,
 } from "../config/index.ts";
 import { kafkaIngestFailed, type ViewServerError } from "../errors.ts";
 import type { KafkaBatchMetrics, KafkaRecordBatch, KafkaTopicConsumer } from "./types.ts";
 
 export type KafkaSourceRuntime<TRow extends RowObject, TId extends keyof TRow & string> = Pick<
   EffectSourceContext<TRow, TId>,
-  "publish" | "deltaPublish" | "deleteById"
+  "publish" | "deltaPublish" | "deleteById" | "mutateBatch"
 >;
 
 export function runKafkaSource<TRow extends RowObject, TId extends keyof TRow & string>(args: {
@@ -74,18 +75,14 @@ export function ingestKafkaBatch<TRow extends RowObject, TId extends keyof TRow 
             "view_server.kafka.offset": lastRecord.offset,
           }),
     });
-    yield* Effect.forEach(
-      args.batch.records,
-      (record) =>
-        args.source
-          .decode(record)
-          .pipe(
-            Effect.flatMap((message) =>
-              applyKafkaSourceMessage(args.viewTopic, args.idField, args.runtime, message),
-            ),
-          ),
-      { discard: true },
+    const mutations = yield* Effect.forEach(args.batch.records, (record) =>
+      args.source
+        .decode(record)
+        .pipe(
+          Effect.flatMap((message) => kafkaSourceMutation(args.viewTopic, args.idField, message)),
+        ),
     );
+    yield* args.runtime.mutateBatch(mutations);
     if (metrics !== undefined && args.onBatchMetrics !== undefined) {
       yield* args.onBatchMetrics(metrics);
     }
@@ -148,6 +145,28 @@ export function applyKafkaSourceMessage<TRow extends RowObject, TId extends keyo
     );
   }
   return runtime.publish(message);
+}
+
+export function kafkaSourceMutation<TRow extends RowObject, TId extends keyof TRow & string>(
+  topic: string,
+  idField: TId,
+  message: KafkaSourceMessage<TRow, TId>,
+): Effect.Effect<SourceMutation<TRow, TId>, ViewServerError> {
+  if (isPublishEnvelope(message)) {
+    return Effect.succeed(message);
+  }
+  if (isDeltaPublishEnvelope(message)) {
+    return Effect.succeed(message);
+  }
+  if (isDeleteEnvelope(message)) {
+    return Effect.succeed(message);
+  }
+  if (!hasId(message, idField)) {
+    return Effect.fail(
+      kafkaIngestFailed(topic, new Error(`Decoded Kafka row is missing ${idField}`)),
+    );
+  }
+  return Effect.succeed({ type: "publish", row: message });
 }
 
 function parseKafkaOffset(offset: string | number | undefined): bigint | undefined {

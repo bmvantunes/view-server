@@ -33,6 +33,7 @@ import {
   type TopicWorkerMetrics,
 } from "../src/worker/topic-worker-core.ts";
 import type { SnapshotBackend, SnapshotBackendResult } from "../src/snapshot/index.ts";
+import { createMemorySnapshotBackend } from "../src/snapshot/snapshot-backend.ts";
 
 const Order = Schema.Struct({
   id: Schema.String,
@@ -174,6 +175,29 @@ const healthQuery = {
 >;
 
 describe("Effect RPC in-memory", () => {
+  it.effect("applies worker mutation batches with one backend batch", () =>
+    Effect.gen(function* () {
+      const backendBatches: number[] = [];
+      const backend = recordingBatchBackend(backendBatches);
+      const worker = yield* makeTopicWorkerCore("orders", config.topics.orders, {
+        snapshotBackend: backend,
+      });
+
+      yield* worker.mutateBatch([
+        { type: "publish", row: { id: "o-1", symbol: "AAPL", price: 100 } },
+        { type: "publish", row: { id: "o-2", symbol: "MSFT", price: 200 } },
+        { type: "delta-publish", patch: { id: "o-1", price: 125 } },
+        { type: "delete", id: "o-2" },
+      ]);
+
+      yield* waitForCondition(() => backendBatches.length === 1);
+      expect(backendBatches).toEqual([4]);
+      const rows = yield* worker.getRowsForTest;
+      expect(rows).toEqual([{ id: "o-1", symbol: "AAPL", price: 125 }]);
+      expect((yield* worker.metrics).version).toBe(4n);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("streams a snapshot and following delta without a subscription mode field", () =>
     Effect.gen(function* () {
       const runtime = yield* makeViewServerRuntime(config, {
@@ -2501,6 +2525,35 @@ function takeSnapshot<E>(
 }
 
 const yieldToHost = Effect.promise<void>(() => new Promise((resolve) => setTimeout(resolve, 0)));
+
+function waitForCondition(predicate: () => boolean): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (predicate()) {
+        return;
+      }
+      yield* yieldToHost;
+    }
+    return yield* Effect.die(new Error("Condition did not become true"));
+  });
+}
+
+function recordingBatchBackend(batchSizes: number[]): SnapshotBackend {
+  const backend = createMemorySnapshotBackend();
+  return {
+    init: backend.init,
+    applyBatch: (args) =>
+      backend.applyBatch(args).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            batchSizes.push(args.mutations.length);
+          }),
+        ),
+      ),
+    snapshot: backend.snapshot,
+    close: backend.close,
+  };
+}
 
 function groupedRefreshBackend(mode: "exact" | "behind"): SnapshotBackend {
   let backendVersion = 0n;

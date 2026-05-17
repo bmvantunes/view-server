@@ -113,6 +113,10 @@ function workerHost(topic: string, options: TopicWorkerHostOptions): TopicWorker
       }),
     deltaPublish: () => Effect.void,
     deleteById: () => Effect.void,
+    mutateBatch: (mutations) =>
+      Effect.sync(() => {
+        rows += mutations.filter((mutation) => mutation.type === "publish").length;
+      }),
     getRowsForTest: Effect.succeed([]),
     shutdown: Effect.void,
   };
