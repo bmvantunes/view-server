@@ -1,6 +1,4 @@
-import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import {
   rowKeyByField,
   rowKeyForQuery,
@@ -16,9 +14,26 @@ import {
   type RuntimeRowKeyFn,
 } from "../protocol/index.ts";
 import { aggregateRows } from "./aggregate-functions.ts";
+import {
+  compareFilterValues,
+  compareRowsForOrder,
+  compareValues as compareSortValue,
+  groupedQueryOrderBy,
+  rawQueryOrderBy,
+  stableSortRows,
+  valuesEqual,
+} from "./compare-semantics.ts";
 import { projectRow as projectRawRow, projectedRowsEqual as rowsEqual } from "./projection.ts";
 
-export { projectRawRow, rowsEqual };
+export {
+  compareRowsForOrder,
+  compareSortValue,
+  groupedQueryOrderBy,
+  projectRawRow,
+  rawQueryOrderBy,
+  rowsEqual,
+  stableSortRows,
+};
 
 export type QueryExecutionResult = {
   readonly rows: readonly RuntimeRow[];
@@ -186,17 +201,17 @@ export function matchesFilter(
 
   switch (filter.comparator) {
     case "equals":
-      return compareEquality(rowValue, filterValue, strictStringEquality);
+      return valuesEqual(rowValue, filterValue, strictStringEquality);
     case "not_equals":
-      return !compareEquality(rowValue, filterValue, strictStringEquality);
+      return !valuesEqual(rowValue, filterValue, strictStringEquality);
     case "greater_than":
-      return compareComparable(rowValue, filterValue) > 0;
+      return compareFilterValues(rowValue, filterValue) > 0;
     case "greater_than_or_equal":
-      return compareComparable(rowValue, filterValue) >= 0;
+      return compareFilterValues(rowValue, filterValue) >= 0;
     case "less_than":
-      return compareComparable(rowValue, filterValue) < 0;
+      return compareFilterValues(rowValue, filterValue) < 0;
     case "less_than_or_equal":
-      return compareComparable(rowValue, filterValue) <= 0;
+      return compareFilterValues(rowValue, filterValue) <= 0;
     case "contains":
       return (
         typeof rowValue === "string" &&
@@ -212,7 +227,7 @@ export function matchesFilter(
     case "one_of":
       return (
         Array.isArray(filterValue) &&
-        filterValue.some((candidate) => compareEquality(rowValue, candidate, strictStringEquality))
+        filterValue.some((candidate) => valuesEqual(rowValue, candidate, strictStringEquality))
       );
   }
 }
@@ -327,45 +342,6 @@ export function isGroupedQuery(query: RuntimeQuery): query is RuntimeGroupedQuer
 
 export const rowKeyForMemoryQuery = rowKeyForQuery;
 
-export function rawQueryOrderBy(query: RuntimeRawQuery, idField: string): OrderBy<RuntimeRow> {
-  return [
-    ...(query.orderBy ?? []),
-    ...(query.orderBy?.some((order) => order.field === idField)
-      ? []
-      : [{ field: idField, direction: "asc" as const }]),
-  ];
-}
-
-export function compareRowsForOrder(
-  left: RuntimeRow,
-  right: RuntimeRow,
-  orderBy: OrderBy<RuntimeRow>,
-): number {
-  for (const order of orderBy) {
-    const compared = compareSortValue(left[order.field], right[order.field]);
-    if (compared !== 0) {
-      return order.direction === "asc" ? compared : -compared;
-    }
-  }
-  return 0;
-}
-
-export function stableSortRows(
-  rows: readonly RuntimeRow[],
-  orderBy: OrderBy<RuntimeRow>,
-): RuntimeRow[] {
-  return rows
-    .map((row, index) => ({ row, index }))
-    .sort((left, right) => {
-      const compared = compareRowsForOrder(left.row, right.row, orderBy);
-      if (compared !== 0) {
-        return compared;
-      }
-      return left.index - right.index;
-    })
-    .map((entry) => entry.row);
-}
-
 function insertTopSortEntry(
   entries: SortEntry[],
   candidate: SortEntry,
@@ -415,59 +391,6 @@ function compareSortEntries(
   return compared !== 0 ? compared : left.index - right.index;
 }
 
-export function compareSortValue(left: unknown, right: unknown): number {
-  if (left == null && right == null) {
-    return 0;
-  }
-  if (left == null) {
-    return -1;
-  }
-  if (right == null) {
-    return 1;
-  }
-  return compareComparable(left, right);
-}
-
-function compareComparable(left: unknown, right: unknown): number {
-  if (BigDecimal.isBigDecimal(left) || BigDecimal.isBigDecimal(right)) {
-    const leftDecimal = toBigDecimal(left);
-    const rightDecimal = toBigDecimal(right);
-    if (leftDecimal !== undefined && rightDecimal !== undefined) {
-      return BigDecimal.Order(leftDecimal, rightDecimal);
-    }
-  }
-  if (typeof left === "string" && typeof right === "string") {
-    return left.toLocaleLowerCase().localeCompare(right.toLocaleLowerCase());
-  }
-  if (typeof left === "bigint" && typeof right === "bigint") {
-    return left === right ? 0 : left < right ? -1 : 1;
-  }
-  if (typeof left === "number" && typeof right === "number") {
-    return left === right ? 0 : left < right ? -1 : 1;
-  }
-  if (typeof left === "boolean" && typeof right === "boolean") {
-    return left === right ? 0 : left ? 1 : -1;
-  }
-  return String(left).toLocaleLowerCase().localeCompare(String(right).toLocaleLowerCase());
-}
-
-function compareEquality(left: unknown, right: unknown, strictStringEquality = false): boolean {
-  if (BigDecimal.isBigDecimal(left) || BigDecimal.isBigDecimal(right)) {
-    const leftDecimal = toBigDecimal(left);
-    const rightDecimal = toBigDecimal(right);
-    if (leftDecimal !== undefined && rightDecimal !== undefined) {
-      return BigDecimal.equals(leftDecimal, rightDecimal);
-    }
-  }
-  if (typeof left === "string" && typeof right === "string") {
-    if (strictStringEquality) {
-      return left === right;
-    }
-    return left.toLocaleLowerCase() === right.toLocaleLowerCase();
-  }
-  return Object.is(left, right);
-}
-
 function collectFilterFields(filter: RuntimeFilterNode | undefined, fields: Set<string>): void {
   if (filter === undefined) {
     return;
@@ -479,15 +402,6 @@ function collectFilterFields(filter: RuntimeFilterNode | undefined, fields: Set<
     return;
   }
   fields.add(filter.field);
-}
-
-export function groupedQueryOrderBy(query: RuntimeGroupedQuery): OrderBy<RuntimeRow> {
-  return [
-    ...(query.orderBy ?? []),
-    ...query.groupBy
-      .filter((field) => !query.orderBy?.some((order) => order.field === field))
-      .map((field) => ({ field, direction: "asc" as const })),
-  ];
 }
 
 function buildGroups(
@@ -545,20 +459,4 @@ function normalizePositiveInteger(value: number | undefined, fallback: number): 
   return value === undefined || !Number.isFinite(value) || value <= 0
     ? fallback
     : Math.trunc(value);
-}
-
-function toBigDecimal(value: unknown): BigDecimal.BigDecimal | undefined {
-  if (BigDecimal.isBigDecimal(value)) {
-    return value;
-  }
-  if (typeof value === "bigint") {
-    return BigDecimal.fromBigInt(value);
-  }
-  if (typeof value === "number") {
-    return Option.getOrUndefined(BigDecimal.fromNumber(value));
-  }
-  if (typeof value === "string") {
-    return Option.getOrUndefined(BigDecimal.fromString(value));
-  }
-  return undefined;
 }
