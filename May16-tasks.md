@@ -82,6 +82,9 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 36: RowKey module exposes topic-derived get/equals/wire helpers,
       routes raw query row-key construction through it, and proves missing-id,
       delete/diff, active index, and client visible-row semantics agree.
+- [x] Task 37: Projection module owns raw row projection, projected row equality,
+      projected-field change detection, and visible hidden-field no-op decisions
+      with memory snapshot and active view parity tests.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
 - [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [x] Task 39: chDB SQL compiler contract tests and internal compiler module.

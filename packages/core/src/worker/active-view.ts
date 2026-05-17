@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import type { RuntimeRawQuery, RuntimeRow, RuntimeRowKey } from "../protocol/index.ts";
+import { stableKeyEquals } from "../protocol/stable-key.ts";
 import { activeRawPlanKey } from "./active-raw-plan-key.ts";
 import {
   estimateActiveSortedIndexBytes,
@@ -13,14 +14,18 @@ import {
   matchesFilter,
   normalizeLimit,
   normalizeOffset,
-  projectRawRow,
   rawQueryOrderBy,
   rowId,
-  rowsEqual,
   type QueryExecutionOptions,
   type QueryExecutionResult,
 } from "./query-engine.ts";
 import type { MutationLogEntry } from "./mutation-log.ts";
+import {
+  projectRow,
+  projectedFieldsMayHaveChanged,
+  projectedRowsEqual,
+  visibleNonProjectedUpdateNoop,
+} from "./projection.ts";
 
 export { activeRawPlanKey, stableStringify } from "./active-raw-plan-key.ts";
 
@@ -385,7 +390,7 @@ class IncrementalRawPlan implements ActiveRawPlan {
   }
 
   private projectById(id: RuntimeRowKey, query: RuntimeRawQuery): RuntimeRow {
-    return projectRawRow(this.rowById(id), query.fields, this.idField);
+    return projectRow(this.rowById(id), query.fields, this.idField);
   }
 
   private rowById(id: RuntimeRowKey | undefined): RuntimeRow {
@@ -464,34 +469,35 @@ class PlanBackedActiveRawView implements ActiveRawView {
       mutation.kind !== "update" ||
       mutation.before === undefined ||
       mutation.after === undefined ||
-      !this.projectedFieldsMayHaveChanged(mutation)
+      visibleNonProjectedUpdateNoop({
+        mutation,
+        fields: this.query.fields,
+        idField: this.idField,
+        visibleIds,
+      }) ||
+      !projectedFieldsMayHaveChanged({
+        fields: this.query.fields,
+        idField: this.idField,
+        changedFields: mutation.changedFields,
+      })
     ) {
       return false;
     }
     const beforeId = rowId(mutation.before, this.idField);
     const afterId = rowId(mutation.after, this.idField);
     const rowIsVisible = visibleIds.some(
-      (id) => Object.is(id, beforeId) || Object.is(id, afterId) || Object.is(id, mutation.id),
+      (id) =>
+        stableKeyEquals(id, beforeId) ||
+        stableKeyEquals(id, afterId) ||
+        stableKeyEquals(id, mutation.id),
     );
     if (!rowIsVisible) {
       return false;
     }
-    return !rowsEqual(
-      projectRawRow(mutation.before, this.query.fields, this.idField),
-      projectRawRow(mutation.after, this.query.fields, this.idField),
+    return !projectedRowsEqual(
+      projectRow(mutation.before, this.query.fields, this.idField),
+      projectRow(mutation.after, this.query.fields, this.idField),
     );
-  }
-
-  private projectedFieldsMayHaveChanged(mutation: MutationLogEntry): boolean {
-    if (mutation.changedFields.has(this.idField)) {
-      return true;
-    }
-    for (const [field, enabled] of Object.entries(this.query.fields)) {
-      if (enabled && mutation.changedFields.has(field)) {
-        return true;
-      }
-    }
-    return false;
   }
 }
 

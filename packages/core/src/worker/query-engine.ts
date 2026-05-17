@@ -16,6 +16,9 @@ import {
   type RuntimeRowKeyFn,
 } from "../protocol/index.ts";
 import { aggregateRows } from "./aggregate-functions.ts";
+import { projectRow as projectRawRow, projectedRowsEqual as rowsEqual } from "./projection.ts";
+
+export { projectRawRow, rowsEqual };
 
 export type QueryExecutionResult = {
   readonly rows: readonly RuntimeRow[];
@@ -324,21 +327,6 @@ export function isGroupedQuery(query: RuntimeQuery): query is RuntimeGroupedQuer
 
 export const rowKeyForMemoryQuery = rowKeyForQuery;
 
-export function projectRawRow(
-  row: RuntimeRow,
-  fields: RuntimeRawQuery["fields"],
-  idField: string,
-): RuntimeRow {
-  const projected: RuntimeRow = {};
-  for (const [field, enabled] of Object.entries(fields)) {
-    if (enabled) {
-      projected[field] = row[field];
-    }
-  }
-  projected[idField] = row[idField];
-  return projected;
-}
-
 export function rawQueryOrderBy(query: RuntimeRawQuery, idField: string): OrderBy<RuntimeRow> {
   return [
     ...(query.orderBy ?? []),
@@ -478,19 +466,6 @@ function compareEquality(left: unknown, right: unknown, strictStringEquality = f
     return left.toLocaleLowerCase() === right.toLocaleLowerCase();
   }
   return Object.is(left, right);
-}
-
-export function rowsEqual(left: RuntimeRow | undefined, right: RuntimeRow): boolean {
-  if (left === undefined) {
-    return false;
-  }
-  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
-  for (const key of keys) {
-    if (!Object.is(left[key], right[key])) {
-      return false;
-    }
-  }
-  return true;
 }
 
 function collectFilterFields(filter: RuntimeFilterNode | undefined, fields: Set<string>): void {
