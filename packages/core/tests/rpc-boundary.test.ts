@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { defineConfig } from "../src/config/index.ts";
-import type { RawQuery } from "../src/protocol/index.ts";
+import type { GroupedQuery, RawQuery } from "../src/protocol/index.ts";
 import { LiveQueryStore } from "../src/client/live-query-store.ts";
 import {
   queryResultToRuntimeRows,
@@ -33,7 +33,23 @@ const config = defineConfig({
   },
 });
 
+const OptionalOrder = Schema.Struct({
+  id: Schema.String,
+  note: Schema.optional(Schema.String),
+  price: Schema.Number,
+});
+
+const optionalConfig = defineConfig({
+  topics: {
+    optionalOrders: {
+      id: "id",
+      schema: OptionalOrder,
+    },
+  },
+});
+
 type OrderRow = typeof Order.Type;
+type OptionalOrderRow = typeof OptionalOrder.Type;
 
 const query = {
   fields: {
@@ -48,6 +64,25 @@ const query = {
   orderBy: [{ field: "price", direction: "asc" }],
   limit: 5,
 } satisfies RawQuery<OrderRow, { readonly id: true; readonly price: true }>;
+
+const optionalQuery = {
+  fields: {
+    id: true,
+    note: true,
+  },
+  limit: 5,
+} satisfies RawQuery<OptionalOrderRow, { readonly id: true; readonly note: true }>;
+
+const nullableAggregateQuery = {
+  groupBy: ["note"],
+  aggregates: {
+    totalPrice: {
+      aggFunc: "sum",
+      field: "price",
+    },
+  },
+  limit: 5,
+} satisfies GroupedQuery<OptionalOrderRow>;
 
 describe("client RPC boundary helpers", () => {
   it("builds typed RPC query payloads without changing query shape", () => {
@@ -127,6 +162,42 @@ describe("client RPC boundary helpers", () => {
       expect(rowKeyForTypedQuery<typeof config, "orders", typeof query>(query, "id")(rows[0])).toBe(
         "o-1",
       );
+    }),
+  );
+
+  it.effect("accepts SQL NULL materialization for optional fields and nullable aggregates", () =>
+    Effect.gen(function* () {
+      const rawRows = yield* rpcQueryRows<
+        typeof optionalConfig,
+        "optionalOrders",
+        typeof optionalQuery
+      >(
+        {
+          rows: [{ id: "o-1", note: null }],
+          totalRows: 1,
+          version: "1",
+        },
+        optionalQuery,
+        optionalConfig,
+        "optionalOrders",
+      );
+      expect(queryResultToRuntimeRows(rawRows)).toEqual([{ id: "o-1", note: null }]);
+
+      const groupedRows = yield* rpcQueryRows<
+        typeof optionalConfig,
+        "optionalOrders",
+        typeof nullableAggregateQuery
+      >(
+        {
+          rows: [{ note: null, totalPrice: null }],
+          totalRows: 1,
+          version: "1",
+        },
+        nullableAggregateQuery,
+        optionalConfig,
+        "optionalOrders",
+      );
+      expect(queryResultToRuntimeRows(groupedRows)).toEqual([{ note: null, totalPrice: null }]);
     }),
   );
 

@@ -1,20 +1,30 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { applyDeltaOperations } from "../src/client/visible-rows.ts";
 import type {
+  DeltaEvent,
+  DeltaOperation,
   RuntimeGroupedQuery,
   RuntimeQuery,
   RuntimeRawQuery,
   RuntimeRow,
 } from "../src/protocol/index.ts";
-import { stableStringify } from "../src/protocol/index.ts";
+import { rowKeyByField, rowKeyForQuery, stableStringify } from "../src/protocol/index.ts";
 import { createInProcessChdbSnapshotBackend } from "../src/snapshot/chdb-in-process-backend.ts";
 import type { VersionedRow } from "../src/snapshot/index.ts";
 import { makeActiveRawView } from "../src/worker/active-view.ts";
+import { makeIncrementalGroupedAccumulator } from "../src/worker/grouped-accumulator.ts";
+import { groupedAccumulatorQueryResult } from "../src/worker/grouped-accumulator-fanout.ts";
 import type { MutationLogEntry, WorkerVersion } from "../src/worker/mutation-log.ts";
 import {
+  diffVisibleRows,
   executeGroupedQuery,
   executeRawQuery,
+  matchesFilter,
   type QueryExecutionOptions,
   type QueryExecutionResult,
 } from "../src/worker/query-engine.ts";
@@ -122,6 +132,208 @@ describe("query semantics parity", () => {
       );
     }).pipe(Effect.scoped),
   );
+
+  it.effect(
+    "uses chDB as the oracle for null, missing, and direction-sensitive raw sort order",
+    () =>
+      Effect.gen(function* () {
+        const rows = edgeCaseRows();
+        const backend = createInProcessChdbSnapshotBackend();
+        yield* Effect.addFinalizer(() => backend.close());
+        yield* backend.init({
+          topic: "orders",
+          idField: "id",
+          version: 1n,
+          rows: versionedRows(rows, 1n),
+          literalStringFields: queryOptions.literalStringFields,
+        });
+
+        for (const entry of nullSortParityQueries) {
+          const memory = executeRawQuery(rows, entry.query, "id", queryOptions);
+          const active = makeActiveRawView(rows, entry.query, "id", queryOptions).snapshot();
+          const chdb = yield* backend.snapshot({ query: entry.query, targetVersion: 1n });
+
+          expectParity(`${entry.name}: memory`, memory, chdb, entry.query, {
+            rows,
+            seed: edgeSeed,
+          });
+          expectParity(`${entry.name}: active`, active, chdb, entry.query, {
+            rows,
+            seed: edgeSeed,
+          });
+        }
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("matches chDB for nullish filters, booleans, one_of, and pagination boundaries", () =>
+    Effect.gen(function* () {
+      const rows = edgeCaseRows();
+      const backend = createInProcessChdbSnapshotBackend();
+      yield* Effect.addFinalizer(() => backend.close());
+      yield* backend.init({
+        topic: "orders",
+        idField: "id",
+        version: 1n,
+        rows: versionedRows(rows, 1n),
+        literalStringFields: queryOptions.literalStringFields,
+      });
+
+      for (const entry of filterParityQueries) {
+        const memory = executeRawQuery(rows, entry.query, "id", queryOptions);
+        const active = makeActiveRawView(rows, entry.query, "id", queryOptions).snapshot();
+        const chdb = yield* backend.snapshot({ query: entry.query, targetVersion: 1n });
+
+        expectParity(`${entry.name}: memory`, memory, chdb, entry.query, {
+          rows,
+          seed: edgeSeed,
+        });
+        expectParity(`${entry.name}: active`, active, chdb, entry.query, {
+          rows,
+          seed: edgeSeed,
+        });
+      }
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "matches grouped aggregate semantics across memory, grouped accumulator, and chDB",
+    () =>
+      Effect.gen(function* () {
+        const rows = edgeCaseRows();
+        const backend = createInProcessChdbSnapshotBackend();
+        yield* Effect.addFinalizer(() => backend.close());
+        yield* backend.init({
+          topic: "orders",
+          idField: "id",
+          version: 1n,
+          rows: versionedRows(rows, 1n),
+          literalStringFields: queryOptions.literalStringFields,
+        });
+
+        for (const entry of exhaustiveGroupedParityQueries) {
+          const memory = executeGroupedQuery(rows, entry.query, queryOptions);
+          const chdb = yield* backend.snapshot({ query: entry.query, targetVersion: 1n });
+          expectParity(`${entry.name}: memory`, memory, chdb, entry.query, {
+            rows,
+            seed: edgeSeed,
+          });
+
+          const accumulator = makeIncrementalGroupedAccumulator({
+            rows: rows.filter((row) => matchesFilter(row, entry.query.where, queryOptions)),
+            query: entry.query,
+            idOf: (row) => rowKeyByField(row, "id"),
+          });
+          if (accumulator !== undefined) {
+            const accumulated = groupedAccumulatorQueryResult({
+              query: entry.query,
+              groupedAccumulator: accumulator,
+            });
+            expectParity(`${entry.name}: accumulator`, accumulated, chdb, entry.query, {
+              rows,
+              seed: edgeSeed,
+            });
+          }
+        }
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("makes coalesced client deltas converge to a fresh chDB snapshot", () =>
+    Effect.gen(function* () {
+      let rows = edgeCaseRows();
+      const query = mutationParityQuery;
+      const view = makeActiveRawView(rows, query, "id", queryOptions);
+      let clientRows = executeRawQuery(rows, query, "id", queryOptions).rows;
+      const backend = createInProcessChdbSnapshotBackend();
+      yield* Effect.addFinalizer(() => backend.close());
+      yield* backend.init({
+        topic: "orders",
+        idField: "id",
+        version: 1n,
+        rows: versionedRows(rows, 1n),
+        literalStringFields: queryOptions.literalStringFields,
+      });
+
+      const mutations = edgeCaseMutations(rows);
+      for (const mutation of mutations) {
+        const previous = view.snapshot();
+        rows = applyMutation(rows, mutation);
+        view.applyMutation(mutation);
+        const next = view.snapshot();
+        const ops = diffVisibleRows(previous.rows, next.rows, rowKeyForQuery(query, "id"));
+        clientRows = applyDeltaOperations(
+          clientRows,
+          deltaEvent(mutation, ops, next.totalRows),
+          "id",
+        );
+
+        expectParity(
+          `active after ${mutation.kind} ${mutation.version}`,
+          next,
+          executeRawQuery(rows, query, "id", queryOptions),
+          query,
+          { rows, mutations, seed: edgeSeed },
+        );
+      }
+
+      yield* backend.applyBatch({
+        mutations,
+        highestVersion: mutations[mutations.length - 1]?.version ?? 1n,
+      });
+      const chdb = yield* backend.snapshot({
+        query,
+        targetVersion: mutations[mutations.length - 1]?.version ?? 1n,
+      });
+
+      expectParity(
+        "client delta convergence",
+        { rows: clientRows, totalRows: chdb.totalRows },
+        chdb,
+        query,
+        {
+          rows,
+          mutations,
+          seed: edgeSeed,
+        },
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("runs deterministic small, medium, and large fuzz parity profiles", () =>
+    Effect.gen(function* () {
+      for (const profile of fuzzProfiles) {
+        const rows = deterministicRows(profile.seed, profile.rows);
+        const backend = createInProcessChdbSnapshotBackend();
+        yield* Effect.addFinalizer(() => backend.close());
+        yield* backend.init({
+          topic: `orders_${profile.name}`,
+          idField: "id",
+          version: 1n,
+          rows: versionedRows(rows, 1n),
+          literalStringFields: queryOptions.literalStringFields,
+        });
+
+        for (const entry of fuzzRawQueries(profile.seed)) {
+          const memory = executeRawQuery(rows, entry.query, "id", queryOptions);
+          const active = makeActiveRawView(rows, entry.query, "id", queryOptions).snapshot();
+          const chdb = yield* backend.snapshot({ query: entry.query, targetVersion: 1n });
+          const context = { rows, seed: profile.seed, profile: profile.name };
+
+          expectParity(`${profile.name}/${entry.name}: memory`, memory, chdb, entry.query, context);
+          expectParity(`${profile.name}/${entry.name}: active`, active, chdb, entry.query, context);
+        }
+
+        for (const entry of fuzzGroupedQueries(profile.seed)) {
+          const memory = executeGroupedQuery(rows, entry.query, queryOptions);
+          const chdb = yield* backend.snapshot({ query: entry.query, targetVersion: 1n });
+          expectParity(`${profile.name}/${entry.name}: grouped`, memory, chdb, entry.query, {
+            rows,
+            seed: profile.seed,
+            profile: profile.name,
+          });
+        }
+      }
+    }).pipe(Effect.scoped),
+  );
 });
 
 type NamedRawQuery = {
@@ -133,6 +345,27 @@ type NamedGroupedQuery = {
   readonly name: string;
   readonly query: RuntimeGroupedQuery;
 };
+
+type ParityContext = {
+  readonly seed?: number | undefined;
+  readonly profile?: string | undefined;
+  readonly rows?: readonly RuntimeRow[] | undefined;
+  readonly mutations?: readonly MutationLogEntry[] | undefined;
+};
+
+const edgeSeed = 0x516_2026;
+
+const commonRawFields = {
+  id: true,
+  symbol: true,
+  status: true,
+  price: true,
+  quantity: true,
+  decimalPrice: true,
+  nullableRank: true,
+  nullableText: true,
+  active: true,
+} satisfies RuntimeRawQuery["fields"];
 
 const rawParityQueries: readonly NamedRawQuery[] = [
   {
@@ -353,30 +586,526 @@ const movingRawQuery = {
   limit: 12,
 } satisfies RuntimeRawQuery;
 
+const nullSortParityQueries: readonly NamedRawQuery[] = [
+  {
+    name: "nullable number ASC explicit null missing undefined and negative zero",
+    query: {
+      fields: commonRawFields,
+      orderBy: [
+        { field: "nullableRank", direction: "asc" },
+        { field: "id", direction: "asc" },
+      ],
+      limit: 50,
+    },
+  },
+  {
+    name: "nullable number DESC explicit null missing undefined and negative zero",
+    query: {
+      fields: commonRawFields,
+      orderBy: [
+        { field: "nullableRank", direction: "desc" },
+        { field: "id", direction: "asc" },
+      ],
+      limit: 50,
+    },
+  },
+  {
+    name: "nullable string ASC with empty uppercase lowercase accents and missing values",
+    query: {
+      fields: commonRawFields,
+      orderBy: [
+        { field: "nullableText", direction: "asc" },
+        { field: "id", direction: "asc" },
+      ],
+      limit: 50,
+    },
+  },
+  {
+    name: "nullable string DESC with empty uppercase lowercase accents and missing values",
+    query: {
+      fields: commonRawFields,
+      orderBy: [
+        { field: "nullableText", direction: "desc" },
+        { field: "id", direction: "asc" },
+      ],
+      limit: 50,
+    },
+  },
+  {
+    name: "BigDecimal ASC with null missing negative zero and scale variants",
+    query: {
+      fields: commonRawFields,
+      orderBy: [
+        { field: "decimalPrice", direction: "asc" },
+        { field: "id", direction: "asc" },
+      ],
+      limit: 50,
+    },
+  },
+  {
+    name: "BigDecimal DESC with null missing negative zero and scale variants",
+    query: {
+      fields: commonRawFields,
+      orderBy: [
+        { field: "decimalPrice", direction: "desc" },
+        { field: "id", direction: "asc" },
+      ],
+      limit: 50,
+    },
+  },
+  {
+    name: "multi-sort nullable DESC then secondary ASC",
+    query: {
+      fields: commonRawFields,
+      orderBy: [
+        { field: "nullableRank", direction: "desc" },
+        { field: "nullableText", direction: "asc" },
+        { field: "id", direction: "asc" },
+      ],
+      limit: 50,
+    },
+  },
+];
+
+const filterParityQueries: readonly NamedRawQuery[] = [
+  {
+    name: "equals null matches explicit null undefined and missing fields",
+    query: {
+      fields: commonRawFields,
+      where: { field: "nullableRank", comparator: "equals", value: null },
+      orderBy: [{ field: "id", direction: "asc" }],
+      limit: 50,
+    },
+  },
+  {
+    name: "not equals null excludes explicit null undefined and missing fields",
+    query: {
+      fields: commonRawFields,
+      where: { field: "nullableRank", comparator: "not_equals", value: null },
+      orderBy: [{ field: "nullableRank", direction: "asc" }],
+      limit: 50,
+    },
+  },
+  {
+    name: "broad one_of handles null and mixed string casing",
+    query: {
+      fields: commonRawFields,
+      where: { field: "symbol", comparator: "one_of", value: ["aapl", null, "MSFT", "msft"] },
+      orderBy: [
+        { field: "symbol", direction: "asc" },
+        { field: "id", direction: "asc" },
+      ],
+      limit: 50,
+    },
+  },
+  {
+    name: "strict one_of preserves literal string casing",
+    query: {
+      fields: commonRawFields,
+      where: { field: "status", comparator: "one_of", value: ["open", null] },
+      orderBy: [{ field: "id", direction: "asc" }],
+      limit: 50,
+    },
+  },
+  {
+    name: "boolean filter and sort",
+    query: {
+      fields: commonRawFields,
+      where: { field: "active", comparator: "equals", value: true },
+      orderBy: [
+        { field: "active", direction: "asc" },
+        { field: "id", direction: "asc" },
+      ],
+      limit: 50,
+    },
+  },
+  {
+    name: "empty one_of returns no rows",
+    query: {
+      fields: commonRawFields,
+      where: { field: "symbol", comparator: "one_of", value: [] },
+      orderBy: [{ field: "id", direction: "asc" }],
+      limit: 50,
+    },
+  },
+  {
+    name: "deep contradictory filters return no rows",
+    query: {
+      fields: commonRawFields,
+      where: {
+        op: "and",
+        conditions: [
+          { field: "quantity", comparator: "greater_than", value: 10 },
+          {
+            op: "or",
+            conditions: [
+              { field: "quantity", comparator: "less_than", value: 0 },
+              {
+                op: "and",
+                conditions: [
+                  { field: "status", comparator: "equals", value: "open" },
+                  { field: "status", comparator: "equals", value: "closed" },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      limit: 50,
+    },
+  },
+  {
+    name: "offset at exact boundary and beyond total rows",
+    query: {
+      fields: commonRawFields,
+      orderBy: [{ field: "id", direction: "asc" }],
+      offset: 50,
+      limit: 50,
+    },
+  },
+];
+
+const exhaustiveGroupedParityQueries: readonly NamedGroupedQuery[] = [
+  {
+    name: "grouped null keys and full aggregate set",
+    query: {
+      groupBy: ["nullableText", "active"],
+      aggregates: {
+        rows: { aggFunc: "count", field: "id" },
+        distinctStatuses: { aggFunc: "count_distinct", field: "status" },
+        totalQuantity: { aggFunc: "sum", field: "quantity" },
+        averageQuantity: { aggFunc: "avg", field: "quantity" },
+        minQuantity: { aggFunc: "min", field: "quantity" },
+        maxQuantity: { aggFunc: "max", field: "quantity" },
+        totalDecimal: { aggFunc: "sum", field: "decimalPrice" },
+        minDecimal: { aggFunc: "min", field: "decimalPrice" },
+        maxDecimal: { aggFunc: "max", field: "decimalPrice" },
+        labels: { aggFunc: "string_concat", field: "symbol", joiner: "|", sort: "asc" },
+        distinctLabels: {
+          aggFunc: "string_concat_distinct",
+          field: "symbol",
+          joiner: "|",
+          sort: "desc",
+        },
+      },
+      orderBy: [
+        { field: "nullableText", direction: "asc" },
+        { field: "active", direction: "asc" },
+      ],
+      limit: 50,
+    },
+  },
+  {
+    name: "incremental grouped accumulator eligible numeric aggregates",
+    query: {
+      groupBy: ["nullableText", "active"],
+      aggregates: {
+        rows: { aggFunc: "count", field: "id" },
+        totalQuantity: { aggFunc: "sum", field: "quantity" },
+        minQuantity: { aggFunc: "min", field: "quantity" },
+        maxQuantity: { aggFunc: "max", field: "quantity" },
+      },
+      where: {
+        op: "or",
+        conditions: [
+          { field: "status", comparator: "equals", value: "open" },
+          { field: "nullableRank", comparator: "equals", value: null },
+        ],
+      },
+      orderBy: [
+        { field: "totalQuantity", direction: "desc" },
+        { field: "nullableText", direction: "asc" },
+        { field: "active", direction: "asc" },
+      ],
+      limit: 50,
+    },
+  },
+];
+
+const mutationParityQuery = {
+  fields: {
+    id: true,
+    status: true,
+    price: true,
+    nullableRank: true,
+  },
+  where: { field: "status", comparator: "equals", value: "open" },
+  orderBy: [
+    { field: "price", direction: "asc" },
+    { field: "id", direction: "asc" },
+  ],
+  limit: 20,
+} satisfies RuntimeRawQuery;
+
+const fuzzProfiles = [
+  { name: "small", rows: 100, seed: 0x100 },
+  { name: "medium", rows: 10_000, seed: 0x10_000 },
+  { name: "large", rows: 250_000, seed: 0x250_000 },
+] as const;
+
+function edgeCaseRows(): readonly RuntimeRow[] {
+  return [
+    {
+      id: "edge-00",
+      symbol: "AAPL",
+      status: "open",
+      side: "buy",
+      price: -0,
+      quantity: null,
+      decimalPrice: BigDecimal.fromStringUnsafe("1.0"),
+      nullableRank: null,
+      nullableText: null,
+      active: true,
+      hidden: "alpha",
+    },
+    {
+      id: "edge-01",
+      symbol: "aapl",
+      status: "OPEN",
+      side: "sell",
+      price: 0,
+      quantity: 10,
+      decimalPrice: BigDecimal.fromStringUnsafe("1.00"),
+      nullableRank: 0,
+      nullableText: "",
+      active: false,
+      hidden: "beta",
+    },
+    {
+      id: "edge-02",
+      symbol: "ÁAPL",
+      status: "open",
+      side: "buy",
+      price: -10,
+      quantity: 20,
+      decimalPrice: BigDecimal.fromStringUnsafe("-999999999999999.000000000000000001"),
+      nullableRank: -1,
+      nullableText: "Álpha",
+      active: true,
+      hidden: "gamma",
+    },
+    {
+      id: "edge-03",
+      symbol: "msft",
+      status: "closed",
+      side: "sell",
+      price: 100.25,
+      quantity: 0,
+      decimalPrice: BigDecimal.fromStringUnsafe("0.000000000000000000"),
+      nullableRank: undefined,
+      nullableText: "alpha",
+      hidden: "delta",
+    },
+    {
+      id: "edge-04",
+      symbol: "MSFT",
+      status: null,
+      side: "buy",
+      price: 100.25,
+      quantity: undefined,
+      decimalPrice: null,
+      nullableRank: 2,
+      nullableText: "Zulu",
+      active: false,
+      hidden: "epsilon",
+    },
+    {
+      id: "edge-05",
+      side: "sell",
+      price: 3.5,
+      quantity: 4,
+      decimalPrice: BigDecimal.fromStringUnsafe("100000000000000000000.000000000000000001"),
+      nullableText: "ångström",
+      active: true,
+      hidden: "zeta",
+    },
+    {
+      id: "edge-06",
+      symbol: null,
+      status: "open",
+      side: "buy",
+      price: 3.5,
+      quantity: 4,
+      nullableRank: null,
+      nullableText: undefined,
+      active: undefined,
+      hidden: "eta",
+    },
+    {
+      id: "edge-07",
+      symbol: "NVDA",
+      status: "pending",
+      side: "sell",
+      price: 3.5,
+      quantity: 4,
+      decimalPrice: BigDecimal.fromStringUnsafe("-0.00"),
+      nullableRank: 2,
+      nullableText: "Alpha",
+      active: false,
+      hidden: "theta",
+    },
+  ];
+}
+
 function deterministicRows(initialSeed: number, count: number): readonly RuntimeRow[] {
   let state = initialSeed;
-  const symbols = ["AAPL", "aapl", "MSFT", "msft", "NVDA", "AMZN"];
-  const statuses = ["open", "OPEN", "closed", "pending"];
+  const symbols = ["AAPL", "aapl", "MSFT", "msft", "NVDA", "AMZN", "ÁAPL", "ångström"];
+  const statuses = ["open", "OPEN", "closed", "pending", null];
   const sides = ["buy", "sell"];
   return Array.from({ length: count }, (_, index) => {
     state = nextState(state);
-    const price = 50 + (state % 125) + (index % 3) * 0.25;
+    const price =
+      index % 97 === 0 ? -0 : 50 + (state % 125) + (index % 3) * 0.25 * (index % 2 === 0 ? 1 : -1);
     state = nextState(state);
-    const quantity = 1 + (state % 50);
+    const quantity = index % 19 === 0 ? null : 1 + (state % 50);
     const decimalPrice = BigDecimal.fromStringUnsafe(
       `${price.toFixed(2)}0000000000000000${String(index % 10)}`,
     );
-    return {
+    const row: RuntimeRow = {
       id: `o-${String(index).padStart(3, "0")}`,
-      symbol: symbols[index % symbols.length],
+      symbol: index % 29 === 0 ? null : symbols[index % symbols.length],
       status: statuses[(index + (state % statuses.length)) % statuses.length],
       side: sides[index % sides.length],
       price,
       quantity,
-      decimalPrice,
-      nullableRank: index % 7 === 0 ? null : index % 11,
+      decimalPrice: index % 31 === 0 ? null : decimalPrice,
+      nullableRank: index % 7 === 0 ? null : index % 11 === 0 ? undefined : index % 11,
     };
+    if (index % 13 !== 0) {
+      row.nullableText = index % 17 === 0 ? null : symbols[(index + 3) % symbols.length];
+    }
+    if (index % 23 !== 0) {
+      row.active = index % 2 === 0;
+    }
+    return row;
   });
+}
+
+function edgeCaseMutations(rows: readonly RuntimeRow[]): readonly MutationLogEntry[] {
+  const enteringBefore = rows.find((row) => row.id === "edge-01");
+  const leavingBefore = rows.find((row) => row.id === "edge-02");
+  const movingBefore = rows.find((row) => row.id === "edge-06");
+  const hiddenBefore = rows.find((row) => row.id === "edge-00");
+  const deleteBefore = rows.find((row) => row.id === "edge-03");
+  const reinsertAfter: RuntimeRow = {
+    id: "edge-03",
+    symbol: "MSFT",
+    status: "open",
+    side: "sell",
+    price: -20,
+    quantity: 7,
+    decimalPrice: BigDecimal.fromStringUnsafe("7.00"),
+    nullableRank: -5,
+    nullableText: "reinserted",
+    active: true,
+    hidden: "reinserted",
+  };
+  return [
+    update(2n, "edge-01", enteringBefore, {
+      ...safeRow(enteringBefore),
+      status: "open",
+      price: -30,
+    }),
+    update(3n, "edge-02", leavingBefore, {
+      ...safeRow(leavingBefore),
+      status: "closed",
+    }),
+    update(4n, "edge-06", movingBefore, {
+      ...safeRow(movingBefore),
+      status: "open",
+      price: 500,
+    }),
+    update(5n, "edge-00", hiddenBefore, {
+      ...safeRow(hiddenBefore),
+      hidden: "hidden-only-change",
+    }),
+    remove(6n, "edge-03", deleteBefore),
+    insert(7n, "edge-03", reinsertAfter),
+  ];
+}
+
+function fuzzRawQueries(initialSeed: number): readonly NamedRawQuery[] {
+  return [
+    {
+      name: "nullable rank asc window",
+      query: {
+        fields: commonRawFields,
+        orderBy: [
+          { field: "nullableRank", direction: "asc" },
+          { field: "id", direction: "asc" },
+        ],
+        offset: initialSeed % 3,
+        limit: 50,
+      },
+    },
+    {
+      name: "nullable rank desc string secondary",
+      query: {
+        fields: commonRawFields,
+        orderBy: [
+          { field: "nullableRank", direction: "desc" },
+          { field: "nullableText", direction: "asc" },
+          { field: "id", direction: "asc" },
+        ],
+        offset: initialSeed % 5,
+        limit: 50,
+      },
+    },
+    {
+      name: "nested filter and BigDecimal order",
+      query: {
+        fields: commonRawFields,
+        where: {
+          op: "and",
+          conditions: [
+            {
+              op: "or",
+              conditions: [
+                { field: "symbol", comparator: "one_of", value: ["aapl", "msft", null] },
+                { field: "nullableRank", comparator: "equals", value: null },
+              ],
+            },
+            { field: "quantity", comparator: "not_equals", value: null },
+          ],
+        },
+        orderBy: [
+          { field: "decimalPrice", direction: "asc" },
+          { field: "id", direction: "asc" },
+        ],
+        limit: 50,
+      },
+    },
+  ];
+}
+
+function fuzzGroupedQueries(initialSeed: number): readonly NamedGroupedQuery[] {
+  return [
+    {
+      name: "grouped nullable keys numeric aggregates",
+      query: {
+        groupBy: ["nullableText", "active"],
+        aggregates: {
+          rows: { aggFunc: "count", field: "id" },
+          totalQuantity: { aggFunc: "sum", field: "quantity" },
+          minQuantity: { aggFunc: "min", field: "quantity" },
+          maxQuantity: { aggFunc: "max", field: "quantity" },
+        },
+        where: {
+          op: "or",
+          conditions: [
+            { field: "status", comparator: "equals", value: "open" },
+            { field: "nullableRank", comparator: "equals", value: null },
+          ],
+        },
+        orderBy: [
+          { field: "totalQuantity", direction: initialSeed % 2 === 0 ? "asc" : "desc" },
+          { field: "nullableText", direction: "asc" },
+          { field: "active", direction: "asc" },
+        ],
+        limit: 50,
+      },
+    },
+  ];
 }
 
 function deterministicMutations(rows: readonly RuntimeRow[]): readonly MutationLogEntry[] {
@@ -469,20 +1198,79 @@ function applyMutation(
   return next;
 }
 
+function deltaEvent(
+  mutation: MutationLogEntry,
+  ops: readonly DeltaOperation<RuntimeRow>[],
+  totalRows: number,
+): DeltaEvent<readonly RuntimeRow[]> {
+  return {
+    type: "delta",
+    requestId: "query-semantics-parity",
+    ops,
+    meta: {
+      fromVersion: String(mutation.version - 1n),
+      toVersion: String(mutation.version),
+      totalRows,
+      serverTime: 0,
+    },
+  };
+}
+
 function expectParity(
   label: string,
   actual: QueryExecutionResult,
   expected: QueryExecutionResult,
   query: RuntimeQuery,
+  context: ParityContext = {},
 ): void {
+  const actualResult = normalizeResult(actual);
+  const expectedResult = normalizeResult(expected);
   try {
-    expect(normalizeResult(actual)).toEqual(normalizeResult(expected));
+    expect(actualResult).toEqual(expectedResult);
   } catch (error) {
+    const artifact = writeParityFailureArtifact({
+      label,
+      query,
+      actual: actualResult,
+      expected: expectedResult,
+      context,
+    });
     throw new Error(
-      `Query parity failed for ${label}\nseed=${String(seed)}\nquery=${stableStringify(query)}\nactual=${stableStringify(normalizeResult(actual))}\nexpected=${stableStringify(normalizeResult(expected))}`,
+      `Query parity failed for ${label}\nseed=${String(context.seed ?? seed)}\nquery=${stableStringify(query)}\nartifact=${artifact}\nactual=${stableStringify(actualResult)}\nexpected=${stableStringify(expectedResult)}`,
       { cause: error },
     );
   }
+}
+
+function writeParityFailureArtifact(args: {
+  readonly label: string;
+  readonly query: RuntimeQuery;
+  readonly actual: QueryExecutionResult;
+  readonly expected: QueryExecutionResult;
+  readonly context: ParityContext;
+}): string {
+  const directory = join(tmpdir(), "view-server-query-parity");
+  mkdirSync(directory, { recursive: true });
+  const fileName = `${sanitizeFileName(args.context.profile ?? "parity")}-${String(args.context.seed ?? seed)}-${sanitizeFileName(args.label)}.json`;
+  const path = join(directory, fileName);
+  writeFileSync(
+    path,
+    `${JSON.stringify(
+      {
+        label: args.label,
+        seed: args.context.seed ?? seed,
+        profile: args.context.profile,
+        query: artifactValue(args.query),
+        rows: artifactValue(args.context.rows),
+        mutations: artifactValue(args.context.mutations),
+        actual: artifactValue(args.actual),
+        expected: artifactValue(args.expected),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return path;
 }
 
 function normalizeResult(result: QueryExecutionResult): QueryExecutionResult {
@@ -508,6 +1296,33 @@ function normalizeValue(value: unknown): unknown {
     return value.toString();
   }
   return value;
+}
+
+function artifactValue(value: unknown): unknown {
+  if (BigDecimal.isBigDecimal(value)) {
+    return { type: "BigDecimal", value: BigDecimal.format(value) };
+  }
+  if (typeof value === "bigint") {
+    return { type: "bigint", value: value.toString() };
+  }
+  if (value === undefined) {
+    return { type: "undefined" };
+  }
+  if (Array.isArray(value)) {
+    return value.map(artifactValue);
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, artifactValue(entry)]),
+    );
+  }
+  return value;
+}
+
+function sanitizeFileName(value: string): string {
+  return value.replace(/[^a-z0-9._-]+/gi, "_").slice(0, 120);
 }
 
 function versionedRows(

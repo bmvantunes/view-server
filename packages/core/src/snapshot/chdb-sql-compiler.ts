@@ -24,6 +24,7 @@ export type CompiledQuerySql = {
   readonly decimalFields: ReadonlySet<string>;
   readonly integerFields: ReadonlySet<string>;
   readonly numberFields: ReadonlySet<string>;
+  readonly booleanFields: ReadonlySet<string>;
 };
 
 export function columnSqlType(column: Column): string {
@@ -38,8 +39,9 @@ export function compileQuerySql(
   tableName: string,
 ): CompiledQuerySql {
   const source = latestRowsSql(columns, idField, tableName);
+  const filterContext = makeFilterContext(literalStringFields, columns);
   if (isGroupedQuery(query)) {
-    const where = query.where ? `WHERE ${compileFilter(query.where, literalStringFields)}` : "";
+    const where = query.where ? `WHERE ${compileFilter(query.where, filterContext)}` : "";
     const groupBy = query.groupBy.map(quoteIdentifier).join(", ");
     const select = [
       ...query.groupBy.map(quoteIdentifier),
@@ -50,11 +52,12 @@ export function compileQuerySql(
     ].join(", ");
     const grouped = `SELECT ${select} FROM (${source}) ${where} GROUP BY ${groupBy}`;
     return {
-      rowsSql: `SELECT * FROM (${grouped}) ${compileOrderBy(query.orderBy ?? [], columns)} ${compileLimit(query)}`,
+      rowsSql: `SELECT * FROM (${grouped}) ${compileOrderBy(query.orderBy ?? [], columns, groupedNullableOrderFields(query))} ${compileLimit(query)}`,
       countSql: `SELECT count() AS totalRows FROM (${grouped})`,
       decimalFields: groupedDecimalFields(query, columns),
       integerFields: groupedIntegerFields(query, columns),
       numberFields: groupedNumberFields(query),
+      booleanFields: groupedBooleanFields(query, columns),
     };
   }
 
@@ -64,13 +67,14 @@ export function compileQuerySql(
       .map(([field]) => field),
   );
   selected.add(idField);
-  const where = query.where ? `WHERE ${compileFilter(query.where, literalStringFields)}` : "";
+  const where = query.where ? `WHERE ${compileFilter(query.where, filterContext)}` : "";
   return {
     rowsSql: `SELECT ${Array.from(selected).map(quoteIdentifier).join(", ")} FROM (${source}) ${where} ${compileOrderBy(rawQueryOrderBy(query, idField), columns)} ${compileLimit(query)}`,
     countSql: `SELECT count() AS totalRows FROM (${source}) ${where}`,
     decimalFields: selectedDecimalFields(Array.from(selected), columns),
     integerFields: selectedIntegerFields(Array.from(selected), columns),
     numberFields: new Set(),
+    booleanFields: selectedBooleanFields(Array.from(selected), columns),
   };
 }
 
@@ -104,6 +108,16 @@ function selectedIntegerFields(
     columns.filter((column) => column.type === "Int64").map((column) => column.name),
   );
   return new Set(selected.filter((field) => integerColumns.has(field)));
+}
+
+function selectedBooleanFields(
+  selected: readonly string[],
+  columns: readonly Column[],
+): ReadonlySet<string> {
+  const booleanColumns = new Set(
+    columns.filter((column) => column.type === "UInt8").map((column) => column.name),
+  );
+  return new Set(selected.filter((field) => booleanColumns.has(field)));
 }
 
 function groupedDecimalFields(
@@ -149,6 +163,16 @@ function groupedIntegerFields(
   return fields;
 }
 
+function groupedBooleanFields(
+  query: RuntimeGroupedQuery,
+  columns: readonly Column[],
+): ReadonlySet<string> {
+  const booleanColumns = new Set(
+    columns.filter((column) => column.type === "UInt8").map((column) => column.name),
+  );
+  return new Set(query.groupBy.filter((field) => booleanColumns.has(field)));
+}
+
 function groupedNumberFields(query: RuntimeGroupedQuery): ReadonlySet<string> {
   const fields = new Set<string>();
   for (const [alias, aggregate] of Object.entries(query.aggregates)) {
@@ -171,6 +195,7 @@ function compileLimit(query: {
 function compileOrderBy(
   orderBy: readonly { readonly field: string; readonly direction: "asc" | "desc" }[],
   columns: readonly Column[],
+  extraNullableFields: ReadonlySet<string> = new Set(),
 ): string {
   if (orderBy.length === 0) {
     return "";
@@ -179,6 +204,9 @@ function compileOrderBy(
   const nullableColumns = new Set(
     columns.filter((column) => column.nullable).map((column) => column.name),
   );
+  for (const field of extraNullableFields) {
+    nullableColumns.add(field);
+  }
   return `ORDER BY ${orderBy
     .map((order) => {
       const field = quoteIdentifier(order.field);
@@ -192,58 +220,123 @@ function compileOrderBy(
     .join(", ")}`;
 }
 
-function compileFilter(
-  filter: RuntimeQuery["where"],
+function groupedNullableOrderFields(query: RuntimeGroupedQuery): ReadonlySet<string> {
+  const fields = new Set<string>();
+  for (const [alias, aggregate] of Object.entries(query.aggregates)) {
+    if (
+      aggregate.aggFunc === "sum" ||
+      aggregate.aggFunc === "avg" ||
+      aggregate.aggFunc === "min" ||
+      aggregate.aggFunc === "max"
+    ) {
+      fields.add(alias);
+    }
+  }
+  return fields;
+}
+
+type FilterCompilerContext = {
+  readonly literalStringFields: ReadonlySet<string>;
+  readonly nullableFields: ReadonlySet<string>;
+};
+
+function makeFilterContext(
   literalStringFields: ReadonlySet<string>,
-): string {
+  columns: readonly Column[],
+): FilterCompilerContext {
+  return {
+    literalStringFields,
+    nullableFields: new Set(
+      columns.filter((column) => column.nullable).map((column) => column.name),
+    ),
+  };
+}
+
+function compileFilter(filter: RuntimeQuery["where"], context: FilterCompilerContext): string {
   if (filter === undefined) {
     return "1";
   }
   if ("op" in filter) {
     const joiner = filter.op === "and" ? " AND " : " OR ";
-    return `(${filter.conditions.map((condition) => compileFilter(condition, literalStringFields)).join(joiner)})`;
+    return `(${filter.conditions.map((condition) => compileFilter(condition, context)).join(joiner)})`;
   }
   const field = quoteIdentifier(filter.field);
   const value = filter.value;
-  const strictStringEquality = literalStringFields.has(filter.field);
+  const strictStringEquality = context.literalStringFields.has(filter.field);
+  const nullable = context.nullableFields.has(filter.field);
+  if (value == null) {
+    switch (filter.comparator) {
+      case "equals":
+        return `isNull(${field})`;
+      case "not_equals":
+        return `NOT isNull(${field})`;
+      default:
+        return "0";
+    }
+  }
   if (typeof value === "string") {
     const lowered = `lower(toString(${field}))`;
     if (filter.comparator === "equals") {
       if (strictStringEquality) {
         return `${field} = ${literal(value)}`;
       }
-      return `${lowered} = lower(${literal(value)})`;
+      return nullable
+        ? `(NOT isNull(${field}) AND ${lowered} = lower(${literal(value)}))`
+        : `${lowered} = lower(${literal(value)})`;
     }
     if (filter.comparator === "not_equals") {
       if (strictStringEquality) {
-        return `${field} != ${literal(value)}`;
+        return nullable
+          ? `(isNull(${field}) OR ${field} != ${literal(value)})`
+          : `${field} != ${literal(value)}`;
       }
-      return `${lowered} != lower(${literal(value)})`;
+      return nullable
+        ? `(isNull(${field}) OR ${lowered} != lower(${literal(value)}))`
+        : `${lowered} != lower(${literal(value)})`;
     }
     if (filter.comparator === "contains") {
-      return `position(${lowered}, lower(${literal(value)})) > 0`;
+      const expression = `position(${lowered}, lower(${literal(value)})) > 0`;
+      return nullable ? `(NOT isNull(${field}) AND ${expression})` : expression;
     }
     if (filter.comparator === "starts_with") {
-      return `startsWith(${lowered}, lower(${literal(value)}))`;
+      const expression = `startsWith(${lowered}, lower(${literal(value)}))`;
+      return nullable ? `(NOT isNull(${field}) AND ${expression})` : expression;
     }
   }
   if (filter.comparator === "one_of" && Array.isArray(value)) {
     if (value.length === 0) {
       return "0";
     }
-    if (value.every((item) => typeof item === "string")) {
-      if (strictStringEquality) {
-        return `${field} IN (${value.map((item) => literal(String(item))).join(", ")})`;
-      }
-      return `lower(toString(${field})) IN (${value.map((item) => `lower(${literal(String(item))})`).join(", ")})`;
+    const nullish = value.some((item) => item == null);
+    const strings = value.filter((item): item is string => typeof item === "string");
+    const scalarValues = value.filter((item) => item != null && typeof item !== "string");
+    const expressions: string[] = [];
+    if (nullish) {
+      expressions.push(`isNull(${field})`);
     }
-    return `${field} IN (${value.map(compileValue).join(", ")})`;
+    if (strings.length > 0) {
+      if (strictStringEquality) {
+        expressions.push(`${field} IN (${strings.map((item) => literal(item)).join(", ")})`);
+      } else {
+        expressions.push(
+          nullable
+            ? `(NOT isNull(${field}) AND lower(toString(${field})) IN (${strings.map((item) => `lower(${literal(item)})`).join(", ")}))`
+            : `lower(toString(${field})) IN (${strings.map((item) => `lower(${literal(item)})`).join(", ")})`,
+        );
+      }
+    }
+    if (scalarValues.length > 0) {
+      expressions.push(`${field} IN (${scalarValues.map(compileValue).join(", ")})`);
+    }
+    return expressions.length === 0 ? "0" : `(${expressions.join(" OR ")})`;
   }
   switch (filter.comparator) {
     case "equals":
       return `${field} = ${compileValue(value)}`;
     case "not_equals":
-      return `${field} != ${compileValue(value)}`;
+      return nullable
+        ? `(isNull(${field}) OR ${field} != ${compileValue(value)})`
+        : `${field} != ${compileValue(value)}`;
     case "greater_than":
       return `${field} > ${compileValue(value)}`;
     case "greater_than_or_equal":

@@ -40,6 +40,35 @@ describe("aggregate functions", () => {
     expectDecimal(state.value(), "9007199254740994.000000000000001");
   });
 
+  it("matches ClickHouse aggregate NULL behavior for non-count aggregates", () => {
+    const sum = makeAggregateState({ aggFunc: "sum", field: "value" });
+    const avg = makeAggregateState({ aggFunc: "avg", field: "value" });
+    const distinct = makeAggregateState({ aggFunc: "count_distinct", field: "value" });
+    const concat = makeAggregateState({ aggFunc: "string_concat", field: "value", joiner: "," });
+
+    for (const row of [{ id: "null", value: null }, { id: "missing" }]) {
+      sum.add(row);
+      avg.add(row);
+      distinct.add(row);
+      concat.add(row);
+    }
+
+    expect(sum.value()).toBe(null);
+    expect(avg.value()).toBe(null);
+    expect(distinct.value()).toBe(0);
+    expect(concat.value()).toBe("");
+
+    const value = { id: "value", value: 10 };
+    sum.add(value);
+    avg.add(value);
+    distinct.add(value);
+    concat.add(value);
+    expect(sum.value()).toBe(10);
+    expect(avg.value()).toBe(10);
+    expect(distinct.value()).toBe(1);
+    expect(concat.value()).toBe("10");
+  });
+
   it("tracks min and max while ignoring null values", () => {
     const min = makeAggregateState({ aggFunc: "min", field: "value" });
     const max = makeAggregateState({ aggFunc: "max", field: "value" });

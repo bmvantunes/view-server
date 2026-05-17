@@ -4,6 +4,7 @@ import {
   type RuntimeRow,
   type RuntimeRowKey,
 } from "../protocol/index.ts";
+import { materializeQueryValue, valuesEqual } from "../protocol/query-semantics.ts";
 import { stableKeyEquals } from "../protocol/stable-key.ts";
 import type { MutationLogEntry } from "./mutation-log.ts";
 
@@ -15,7 +16,7 @@ export function projectRow(
   const projected: RuntimeRow = {};
   for (const [field, enabled] of Object.entries(fields)) {
     if (enabled) {
-      projected[field] = row[field];
+      projected[field] = materializeQueryValue(row[field]);
     }
   }
   projected[idField] = row[idField];
@@ -28,7 +29,7 @@ export function projectedRowsEqual(left: RuntimeRow | undefined, right: RuntimeR
   }
   const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
   for (const key of keys) {
-    if (!Object.is(left[key], right[key])) {
+    if (!valuesEqual(materializeQueryValue(left[key]), materializeQueryValue(right[key]), true)) {
       return false;
     }
   }

@@ -13,9 +13,12 @@ export const QUERY_SEMANTICS_CONTRACT = {
     "raw queries append the topic id field as the stable ascending tiebreak unless already ordered",
     "grouped queries append groupBy fields as stable ascending tiebreaks unless already ordered",
     "sort strings case-insensitively",
+    "case-insensitive string ordering compares lower-cased strings with binary JavaScript order to match ClickHouse lower(toString(...)) ordering",
     "filter string equality is case-insensitive except schema literal strings",
     "BigDecimal values compare by Effect BigDecimal semantics",
     "null sorts before non-null for ascending order and after non-null for descending order",
+    "undefined and missing row values are materialized as SQL NULL at query boundaries",
+    "aggregate functions follow ClickHouse NULL behavior: count() counts rows, other aggregates ignore NULL values and return NULL when no value exists",
   ],
 } as const;
 
@@ -81,10 +84,16 @@ export function compareValues(left: unknown, right: unknown): number {
 }
 
 export function compareFilterValues(left: unknown, right: unknown): number {
+  if (left == null || right == null) {
+    return Number.NaN;
+  }
   return compareNonNullValues(left, right);
 }
 
 export function valuesEqual(left: unknown, right: unknown, strictStringEquality = false): boolean {
+  if (left == null && right == null) {
+    return true;
+  }
   if (BigDecimal.isBigDecimal(left) || BigDecimal.isBigDecimal(right)) {
     const leftDecimal = toBigDecimal(left);
     const rightDecimal = toBigDecimal(right);
@@ -96,9 +105,16 @@ export function valuesEqual(left: unknown, right: unknown, strictStringEquality 
     if (strictStringEquality) {
       return left === right;
     }
-    return left.toLocaleLowerCase() === right.toLocaleLowerCase();
+    return left.toLowerCase() === right.toLowerCase();
   }
   return Object.is(left, right);
+}
+
+export function materializeQueryValue(value: unknown): unknown {
+  if (Object.is(value, -0)) {
+    return 0;
+  }
+  return value === undefined ? null : value;
 }
 
 function compareNonNullValues(left: unknown, right: unknown): number {
@@ -110,7 +126,7 @@ function compareNonNullValues(left: unknown, right: unknown): number {
     }
   }
   if (typeof left === "string" && typeof right === "string") {
-    return left.toLocaleLowerCase().localeCompare(right.toLocaleLowerCase());
+    return compareLowercaseStrings(left, right);
   }
   if (typeof left === "bigint" && typeof right === "bigint") {
     return left === right ? 0 : left < right ? -1 : 1;
@@ -121,7 +137,13 @@ function compareNonNullValues(left: unknown, right: unknown): number {
   if (typeof left === "boolean" && typeof right === "boolean") {
     return left === right ? 0 : left ? 1 : -1;
   }
-  return String(left).toLocaleLowerCase().localeCompare(String(right).toLocaleLowerCase());
+  return compareLowercaseStrings(String(left), String(right));
+}
+
+function compareLowercaseStrings(left: string, right: string): number {
+  const loweredLeft = left.toLowerCase();
+  const loweredRight = right.toLowerCase();
+  return loweredLeft === loweredRight ? 0 : loweredLeft < loweredRight ? -1 : 1;
 }
 
 function toBigDecimal(value: unknown): BigDecimal.BigDecimal | undefined {

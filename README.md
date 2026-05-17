@@ -112,6 +112,7 @@ export function App() {
 - `docs/production-readiness.md` covers production startup, shutdown, guardrails, and rollout.
 - `docs/fault-tolerance.md` documents expected behavior under Kafka, chDB, websocket, slow-client,
   shutdown, and memory-pressure failures.
+- `docs/query-semantics.md` defines ordering, nullish values, aggregate behavior, and chDB parity.
 - `docs/operations.md` documents stale/waiting semantics, `totalRows`, version fencing, health metrics, active plan limits, and troubleshooting.
 - `docs/hello-production.md` shows a Kafka + chDB + metrics UI configuration.
 - `docs/benchmarks.md` covers benchmark artifact output, summaries, and baseline refresh.

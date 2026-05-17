@@ -19,6 +19,7 @@ import {
   compareRowsForOrder,
   compareValues as compareSortValue,
   groupedQueryOrderBy,
+  materializeQueryValue,
   rawQueryOrderBy,
   stableSortRows,
   valuesEqual,
@@ -323,10 +324,10 @@ function compileEqualityMatcher(
   strictStringEquality: boolean,
 ): (rowValue: unknown) => boolean {
   if (typeof filterValue === "string") {
-    const expected = strictStringEquality ? filterValue : filterValue.toLocaleLowerCase();
+    const expected = strictStringEquality ? filterValue : filterValue.toLowerCase();
     return (rowValue) =>
       typeof rowValue === "string"
-        ? (strictStringEquality ? rowValue : rowValue.toLocaleLowerCase()) === expected
+        ? (strictStringEquality ? rowValue : rowValue.toLowerCase()) === expected
         : valuesEqual(rowValue, filterValue, strictStringEquality);
   }
   if (
@@ -352,13 +353,13 @@ function compileStringMatcher(
   if (typeof filterValue !== "string") {
     return () => false;
   }
-  const needle = filterValue.toLocaleLowerCase();
+  const needle = filterValue.toLowerCase();
   return (row) => {
     const rowValue = row[field];
     if (typeof rowValue !== "string") {
       return false;
     }
-    const haystack = rowValue.toLocaleLowerCase();
+    const haystack = rowValue.toLowerCase();
     return comparator === "contains" ? haystack.includes(needle) : haystack.startsWith(needle);
   };
 }
@@ -377,13 +378,12 @@ function compileOneOfMatcher(
   const booleans = new Set<boolean>();
   let hasPositiveZero = false;
   let hasNegativeZero = false;
-  let hasNull = false;
-  let hasUndefined = false;
+  let hasNullish = false;
   const fallbackCandidates: unknown[] = [];
   for (const candidate of filterValue) {
     switch (typeof candidate) {
       case "string": {
-        strings.add(strictStringEquality ? candidate : candidate.toLocaleLowerCase());
+        strings.add(strictStringEquality ? candidate : candidate.toLowerCase());
         break;
       }
       case "number": {
@@ -405,12 +405,12 @@ function compileOneOfMatcher(
         break;
       }
       case "undefined": {
-        hasUndefined = true;
+        hasNullish = true;
         break;
       }
       default: {
         if (candidate === null) {
-          hasNull = true;
+          hasNullish = true;
         } else {
           fallbackCandidates.push(candidate);
         }
@@ -421,7 +421,7 @@ function compileOneOfMatcher(
     const rowValue = row[field];
     switch (typeof rowValue) {
       case "string":
-        if (strings.has(strictStringEquality ? rowValue : rowValue.toLocaleLowerCase())) {
+        if (strings.has(strictStringEquality ? rowValue : rowValue.toLowerCase())) {
           return true;
         }
         break;
@@ -445,12 +445,12 @@ function compileOneOfMatcher(
         }
         break;
       case "undefined":
-        if (hasUndefined) {
+        if (hasNullish) {
           return true;
         }
         break;
       default:
-        if (rowValue === null && hasNull) {
+        if (rowValue === null && hasNullish) {
           return true;
         }
     }
@@ -757,7 +757,7 @@ function groupedResultRowSync(
   const [first] = groupRows;
   const row: RuntimeRow = {};
   for (const field of groupBy) {
-    row[field] = first?.[field];
+    row[field] = materializeQueryValue(first?.[field]);
   }
   for (const [alias, aggregate] of Object.entries(aggregates)) {
     row[alias] = aggregateRows(groupRows, aggregate);
@@ -766,7 +766,8 @@ function groupedResultRowSync(
 }
 
 function encodeGroupKey(value: unknown): unknown {
-  return typeof value === "bigint" ? value.toString() : value;
+  const materialized = materializeQueryValue(value);
+  return typeof materialized === "bigint" ? materialized.toString() : materialized;
 }
 
 function normalizePositiveInteger(value: number | undefined, fallback: number): number {

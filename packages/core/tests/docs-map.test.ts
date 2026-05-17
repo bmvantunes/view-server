@@ -12,6 +12,7 @@ const authoritativeDocs = [
   "docs/testing.md",
   "docs/production-readiness.md",
   "docs/fault-tolerance.md",
+  "docs/query-semantics.md",
   "docs/benchmarks.md",
   "docs/api-audit.md",
 ] as const;

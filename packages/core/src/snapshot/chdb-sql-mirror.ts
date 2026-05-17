@@ -67,7 +67,11 @@ export class ChdbSqlMirror {
   }
 
   #ensureMutationColumns(mutations: readonly MutationLogEntry[]): void {
-    const nextColumns = mergeColumns(this.#columns, inferMutationColumns(mutations, this.#idField));
+    const inferredColumns = inferMutationColumns(mutations, this.#idField);
+    const incomingColumns = this.#tableReady
+      ? inferredColumns.map((column) => ({ ...column, nullable: true }))
+      : inferredColumns;
+    const nextColumns = mergeColumns(this.#columns, incomingColumns);
     const addedColumns = nextColumns.filter(
       (column) => !this.#columns.some((existing) => existing.name === column.name),
     );
@@ -197,7 +201,7 @@ function inferColumns(rows: readonly RuntimeRow[], idField: string): readonly Co
   for (const row of rows) {
     addRowColumnStats(statsByName, row, idField);
   }
-  return columnStatsToColumns(statsByName);
+  return columnStatsToColumns(statsByName, rows.length);
 }
 
 function isUserColumn(name: string): boolean {
@@ -209,18 +213,21 @@ function inferMutationColumns(
   idField: string,
 ): readonly Column[] {
   const statsByName = new Map<string, ColumnStats>();
+  let eventCount = 0;
   for (const mutation of mutations) {
     const event = mutationToEvent(mutation, idField);
     if (event !== undefined) {
+      eventCount += 1;
       addRowColumnStats(statsByName, event.row, idField);
     }
   }
-  return columnStatsToColumns(statsByName);
+  return columnStatsToColumns(statsByName, eventCount);
 }
 
 type ColumnStats = {
   readonly type: ColumnType;
   readonly nullable: boolean;
+  readonly seen: number;
 };
 
 function addRowColumnStats(
@@ -239,10 +246,11 @@ function addRowColumnStats(
 }
 
 function addColumnValue(statsByName: Map<string, ColumnStats>, name: string, value: unknown): void {
-  const existing = statsByName.get(name) ?? { type: "Int64", nullable: false };
+  const existing = statsByName.get(name) ?? { type: "Int64", nullable: false, seen: 0 };
   statsByName.set(name, {
     type: widerColumnType(existing.type, value),
     nullable: existing.nullable || value == null,
+    seen: existing.seen + 1,
   });
 }
 
@@ -285,11 +293,14 @@ function columnTypePriority(type: ColumnType): number {
   }
 }
 
-function columnStatsToColumns(statsByName: ReadonlyMap<string, ColumnStats>): readonly Column[] {
+function columnStatsToColumns(
+  statsByName: ReadonlyMap<string, ColumnStats>,
+  rowCount: number,
+): readonly Column[] {
   return Array.from(statsByName, ([name, stats]) => ({
     name,
     type: stats.type,
-    nullable: stats.nullable,
+    nullable: stats.nullable || stats.seen < rowCount,
   }));
 }
 

@@ -307,7 +307,11 @@ export function rowKeyByField(row: RuntimeRow, idField: string): RuntimeRowKey {
 }
 
 export function groupRowKey(row: RuntimeRow, groupBy: readonly string[]): string {
-  return stableStringify(Object.fromEntries(groupBy.map((field) => [field, row[field]])));
+  return stableStringify(
+    Object.fromEntries(
+      groupBy.map((field) => [field, row[field] === undefined ? null : row[field]]),
+    ),
+  );
 }
 
 export function rowKeyForQuery(query: RuntimeQuery, idField: string): RuntimeRowKeyFn {

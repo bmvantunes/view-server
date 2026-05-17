@@ -133,6 +133,49 @@ describe("ChdbSqlMirror", () => {
       expect(queryRows(session, sql.rowsSql)).toEqual([{ id: "o-1", symbol: "AAPL" }]);
     }).pipe(Effect.scoped),
   );
+
+  it.effect("materializes missing initial fields and added mutation columns as nullable", () =>
+    Effect.gen(function* () {
+      const session = new Session();
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          session.cleanup();
+        }),
+      );
+      const mirror = new ChdbSqlMirror(session, `mirror_nullable_${Date.now()}`);
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          mirror.drop();
+        }).pipe(Effect.ignore),
+      );
+
+      mirror.init({
+        idField: "id",
+        rows: [{ id: "a", nullableRank: 1 }, { id: "b" }, { id: "c", nullableRank: null }],
+        version: 1n,
+      });
+
+      expect(mirror.columns).toContainEqual({
+        name: "nullableRank",
+        type: "Float64",
+        nullable: true,
+      });
+
+      mirror.applyMutations([
+        updateRow(2n, "a", {
+          id: "a",
+          nullableRank: 1,
+          lateVenue: "xnas",
+        }),
+      ]);
+
+      expect(mirror.columns).toContainEqual({
+        name: "lateVenue",
+        type: "String",
+        nullable: true,
+      });
+    }).pipe(Effect.scoped),
+  );
 });
 
 const latestRowsQuery = {

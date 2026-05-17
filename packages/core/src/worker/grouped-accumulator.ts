@@ -5,6 +5,7 @@ import type {
   RuntimeRowKey,
 } from "../protocol/index.ts";
 import { stableStringify } from "../protocol/index.ts";
+import { materializeQueryValue } from "../protocol/query-semantics.ts";
 import {
   isIncrementalAggregateSupported,
   makeAggregateState,
@@ -170,11 +171,11 @@ function makeAggregateStates(plan: AggregatePlan): readonly AggregateState[] {
 function groupedValues(row: RuntimeRow, groupBy: readonly string[]): RuntimeRow {
   const values: RuntimeRow = {};
   for (const field of groupBy) {
-    values[field] = row[field];
+    values[field] = materializeQueryValue(row[field]);
   }
   return values;
 }
 
 function groupedAccumulatorKey(row: RuntimeRow, groupBy: readonly string[]): string {
-  return stableStringify(groupBy.map((field) => row[field]));
+  return stableStringify(groupBy.map((field) => materializeQueryValue(row[field])));
 }

@@ -399,13 +399,14 @@ function validatorForAggregate(
     case "avg": {
       const fieldValidator = fieldValidators.get(aggregate.field);
       if (fieldValidator?.validate(BigDecimal.make(0n, 0)) === true) {
-        return BigDecimal.isBigDecimal;
+        return (value) => value === null || BigDecimal.isBigDecimal(value);
       }
-      return (value) => typeof value === "number";
+      return (value) => value === null || typeof value === "number";
     }
     case "min":
     case "max":
-      return validatorForField(fieldValidators, aggregate.field);
+      return (value) =>
+        value === null || validatorForField(fieldValidators, aggregate.field)(value);
     case "string_concat":
     case "string_concat_distinct":
       return (value) => typeof value === "string";
@@ -426,7 +427,8 @@ function fieldValidatorsForReadableTopic(
       field,
       {
         required: !schemaAllowsUndefined(fieldSchema),
-        validate: (value: unknown) => Schema.is(fieldSchema)(value),
+        validate: (value: unknown) =>
+          (value === null && schemaAllowsUndefined(fieldSchema)) || Schema.is(fieldSchema)(value),
       },
     ]),
   );

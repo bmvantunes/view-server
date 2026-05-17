@@ -41,6 +41,20 @@ describe("CompareSemantics", () => {
     ).toEqual(["value", "null"]);
   });
 
+  it("treats undefined and missing query values as SQL NULL equivalents", () => {
+    expect(compareValues(undefined, null)).toBe(0);
+    expect(valuesEqual(undefined, null)).toBe(true);
+    expect(
+      stableSortRows(
+        [{ id: "value", rank: 1 }, { id: "missing" }],
+        [
+          { field: "rank", direction: "asc" },
+          { field: "id", direction: "asc" },
+        ],
+      ).map((row) => row.id),
+    ).toEqual(["missing", "value"]);
+  });
+
   it("uses broad case-insensitive string equality unless literal strictness is requested", () => {
     expect(compareValues("bruno", "Bruno")).toBe(0);
     expect(valuesEqual("OPEN", "open")).toBe(true);

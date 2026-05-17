@@ -42,13 +42,14 @@ export function aggregateRows(
     case "sum":
       return sumRows(rows, aggregate.field);
     case "avg":
-      if (rows.length === 0) {
-        return 0;
+      const valueCount = aggregateValueCount(rows, aggregate.field);
+      if (valueCount === 0) {
+        return null;
       }
       const sum = sumRows(rows, aggregate.field);
       return BigDecimal.isBigDecimal(sum)
-        ? BigDecimal.divideUnsafe(sum, BigDecimal.fromBigInt(BigInt(rows.length)))
-        : sum / rows.length;
+        ? BigDecimal.divideUnsafe(sum, BigDecimal.fromBigInt(BigInt(valueCount)))
+        : Number(sum) / valueCount;
     case "min":
       return extremaRows(rows, aggregate.field, "min");
     case "max":
@@ -98,7 +99,7 @@ class CountAggregate implements AggregateState {
 
 class CountDistinctAggregate implements AggregateState {
   readonly #field: string;
-  readonly #counts = new Map<unknown, number>();
+  readonly #counts = new Map<string, number>();
 
   constructor(field: string) {
     this.#field = field;
@@ -106,11 +107,18 @@ class CountDistinctAggregate implements AggregateState {
 
   add(row: RuntimeRow): void {
     const value = row[this.#field];
-    this.#counts.set(value, (this.#counts.get(value) ?? 0) + 1);
+    if (!isPresentAggregateValue(value)) {
+      return;
+    }
+    const key = aggregateValueKey(value);
+    this.#counts.set(key, (this.#counts.get(key) ?? 0) + 1);
   }
 
   remove(row: RuntimeRow): void {
-    decrementNumberCount(this.#counts, row[this.#field]);
+    const value = row[this.#field];
+    if (isPresentAggregateValue(value)) {
+      decrementNumberCount(this.#counts, aggregateValueKey(value));
+    }
   }
 
   value(): number {
@@ -122,6 +130,7 @@ class SumAggregate implements AggregateState {
   readonly #field: string;
   #numberSum = 0;
   #decimalSum: BigDecimal.BigDecimal | undefined;
+  #count = 0;
 
   constructor(field: string) {
     this.#field = field;
@@ -135,11 +144,15 @@ class SumAggregate implements AggregateState {
     this.#removeValue(row[this.#field]);
   }
 
-  value(): number | BigDecimal.BigDecimal {
-    return this.#decimalSum ?? this.#numberSum;
+  value(): number | BigDecimal.BigDecimal | null {
+    return this.#count === 0 ? null : (this.#decimalSum ?? this.#numberSum);
   }
 
   #addValue(value: unknown): void {
+    if (!isPresentAggregateValue(value)) {
+      return;
+    }
+    this.#count += 1;
     if (BigDecimal.isBigDecimal(value)) {
       this.#decimalSum = BigDecimal.sum(
         this.#decimalSum ?? decimalFromNumber(this.#numberSum),
@@ -158,6 +171,10 @@ class SumAggregate implements AggregateState {
   }
 
   #removeValue(value: unknown): void {
+    if (!isPresentAggregateValue(value)) {
+      return;
+    }
+    this.#count = Math.max(0, this.#count - 1);
     if (this.#decimalSum !== undefined || BigDecimal.isBigDecimal(value)) {
       this.#decimalSum = BigDecimal.subtract(
         this.#decimalSum ?? decimalFromNumber(this.#numberSum),
@@ -172,26 +189,37 @@ class SumAggregate implements AggregateState {
 class AvgAggregate implements AggregateState {
   readonly #sum: SumAggregate;
   #count = 0;
+  readonly #field: string;
 
   constructor(field: string) {
+    this.#field = field;
     this.#sum = new SumAggregate(field);
   }
 
   add(row: RuntimeRow): void {
+    if (!isPresentAggregateValue(row[this.#field])) {
+      return;
+    }
     this.#count += 1;
     this.#sum.add(row);
   }
 
   remove(row: RuntimeRow): void {
+    if (!isPresentAggregateValue(row[this.#field])) {
+      return;
+    }
     this.#count = Math.max(0, this.#count - 1);
     this.#sum.remove(row);
   }
 
-  value(): number | BigDecimal.BigDecimal {
+  value(): number | BigDecimal.BigDecimal | null {
     if (this.#count === 0) {
-      return 0;
+      return null;
     }
     const sum = this.#sum.value();
+    if (sum === null) {
+      return null;
+    }
     return BigDecimal.isBigDecimal(sum)
       ? BigDecimal.divideUnsafe(sum, BigDecimal.fromBigInt(BigInt(this.#count)))
       : sum / this.#count;
@@ -244,7 +272,7 @@ class ExtremaAggregate implements AggregateState {
   }
 
   value(): unknown {
-    return this.#current;
+    return this.#current ?? null;
   }
 
   #recomputeCurrent(): unknown {
@@ -276,14 +304,20 @@ class StringConcatAggregate implements AggregateState {
   }
 
   add(row: RuntimeRow): void {
-    this.#values.push(stringAggregateValue(row[this.#field]));
+    const value = row[this.#field];
+    if (isPresentAggregateValue(value)) {
+      this.#values.push(stringAggregateValue(value));
+    }
   }
 
   remove(row: RuntimeRow): void {
-    const value = stringAggregateValue(row[this.#field]);
-    const index = this.#values.indexOf(value);
-    if (index >= 0) {
-      this.#values.splice(index, 1);
+    const value = row[this.#field];
+    if (isPresentAggregateValue(value)) {
+      const stringValue = stringAggregateValue(value);
+      const index = this.#values.indexOf(stringValue);
+      if (index >= 0) {
+        this.#values.splice(index, 1);
+      }
     }
   }
 
@@ -305,12 +339,18 @@ class StringConcatDistinctAggregate implements AggregateState {
   }
 
   add(row: RuntimeRow): void {
-    const value = stringAggregateValue(row[this.#field]);
-    this.#counts.set(value, (this.#counts.get(value) ?? 0) + 1);
+    const value = row[this.#field];
+    if (isPresentAggregateValue(value)) {
+      const stringValue = stringAggregateValue(value);
+      this.#counts.set(stringValue, (this.#counts.get(stringValue) ?? 0) + 1);
+    }
   }
 
   remove(row: RuntimeRow): void {
-    decrementNumberCount(this.#counts, stringAggregateValue(row[this.#field]));
+    const value = row[this.#field];
+    if (isPresentAggregateValue(value)) {
+      decrementNumberCount(this.#counts, stringAggregateValue(value));
+    }
   }
 
   value(): string {
@@ -331,18 +371,39 @@ function decrementNumberCount<TKey>(counts: Map<TKey, number>, key: TKey): void 
 }
 
 function countDistinctRows(rows: readonly RuntimeRow[], field: string): number {
-  const values = new Set<unknown>();
+  const values = new Set<string>();
   for (const row of rows) {
-    values.add(row[field]);
+    const value = row[field];
+    if (isPresentAggregateValue(value)) {
+      values.add(aggregateValueKey(value));
+    }
   }
   return values.size;
 }
 
-function sumRows(rows: readonly RuntimeRow[], field: string): number | BigDecimal.BigDecimal {
+function aggregateValueCount(rows: readonly RuntimeRow[], field: string): number {
+  let count = 0;
+  for (const row of rows) {
+    if (isPresentAggregateValue(row[field])) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function sumRows(
+  rows: readonly RuntimeRow[],
+  field: string,
+): number | BigDecimal.BigDecimal | null {
   let numberSum = 0;
   let decimalSum: BigDecimal.BigDecimal | undefined;
+  let count = 0;
   for (const row of rows) {
     const value = row[field];
+    if (!isPresentAggregateValue(value)) {
+      continue;
+    }
+    count += 1;
     if (BigDecimal.isBigDecimal(value)) {
       decimalSum = BigDecimal.sum(decimalSum ?? decimalFromNumber(numberSum), value);
       continue;
@@ -353,7 +414,7 @@ function sumRows(rows: readonly RuntimeRow[], field: string): number | BigDecima
     }
     numberSum += numericValue(value);
   }
-  return decimalSum ?? numberSum;
+  return count === 0 ? null : (decimalSum ?? numberSum);
 }
 
 function extremaRows(
@@ -377,13 +438,16 @@ function extremaRows(
     current =
       direction === "min" ? (comparison < 0 ? value : current) : comparison > 0 ? value : current;
   }
-  return hasValue ? current : undefined;
+  return hasValue ? current : null;
 }
 
 function stringValues(rows: readonly RuntimeRow[], field: string): readonly string[] {
   const values: string[] = [];
   for (const row of rows) {
-    values.push(stringAggregateValue(row[field]));
+    const value = row[field];
+    if (isPresentAggregateValue(value)) {
+      values.push(stringAggregateValue(value));
+    }
   }
   return values;
 }
@@ -415,7 +479,7 @@ function compareAggregateValue(left: unknown, right: unknown): number {
     }
   }
   if (typeof left === "string" && typeof right === "string") {
-    return left.toLocaleLowerCase().localeCompare(right.toLocaleLowerCase());
+    return compareLowercaseStrings(left, right);
   }
   if (typeof left === "bigint" && typeof right === "bigint") {
     return left === right ? 0 : left < right ? -1 : 1;
@@ -426,7 +490,7 @@ function compareAggregateValue(left: unknown, right: unknown): number {
   if (typeof left === "boolean" && typeof right === "boolean") {
     return left === right ? 0 : left ? 1 : -1;
   }
-  return String(left).toLocaleLowerCase().localeCompare(String(right).toLocaleLowerCase());
+  return compareLowercaseStrings(String(left), String(right));
 }
 
 function decimalFromNumber(value: number): BigDecimal.BigDecimal {
@@ -456,6 +520,10 @@ function stringAggregateValue(value: unknown): string {
   return stableStringify(value);
 }
 
+function isPresentAggregateValue(value: unknown): boolean {
+  return value != null;
+}
+
 function sortedStrings(
   values: readonly string[],
   direction: "asc" | "desc" | undefined,
@@ -463,10 +531,14 @@ function sortedStrings(
   if (direction === undefined) {
     return values;
   }
-  const sorted = [...values].sort((left, right) =>
-    left.toLocaleLowerCase().localeCompare(right.toLocaleLowerCase()),
-  );
+  const sorted = [...values].sort((left, right) => compareLowercaseStrings(left, right));
   return direction === "asc" ? sorted : sorted.reverse();
+}
+
+function compareLowercaseStrings(left: string, right: string): number {
+  const loweredLeft = left.toLowerCase();
+  const loweredRight = right.toLowerCase();
+  return loweredLeft === loweredRight ? 0 : loweredLeft < loweredRight ? -1 : 1;
 }
 
 function toBigDecimal(value: unknown): BigDecimal.BigDecimal | undefined {

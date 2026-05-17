@@ -156,6 +156,7 @@ class InProcessChdbSnapshotBackend implements SnapshotBackend {
             sql.decimalFields,
             sql.integerFields,
             sql.numberFields,
+            sql.booleanFields,
           );
           const totalRows = parseCount(
             backend.#session.query(withJsonSettings(sql.countSql), "JSONEachRow"),
@@ -307,6 +308,7 @@ function parseJsonEachRow(
   decimalFields: ReadonlySet<string> = new Set(),
   integerFields: ReadonlySet<string> = new Set(),
   numberFields: ReadonlySet<string> = new Set(),
+  booleanFields: ReadonlySet<string> = new Set(),
 ): RuntimeRow[] {
   const trimmed = output.trim();
   if (trimmed.length === 0) {
@@ -314,7 +316,7 @@ function parseJsonEachRow(
   }
   return trimmed
     .split("\n")
-    .map((line) => parseJsonRow(line, decimalFields, integerFields, numberFields));
+    .map((line) => parseJsonRow(line, decimalFields, integerFields, numberFields, booleanFields));
 }
 
 function parseJsonRow(
@@ -322,8 +324,15 @@ function parseJsonRow(
   decimalFields: ReadonlySet<string>,
   integerFields: ReadonlySet<string>,
   numberFields: ReadonlySet<string>,
+  booleanFields: ReadonlySet<string>,
 ): RuntimeRow {
   const row = JSON.parse(line);
+  for (const field of booleanFields) {
+    const value = row[field];
+    if (typeof value === "number") {
+      row[field] = value !== 0;
+    }
+  }
   for (const field of numberFields) {
     const value = row[field];
     if (typeof value === "string") {

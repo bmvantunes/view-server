@@ -24,6 +24,7 @@ describe("chDB SQL compiler", () => {
     expect(sql.rowsSql).toContain("LIMIT 7 OFFSET 3");
     expect(sql.countSql).toContain("WHERE (`status` = 'open' AND `weird``field` > 10)");
     expect(sql.decimalFields).toEqual(new Set(["price"]));
+    expect(sql.booleanFields).toEqual(new Set(["archived"]));
   });
 
   it("compiles grouped rows and count SQL over the filtered grouped result", () => {
@@ -37,13 +38,28 @@ describe("chDB SQL compiler", () => {
 
     expect(sql.rowsSql).toContain("SELECT * FROM (SELECT `symbol`, sum(`price`) AS `totalPrice`");
     expect(sql.rowsSql).toContain("WHERE `status` = 'open' GROUP BY `symbol`");
-    expect(sql.rowsSql).toContain("ORDER BY `totalPrice` DESC");
+    expect(sql.rowsSql).toContain("ORDER BY isNull(`totalPrice`) ASC, `totalPrice` DESC");
     expect(sql.rowsSql).toContain("LIMIT 5 OFFSET 1");
-    expect(sql.countSql).toBe(
-      "SELECT count() AS totalRows FROM (SELECT `symbol`, sum(`price`) AS `totalPrice`, count() AS `trades` FROM (SELECT `id`, `symbol`, `status`, `price`, `weird``field` FROM (SELECT `id`, `symbol`, `status`, `price`, `weird``field`, __view_server_deleted, __view_server_version FROM `topic_rows` ORDER BY `id`, __view_server_version DESC LIMIT 1 BY `id`) WHERE __view_server_deleted = 0) WHERE `status` = 'open' GROUP BY `symbol`)",
+    expect(sql.countSql).toContain(
+      "SELECT count() AS totalRows FROM (SELECT `symbol`, sum(`price`) AS `totalPrice`, count() AS `trades`",
     );
+    expect(sql.countSql).toContain("WHERE `status` = 'open' GROUP BY `symbol`)");
     expect(sql.decimalFields).toEqual(new Set(["totalPrice"]));
     expect(sql.numberFields).toEqual(new Set(["trades"]));
+  });
+
+  it("compiles nullish filters with SQL NULL semantics instead of equality to NULL", () => {
+    const sql = compileQuerySql(
+      nullFilterQuery,
+      "id",
+      nullableFilterColumns,
+      new Set(["status"]),
+      "topic_rows",
+    );
+
+    expect(sql.rowsSql).toContain(
+      "WHERE (isNull(`weird``field`) OR (isNull(`status`) OR `status` != 'closed') OR (isNull(`symbol`) OR (NOT isNull(`symbol`) AND lower(toString(`symbol`)) IN (lower('aapl'), lower('MSFT')))))",
+    );
   });
 
   it.effect("executes compiled raw and grouped count semantics through chDB", () =>
@@ -82,12 +98,21 @@ const contractColumns: readonly Column[] = [
   { name: "status", type: "String", nullable: false },
   { name: "price", type: "Decimal(76, 38)", nullable: false },
   { name: "weird`field", type: "Int64", nullable: true },
+  { name: "archived", type: "UInt8", nullable: false },
+];
+
+const nullableFilterColumns: readonly Column[] = [
+  { name: "id", type: "String", nullable: false },
+  { name: "symbol", type: "String", nullable: true },
+  { name: "status", type: "String", nullable: true },
+  { name: "weird`field", type: "Int64", nullable: true },
 ];
 
 const rawContractQuery = {
   fields: {
     id: true,
     symbol: true,
+    archived: true,
     price: true,
     "weird`field": true,
   },
@@ -112,6 +137,36 @@ const rawContractQuery = {
   ],
   offset: 3,
   limit: 7,
+} satisfies RuntimeQuery;
+
+const nullFilterQuery = {
+  fields: {
+    id: true,
+    symbol: true,
+    status: true,
+    "weird`field": true,
+  },
+  where: {
+    op: "or",
+    conditions: [
+      {
+        field: "weird`field",
+        comparator: "equals",
+        value: null,
+      },
+      {
+        field: "status",
+        comparator: "not_equals",
+        value: "closed",
+      },
+      {
+        field: "symbol",
+        comparator: "one_of",
+        value: ["aapl", null, "MSFT"],
+      },
+    ],
+  },
+  limit: 10,
 } satisfies RuntimeQuery;
 
 const groupedContractQuery = {

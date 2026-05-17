@@ -72,6 +72,7 @@ describe("SnapshotReconciler", () => {
     () =>
       Effect.gen(function* () {
         const rows = [{ id: "memory", value: 10 }];
+        const projectedRows = [{ id: "memory", value: 10, exact: null }];
         const future = makeTestReconciler({
           rows,
           candidate: { rows: [{ id: "future", value: 999 }], totalRows: 1, backendVersion: 3n },
@@ -99,9 +100,9 @@ describe("SnapshotReconciler", () => {
         expect(gapResult.source).toBe("memory");
         expect(failedResult.source).toBe("memory");
         expect(failedResult.backendFailed).toBe(true);
-        expect(futureResult.rows).toEqual(rows);
-        expect(gapResult.rows).toEqual(rows);
-        expect(failedResult.rows).toEqual(rows);
+        expect(futureResult.rows).toEqual(projectedRows);
+        expect(gapResult.rows).toEqual(projectedRows);
+        expect(failedResult.rows).toEqual(projectedRows);
       }),
   );
 });
