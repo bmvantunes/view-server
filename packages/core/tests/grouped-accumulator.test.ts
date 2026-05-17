@@ -82,6 +82,33 @@ describe("GroupedAccumulator", () => {
     );
   });
 
+  it("keeps min and max correct when the current extrema has duplicates", () => {
+    const rows = [
+      { id: "a", desk: "ny", quantity: 10, price: 50 },
+      { id: "b", desk: "ny", quantity: 10, price: 60 },
+      { id: "c", desk: "ny", quantity: 30, price: 60 },
+    ];
+    const accumulator = expectAccumulator(rows, numericGroupedQuery);
+
+    accumulator.applyMutation({
+      version: 2n,
+      kind: "delete",
+      id: "a",
+      before: rows[0],
+      changedFields: new Set(["quantity", "price"]),
+    });
+    expectGroupedRows(accumulator.groupedRows(), rows.slice(1), numericGroupedQuery);
+
+    accumulator.applyMutation({
+      version: 3n,
+      kind: "delete",
+      id: "b",
+      before: rows[1],
+      changedFields: new Set(["quantity", "price"]),
+    });
+    expectGroupedRows(accumulator.groupedRows(), rows.slice(2), numericGroupedQuery);
+  });
+
   it("does not claim unsupported grouped aggregates as incremental", () => {
     expect(isIncrementalGroupedAccumulatorSupported(unsupportedGroupedQuery)).toBe(false);
     expect(

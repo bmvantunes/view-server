@@ -202,6 +202,7 @@ class ExtremaAggregate implements AggregateState {
   readonly #field: string;
   readonly #direction: "min" | "max";
   readonly #values = new Map<string, { readonly value: unknown; count: number }>();
+  #current: unknown;
 
   constructor(field: string, direction: "min" | "max") {
     this.#field = field;
@@ -220,35 +221,45 @@ class ExtremaAggregate implements AggregateState {
     } else {
       existing.count += 1;
     }
+    if (this.#current === undefined || this.#isBetter(value, this.#current)) {
+      this.#current = value;
+    }
   }
 
   remove(row: RuntimeRow): void {
     const value = row[this.#field];
     if (value != null) {
-      decrementEntryCount(this.#values, aggregateValueKey(value));
+      const key = aggregateValueKey(value);
+      const existing = this.#values.get(key);
+      decrementEntryCount(this.#values, key);
+      if (
+        existing !== undefined &&
+        existing.count <= 1 &&
+        this.#current !== undefined &&
+        aggregateValueKey(this.#current) === key
+      ) {
+        this.#current = this.#recomputeCurrent();
+      }
     }
   }
 
   value(): unknown {
-    let hasValue = false;
+    return this.#current;
+  }
+
+  #recomputeCurrent(): unknown {
     let current: unknown;
     for (const entry of this.#values.values()) {
-      if (!hasValue) {
-        hasValue = true;
+      if (current === undefined || this.#isBetter(entry.value, current)) {
         current = entry.value;
-        continue;
       }
-      const comparison = compareAggregateValue(entry.value, current);
-      current =
-        this.#direction === "min"
-          ? comparison < 0
-            ? entry.value
-            : current
-          : comparison > 0
-            ? entry.value
-            : current;
     }
-    return hasValue ? current : undefined;
+    return current;
+  }
+
+  #isBetter(left: unknown, right: unknown): boolean {
+    const comparison = compareAggregateValue(left, right);
+    return this.#direction === "min" ? comparison < 0 : comparison > 0;
   }
 }
 
