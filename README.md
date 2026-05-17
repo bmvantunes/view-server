@@ -121,7 +121,7 @@ export function App() {
 - `docs/worker-state-machine-review.md` records the hardening checklist and soak shape.
 - `docs/adr/` records the load-bearing architecture decisions.
 
-The original root `plan.md` is the historical implementation plan. The current contracts are the
+The root `plan.md` is the historical implementation plan. The current contracts are the
 README, `CONTEXT.md`, `docs/architecture.md`, the ADRs, and the focused operations/testing/release
 docs above.
 
