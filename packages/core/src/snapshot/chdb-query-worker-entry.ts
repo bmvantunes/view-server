@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import { parentPort } from "node:worker_threads";
 import type { ViewServerError } from "../errors.ts";
-import { createChdbSnapshotBackend } from "./chdb-backend.ts";
+import { createInProcessChdbSnapshotBackend } from "./chdb-in-process-backend.ts";
 import {
   decodeMutationLogEntry,
   decodeRuntimeQuery,
@@ -38,7 +38,7 @@ if (port === null && process.send === undefined) {
   throw new Error("chDB query worker requires worker_threads parentPort or child_process IPC");
 }
 
-const backend = createChdbSnapshotBackend({ groupedRefreshWorker: false });
+const backend = createInProcessChdbSnapshotBackend();
 let pendingInit: PendingInit | undefined;
 
 type PendingInit = ChdbQueryWorkerInitStartRequest["args"] & {

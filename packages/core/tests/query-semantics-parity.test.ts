@@ -8,7 +8,7 @@ import type {
   RuntimeRow,
 } from "../src/protocol/index.ts";
 import { stableStringify } from "../src/protocol/index.ts";
-import { createChdbSnapshotBackend } from "../src/snapshot/chdb-backend.ts";
+import { createInProcessChdbSnapshotBackend } from "../src/snapshot/chdb-in-process-backend.ts";
 import type { VersionedRow } from "../src/snapshot/index.ts";
 import { makeActiveRawView } from "../src/worker/active-view.ts";
 import type { MutationLogEntry, WorkerVersion } from "../src/worker/mutation-log.ts";
@@ -28,7 +28,7 @@ describe("query semantics parity", () => {
   it.effect("matches raw query semantics across memory, active raw view, and chDB", () =>
     Effect.gen(function* () {
       const rows = deterministicRows(seed, 64);
-      const backend = createChdbSnapshotBackend({ groupedRefreshWorker: false });
+      const backend = createInProcessChdbSnapshotBackend();
       yield* Effect.addFinalizer(() => backend.close());
       yield* backend.init({
         topic: "orders",
@@ -52,7 +52,7 @@ describe("query semantics parity", () => {
   it.effect("matches grouped aggregate semantics across memory and chDB", () =>
     Effect.gen(function* () {
       const rows = deterministicRows(seed, 64);
-      const backend = createChdbSnapshotBackend({ groupedRefreshWorker: false });
+      const backend = createInProcessChdbSnapshotBackend();
       yield* Effect.addFinalizer(() => backend.close());
       yield* backend.init({
         topic: "orders",
@@ -76,7 +76,7 @@ describe("query semantics parity", () => {
       let rows = deterministicRows(seed, 64);
       const query = movingRawQuery;
       const view = makeActiveRawView(rows, query, "id", queryOptions);
-      const backend = createChdbSnapshotBackend({ groupedRefreshWorker: false });
+      const backend = createInProcessChdbSnapshotBackend();
       yield* Effect.addFinalizer(() => backend.close());
       yield* backend.init({
         topic: "orders",

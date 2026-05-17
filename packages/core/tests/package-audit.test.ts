@@ -129,6 +129,19 @@ describe("release package audit", () => {
     }),
   );
 
+  it.effect("keeps the public chDB adapter on the per-topic worker path", () =>
+    Effect.gen(function* () {
+      const corePackage = yield* readPackageJson("packages/core/package.json");
+      const publicChdbEntry = yield* readSources(["packages/core/src/snapshot/chdb-backend.ts"]);
+
+      expect(Object.keys(corePackage.exports)).not.toContain("./snapshot/chdb-in-process-backend");
+      expect(publicChdbEntry).not.toContain("createInProcessChdbSnapshotBackend");
+      expect(publicChdbEntry).not.toContain("groupedRefreshWorker?: boolean");
+      expect(publicChdbEntry).not.toContain("new Session()");
+      expect(publicChdbEntry).not.toContain("sharedSession");
+    }),
+  );
+
   it.effect("requires chDB for production while keeping unrelated integrations optional", () =>
     Effect.gen(function* () {
       const corePackage = yield* readPackageJson("packages/core/package.json");

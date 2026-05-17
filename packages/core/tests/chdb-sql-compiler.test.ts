@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import type { RuntimeQuery, RuntimeRow } from "../src/protocol/index.ts";
-import { createChdbSnapshotBackend } from "../src/snapshot/chdb-backend.ts";
+import { createInProcessChdbSnapshotBackend } from "../src/snapshot/chdb-in-process-backend.ts";
 import { compileQuerySql, type Column } from "../src/snapshot/chdb-sql-compiler.ts";
 import type { VersionedRow } from "../src/snapshot/index.ts";
 import { executeMemoryQuery } from "../src/worker/query-engine.ts";
@@ -54,7 +54,7 @@ describe("chDB SQL compiler", () => {
         { id: "c", symbol: "MSFT", status: "open", price: 30, quantity: 8 },
         { id: "d", symbol: "NVDA", status: "closed", price: 40, quantity: 10 },
       ];
-      const backend = createChdbSnapshotBackend({ groupedRefreshWorker: false });
+      const backend = createInProcessChdbSnapshotBackend();
       yield* Effect.addFinalizer(() => backend.close());
       yield* backend.init({
         topic: "orders",
