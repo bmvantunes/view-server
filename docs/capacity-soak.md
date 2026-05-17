@@ -28,20 +28,40 @@ pnpm --dir packages/core exec vitest run --config vitest.config.ts tests/runtime
 ```
 
 The summary artifact records subscription setup time, mutation latency, reconnect count, event
-counts, final health, chDB pending request count, queue depth, subscription lag, and active-plan
-cleanup state. Keep this out of normal PR CI at large sizes; the default test already exercises the
-transport lifecycle without turning every push into a capacity run.
+counts, final health, chDB pending request count, queue depth, subscription lag, active-plan cleanup
+state, and the top 10 slowest mutation samples with health snapshots. Keep this out of normal PR CI
+at large sizes; the default test already exercises the transport lifecycle without turning every
+push into a capacity run.
 
 Latest local runtime websocket soak results, May 17 2026:
 
-| profile |   rows | websocket clients | raw/grouped | mutations | reconnects | duration | mutation p50/p95/p99/max        | events                                      | cleanup                                                          |
-| ------- | -----: | ----------------: | ----------: | --------: | ---------: | -------: | ------------------------------- | ------------------------------------------- | ---------------------------------------------------------------- |
-| default |    500 |                15 |        12/3 |       120 |         10 |    1.07s | 3.01 / 10.88 / 24.53 / 30.43ms  | 25 snapshots, 854 deltas, 216 status        | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
-| manual  | 10,000 |               100 |       80/20 |     1,000 |         50 |   13.78s | 5.96 / 27.35 / 38.41 / 177.09ms | 150 snapshots, 47,990 deltas, 12,000 status | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+| profile |   rows | websocket clients | raw/grouped | mutations | reconnects | duration | mutation p50/p95/p99/max       | events                                      | cleanup                                                          |
+| ------- | -----: | ----------------: | ----------: | --------: | ---------: | -------: | ------------------------------ | ------------------------------------------- | ---------------------------------------------------------------- |
+| default |    500 |                15 |        12/3 |       120 |         10 |    1.06s | 3.97 / 5.56 / 6.35 / 34.94ms   | 25 snapshots, 1,419 deltas, 360 status      | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+| manual  | 10,000 |               100 |       80/20 |     1,000 |         50 |   13.52s | 6.51 / 24.15 / 30.01 / 160.0ms | 150 snapshots, 79,745 deltas, 20,000 status | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
 
 Both runs reported `retries=0`, `backpressureErrors=0`, and `chdbBackendVersionBeforeCleanup`
 matching the worker version. The manual profile intentionally leaves grouped subscriptions stale
 before cleanup while refreshes are advisory; after unsubscribe, lag and queues must return to zero.
+
+Tail attribution from the 100-client profile:
+
+| rank | mutation                          |  latency | reconnect active | queue | chDB pending | chDB lag | active build/pending | note                                                              |
+| ---: | --------------------------------- | -------: | ---------------- | ----: | -----------: | -------: | -------------------: | ----------------------------------------------------------------- |
+|    1 | `deltaPublish o-957` at index 857 |  160.0ms | no               |     0 |            0 |        0 |                  0/0 | max was not during reconnect, chDB catch-up, or active-plan build |
+|    2 | `publish o-10293` at index 583    | 124.43ms | no               |     0 |            0 |        0 |                  0/0 | same subsystem snapshot: 100 subscribers, 80 active views         |
+|    3 | `publish o-10253` at index 503    |  80.93ms | yes              |     0 |            2 |        1 |                  0/0 | reconnect window sample with temporary subscriber churn           |
+
+The spike is therefore not currently attributed to chDB, active-plan construction, queued
+backpressure, or the reconnect burst. The most likely causes are local event-loop/GC scheduling or
+websocket fanout pressure under 100 clients and 80 active views. This is acceptable for the current
+alpha soak because p99 is ~30ms, cleanup is clean, and no backpressure/retry occurred, but keep the
+top-slow-mutation samples in release artifacts. Treat repeated max spikes above the product latency
+budget as a follow-up fanout/event-loop profiling task.
+
+The summary currently records `groupedRefreshCountsAvailable=false`; grouped stale pressure is still
+visible through subscription lag/status counts, but grouped refresh pending/in-flight counters are
+not exposed as first-class health fields yet.
 
 ## 10M Raw Worker Soak
 
