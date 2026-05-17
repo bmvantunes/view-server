@@ -21,8 +21,9 @@ import { makeTopicWorkerCore } from "./topic-worker-core.ts";
 import {
   TopicWorkerInitialMessage,
   TopicWorkerRpcs,
+  encodeTopicWorkerMetrics,
   type TopicWorkerInitialMessage as TopicWorkerInitialMessageType,
-} from "./topic-worker-rpcs.ts";
+} from "./worker-protocol.ts";
 
 const TopicWorkerHandlersLive = TopicWorkerRpcs.toLayer(
   Effect.fn("view-server.worker.node.entry.handlers.make")(function* () {
@@ -99,36 +100,7 @@ const TopicWorkerHandlersLive = TopicWorkerRpcs.toLayer(
           yield* worker.deleteById(payload.id);
         })(),
       RowsForTest: () => worker.getRowsForTest.pipe(Effect.map((rows) => rows.map(toWireRow))),
-      Metrics: () =>
-        worker.metrics.pipe(
-          Effect.map((metrics) => ({
-            rows: metrics.rows,
-            subscribers: metrics.subscribers,
-            queueDepth: metrics.queueDepth,
-            maxSubscriptionLagVersions: metrics.maxSubscriptionLagVersions,
-            totalSubscriptionLagVersions: metrics.totalSubscriptionLagVersions,
-            activePlanCount: metrics.activePlanCount,
-            activeViewCount: metrics.activeViewCount,
-            activePlanRows: metrics.activePlanRows,
-            activePlanIndexEstimatedBytes: metrics.activePlanIndexEstimatedBytes,
-            activePlanBuildQueueDepth: metrics.activePlanBuildQueueDepth,
-            activePlanBuildingCount: metrics.activePlanBuildingCount,
-            activePlanPendingCount: metrics.activePlanPendingCount,
-            activePlanBuildMs: metrics.activePlanBuildMs,
-            activePlanBuildMsTotal: metrics.activePlanBuildMsTotal,
-            activePlanBuildMsMax: metrics.activePlanBuildMsMax,
-            activePlanFallbackCount: metrics.activePlanFallbackCount,
-            activePlanAutoBuildSkippedCount: metrics.activePlanAutoBuildSkippedCount,
-            chdbStatus: metrics.chdbStatus,
-            chdbPid: metrics.chdbPid,
-            chdbRestarts: metrics.chdbRestarts,
-            chdbPendingRequests: metrics.chdbPendingRequests,
-            chdbLastError: metrics.chdbLastError,
-            chdbBackendVersion: metrics.chdbBackendVersion.toString(),
-            version: metrics.version.toString(),
-            status: metrics.status,
-          })),
-        ),
+      Metrics: () => worker.metrics.pipe(Effect.map(encodeTopicWorkerMetrics)),
       Shutdown: () =>
         Effect.fn("view-server.worker.node.entry.shutdown")(function* () {
           yield* Effect.annotateCurrentSpan({

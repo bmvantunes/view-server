@@ -17,8 +17,10 @@ import type { RuntimeQuery } from "../protocol/index.ts";
 import { fromWireRows, toWireRow, type RpcWireValue } from "../rpc/index.ts";
 import {
   TopicWorkerRpcs,
+  decodeTopicWorkerMetrics,
+  encodeTopicWorkerRows,
   type TopicWorkerInitialMessage as TopicWorkerInitialMessageType,
-} from "./topic-worker-rpcs.ts";
+} from "./worker-protocol.ts";
 import type { TopicWorkerHost, TopicWorkerHostFactory } from "./topic-worker-host.ts";
 
 export type TopicWorkerSnapshotBackendMode = "memory" | "chdb";
@@ -58,7 +60,7 @@ export const makeNodeThreadTopicWorkerHostFactory = (
         topic,
         ...(hostOptions.initialRows === undefined
           ? {}
-          : { initialRows: hostOptions.initialRows.map(toWireRow) }),
+          : { initialRows: encodeTopicWorkerRows(hostOptions.initialRows) }),
         ...(hostOptions.maxQueueDepth === undefined
           ? {}
           : { maxQueueDepth: hostOptions.maxQueueDepth }),
@@ -115,37 +117,11 @@ function topicWorkerHostFromClient(
     topic,
     idField,
     version: client.Metrics().pipe(
-      Effect.map((metrics) => BigInt(metrics.version)),
+      Effect.map((metrics) => decodeTopicWorkerMetrics(metrics).version),
       Effect.mapError((error) => toWorkerError(topic, error)),
     ),
     metrics: client.Metrics().pipe(
-      Effect.map((metrics) => ({
-        rows: metrics.rows,
-        subscribers: metrics.subscribers,
-        queueDepth: metrics.queueDepth,
-        maxSubscriptionLagVersions: metrics.maxSubscriptionLagVersions,
-        totalSubscriptionLagVersions: metrics.totalSubscriptionLagVersions,
-        activePlanCount: metrics.activePlanCount,
-        activeViewCount: metrics.activeViewCount,
-        activePlanRows: metrics.activePlanRows,
-        activePlanIndexEstimatedBytes: metrics.activePlanIndexEstimatedBytes,
-        activePlanBuildQueueDepth: metrics.activePlanBuildQueueDepth,
-        activePlanBuildingCount: metrics.activePlanBuildingCount,
-        activePlanPendingCount: metrics.activePlanPendingCount,
-        activePlanBuildMs: metrics.activePlanBuildMs,
-        activePlanBuildMsTotal: metrics.activePlanBuildMsTotal,
-        activePlanBuildMsMax: metrics.activePlanBuildMsMax,
-        activePlanFallbackCount: metrics.activePlanFallbackCount,
-        activePlanAutoBuildSkippedCount: metrics.activePlanAutoBuildSkippedCount,
-        chdbStatus: metrics.chdbStatus,
-        chdbPid: metrics.chdbPid,
-        chdbRestarts: metrics.chdbRestarts,
-        chdbPendingRequests: metrics.chdbPendingRequests,
-        chdbLastError: metrics.chdbLastError,
-        chdbBackendVersion: BigInt(metrics.chdbBackendVersion),
-        version: BigInt(metrics.version),
-        status: metrics.status,
-      })),
+      Effect.map(decodeTopicWorkerMetrics),
       Effect.mapError((error) => toWorkerError(topic, error)),
     ),
     query: (query: RuntimeQuery) =>

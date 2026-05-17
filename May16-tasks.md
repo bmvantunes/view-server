@@ -91,6 +91,9 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 13: Client VisibleRows extraction and large-window delta benchmark.
 - [x] Task 12: Query Semantics Parity Suite across memory, ActiveRawView, and chDB.
 - [x] Task 39: chDB SQL compiler contract tests and internal compiler module.
+- [x] Task 40: WorkerProtocol module owns topic-worker RPC command names,
+      payload/response schemas, metrics codecs, BigDecimal wire roundtrips,
+      and node/in-process metrics protocol parity.
 - [x] Task 10: Aggregate Function Modules for count, sum, min, max, avg, count distinct,
       and string aggregates with focused BigDecimal/null/update tests.
 - [x] Task 9: GroupedAccumulator prototype for opt-in count/sum/min/max grouped subscriptions,
