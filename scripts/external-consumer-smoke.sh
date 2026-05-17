@@ -25,6 +25,7 @@ cat >package.json <<EOF
   "packageManager": "pnpm@11.0.9",
   "scripts": {
     "node:smoke": "node --experimental-strip-types src/node-smoke.ts",
+    "negative:imports": "node src/negative-imports-runtime.mjs",
     "build": "vite build",
     "bundle:grep": "node src/bundle-grep.mjs",
     "test": "vitest run --config vitest.browser.config.ts"
@@ -342,6 +343,42 @@ for (const file of await files("dist")) {
 process.stdout.write("browser bundle grep passed\n");
 EOF
 
+cat >src/negative-imports.ts <<'EOF'
+// @ts-expect-error @view-server/core must not export its internal testing seam.
+import("@view-server/core/internal/testing");
+
+// @ts-expect-error @view-server/testing must not export memory-backed helpers.
+import { inMemoryViewServer, isolatedInMemoryViewServer } from "@view-server/testing";
+EOF
+
+cat >src/negative-imports-runtime.mjs <<'EOF'
+async function expectPackageExportFailure(specifier) {
+  try {
+    await import(specifier);
+  } catch (error) {
+    if (error?.code === "ERR_PACKAGE_PATH_NOT_EXPORTED") {
+      return;
+    }
+    process.stderr.write(`unexpected import failure for ${specifier}: ${error?.stack ?? error}\n`);
+    process.exit(1);
+  }
+  process.stderr.write(`expected ${specifier} to be blocked by package exports\n`);
+  process.exit(1);
+}
+
+await expectPackageExportFailure("@view-server/core/internal/testing");
+
+const testing = await import("@view-server/testing");
+for (const name of ["inMemoryViewServer", "isolatedInMemoryViewServer"]) {
+  if (Object.hasOwn(testing, name)) {
+    process.stderr.write(`@view-server/testing unexpectedly exports ${name}\n`);
+    process.exit(1);
+  }
+}
+
+process.stdout.write("negative import smoke passed\n");
+EOF
+
 cat >tests/testing.browser.tsx <<'EOF'
 import { describe, expect, test } from "vite-plus/test";
 import {
@@ -373,6 +410,7 @@ if ! pnpm install --config.confirmModulesPurge=false; then
   pnpm install --config.confirmModulesPurge=false
 fi
 pnpm exec tsc --noEmit
+pnpm run negative:imports
 pnpm run node:smoke
 pnpm run build
 pnpm run bundle:grep

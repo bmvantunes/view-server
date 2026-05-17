@@ -248,6 +248,10 @@ The testing smoke should import `@view-server/testing` from the tarball and run 
 public API test against the real-server testing helpers. Public `@view-server/testing` does not
 export memory-backed helpers.
 
+The smoke also includes negative package-boundary checks. TypeScript must reject
+`@view-server/core/internal/testing` and memory helper named imports from `@view-server/testing`,
+and Node must reject `@view-server/core/internal/testing` through package exports.
+
 For app-level UI/E2E tests, use a real View Server process plus the testing-only
 `TestingViewServerProvider` from `@view-server/testing`. It requires an `isolationId`, injects
 `where isolationId == current isolationId` into live queries, and adds `isolationId` to rows and
