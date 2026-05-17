@@ -14,18 +14,27 @@ export type MutationLogEntry = {
 };
 
 export class MutationLog {
-  readonly #entries: MutationLogEntry[] = [];
+  readonly #entries: Array<MutationLogEntry | undefined>;
+  #start = 0;
+  #size = 0;
   readonly capacity: number;
 
   constructor(capacity: number) {
     this.capacity = capacity;
+    this.#entries = Array.from({ length: Math.max(0, capacity) });
   }
 
   append(entry: MutationLogEntry): void {
-    this.#entries.push(entry);
-    while (this.#entries.length > this.capacity) {
-      this.#entries.shift();
+    if (this.capacity <= 0) {
+      return;
     }
+    if (this.#size < this.capacity) {
+      this.#entries[this.#physicalIndex(this.#size)] = entry;
+      this.#size += 1;
+      return;
+    }
+    this.#entries[this.#start] = entry;
+    this.#start = (this.#start + 1) % this.capacity;
   }
 
   coversExclusive(fromVersion: WorkerVersion, toVersion: WorkerVersion): boolean {
@@ -33,8 +42,8 @@ export class MutationLog {
       return true;
     }
     const firstNeeded = fromVersion + 1n;
-    const first = this.#entries[0]?.version;
-    const last = this.#entries[this.#entries.length - 1]?.version;
+    const first = this.#entryAt(0)?.version;
+    const last = this.#entryAt(this.#size - 1)?.version;
     return first !== undefined && last !== undefined && first <= firstNeeded && last >= toVersion;
   }
 
@@ -42,8 +51,24 @@ export class MutationLog {
     fromVersion: WorkerVersion,
     toVersion: WorkerVersion,
   ): readonly MutationLogEntry[] {
-    return this.#entries.filter(
-      (entry) => entry.version > fromVersion && entry.version <= toVersion,
-    );
+    const entries: MutationLogEntry[] = [];
+    for (let index = 0; index < this.#size; index++) {
+      const entry = this.#entryAt(index);
+      if (entry !== undefined && entry.version > fromVersion && entry.version <= toVersion) {
+        entries.push(entry);
+      }
+    }
+    return entries;
+  }
+
+  #physicalIndex(logicalIndex: number): number {
+    return (this.#start + logicalIndex) % this.capacity;
+  }
+
+  #entryAt(logicalIndex: number): MutationLogEntry | undefined {
+    if (logicalIndex < 0 || logicalIndex >= this.#size || this.capacity <= 0) {
+      return undefined;
+    }
+    return this.#entries[this.#physicalIndex(logicalIndex)];
   }
 }
