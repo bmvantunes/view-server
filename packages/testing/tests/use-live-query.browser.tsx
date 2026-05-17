@@ -18,14 +18,13 @@ import type {
   SubscriptionEvent,
 } from "@view-server/core/query";
 import { fromWireRow, wireQueryResponse } from "@view-server/core/rpc";
+import { readyUrlForRpcUrl, realViewServerTestHarness } from "../src/index.ts";
 import {
   inMemoryViewServer,
   isolatedInMemoryViewServer,
-  readyUrlForRpcUrl,
-  realViewServerTestHarness,
   type InMemoryViewServer,
   type IsolatedInMemoryViewServer,
-} from "../src/index.ts";
+} from "./fixtures/in-memory.ts";
 import {
   createTestingViewServerClientFromTransport,
   validateTestingIsolationId,

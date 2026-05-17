@@ -15,7 +15,7 @@ Use this path for app correctness:
 - test publisher/client helpers that inject `isolationId`
 - live queries automatically scoped by `isolationId`
 
-Do not rely on `inMemoryViewServer` behavior for app correctness. It exists for package/browser helper tests only.
+Do not rely on in-memory View Server behavior for app correctness. Memory-backed helpers are package-internal test infrastructure only; public app tests should use a real View Server process.
 
 ## Start And Stop A Test Server
 
@@ -102,25 +102,14 @@ queries.
 
 ## Package And Browser Tests
 
-`inMemoryViewServer` and `isolatedInMemoryViewServer` are testing helpers. They are allowed to use the private memory backend because they are not production runtime paths.
+View Server's own package/browser tests may use private in-memory helpers where native chDB cannot
+run, but those helpers are not exported from `@view-server/testing`. External app/browser tests
+should use `realViewServerTestHarness`, `makeTestingBrowserWebsocketClient`, or
+`createTestingViewServerReact` against a real websocket server.
 
-Use `isolatedInMemoryViewServer` when a browser-mode package test needs the same isolation behavior without starting a real websocket server:
-
-```ts
-const server =
-  yield *
-  isolatedInMemoryViewServer(config, {
-    isolationId: "test-a",
-  });
-
-await server.publish("orders", {
-  id: "o-1",
-  symbol: "AAPL",
-  price: 100,
-});
-```
-
-The row passed to `publish` omits `isolationId`; the helper adds it before sending the payload.
+The testing client/provider path injects `isolationId` into publish and patch payloads and scopes
+queries by `where isolationId == current isolationId`. The row passed to public testing helpers
+omits `isolationId`; the helper adds it before sending the payload.
 
 ## Production Boundary
 

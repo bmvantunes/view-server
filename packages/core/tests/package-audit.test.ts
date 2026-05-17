@@ -45,7 +45,6 @@ const publicPackages = [
       "./client",
       "./config",
       "./errors",
-      "./internal/testing",
       "./kafka",
       "./kafka/platformatic",
       "./query",
@@ -103,6 +102,7 @@ describe("release package audit", () => {
       const corePackage = yield* readPackageJson("packages/core/package.json");
       expect(Object.keys(corePackage.exports)).not.toContain("./worker");
       expect(Object.keys(corePackage.exports)).not.toContain("./worker/core");
+      expect(Object.keys(corePackage.exports)).not.toContain("./internal/testing");
       expect(Object.keys(corePackage.exports)).not.toContain("./snapshot/chdb-query-worker-entry");
       expect(Object.keys(corePackage.exports)).not.toContain("./snapshot/snapshot-backend");
       expect(Object.keys(corePackage.exports)).not.toContain("./testing");
@@ -117,12 +117,15 @@ describe("release package audit", () => {
         "packages/core/src/worker/topic-worker-node-host.ts",
       ]);
       const runtimePublicEntry = yield* readSources(["packages/core/src/runtime.ts"]);
+      const testingPublicEntry = yield* readSources(["packages/testing/src/index.ts"]);
 
       expect(coreSnapshotEntry).not.toContain("createMemorySnapshotBackend");
       expect(internalSnapshotBarrel).not.toContain("createMemorySnapshotBackend");
       expect(nodeWorkerHost).not.toContain("TopicWorkerSnapshotBackendMode");
       expect(nodeWorkerHost).not.toContain("snapshotBackend?");
       expect(runtimePublicEntry).not.toContain("makeInternalTestingViewServerRuntime");
+      expect(testingPublicEntry).not.toContain("inMemoryViewServer");
+      expect(testingPublicEntry).not.toContain("@view-server/core/internal/testing");
     }),
   );
 

@@ -7,7 +7,6 @@ export default defineConfig({
       "src/client.ts",
       "src/config.ts",
       "src/errors.ts",
-      "src/internal/testing.ts",
       "src/kafka.ts",
       "src/query.ts",
       "src/rpc.ts",

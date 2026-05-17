@@ -244,9 +244,15 @@ Expected result: Vite builds successfully and the grep exits 0.
 
 ## Testing Consumer Smoke
 
-The testing smoke should import `@view-server/testing` from the tarball and run a browser-mode test against `inMemoryViewServer`. It should not require production chDB or Kafka dependencies.
+The testing smoke should import `@view-server/testing` from the tarball and run a browser-mode
+public API test against the real-server testing helpers. Public `@view-server/testing` does not
+export memory-backed helpers.
 
-For app-level UI/E2E tests, prefer a real View Server process plus the testing-only `TestingViewServerProvider` from `@view-server/testing`. It requires an `isolationId`, injects `where isolationId == current isolationId` into live queries, and adds `isolationId` to rows and patches sent through testing helpers. Each test topic schema must include `isolationId: Schema.String`.
+For app-level UI/E2E tests, use a real View Server process plus the testing-only
+`TestingViewServerProvider` from `@view-server/testing`. It requires an `isolationId`, injects
+`where isolationId == current isolationId` into live queries, and adds `isolationId` to rows and
+patches sent through testing helpers. Each test topic schema must include
+`isolationId: Schema.String`.
 
 Run:
 

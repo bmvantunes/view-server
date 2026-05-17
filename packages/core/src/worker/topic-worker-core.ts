@@ -17,7 +17,6 @@ import {
   type ViewServerError,
 } from "../errors.ts";
 import type {
-  DeltaOperation,
   DeltaEvent,
   QueryResponse,
   RuntimeQuery,
@@ -48,17 +47,17 @@ import {
   diffVisibleRows,
   executeGroupedQueryEffect,
   executeMemoryQuery,
-  groupedQueryOrderBy,
   isGroupedQuery,
   matchesFilter,
-  normalizeLimit,
-  normalizeOffset,
   RAW_QUERY_WINDOW_OPTIMIZATION_LIMIT,
   type QueryExecutionResult,
   rowKeyForMemoryQuery,
-  stableSortRows,
 } from "./query-engine.ts";
 import { makeIncrementalGroupedAccumulator } from "./grouped-accumulator.ts";
+import {
+  materializeGroupedAccumulatorChange,
+  type MaterializedSubscriptionChange,
+} from "./grouped-accumulator-fanout.ts";
 import { planQuery, type QueryPlan, type QueryOperation } from "./query-planner.ts";
 import { makeSnapshotReconciler } from "./snapshot-reconciler.ts";
 import {
@@ -88,12 +87,6 @@ export type TopicWorkerCore = {
   readonly deleteById: (id: string | number) => Effect.Effect<void, ViewServerError>;
   readonly getRowsForTest: Effect.Effect<readonly RuntimeRow[], ViewServerError>;
   readonly shutdown: Effect.Effect<void, ViewServerError>;
-};
-
-type MaterializedSubscriptionChange = {
-  readonly operations: readonly DeltaOperation<RuntimeRow>[];
-  readonly nextRows?: readonly RuntimeRow[] | undefined;
-  readonly totalRows: number;
 };
 
 type ShutdownState = {
@@ -482,58 +475,34 @@ export function makeTopicWorkerCore(
       if (!isGroupedQuery(subscription.query) || subscription.groupedAccumulator === undefined) {
         return;
       }
-      const beforeMatches =
-        mutation.before !== undefined &&
-        matchesFilter(mutation.before, subscription.query.where, { literalStringFields });
-      const afterMatches =
-        mutation.after !== undefined &&
-        matchesFilter(mutation.after, subscription.query.where, { literalStringFields });
-      if (!beforeMatches && !afterMatches) {
-        subscription.lastVersion = toVersion;
-        return;
-      }
-      if (beforeMatches && afterMatches) {
-        subscription.groupedAccumulator.applyMutation(mutation);
-      } else if (beforeMatches && mutation.before !== undefined) {
-        subscription.groupedAccumulator.applyMutation({
-          version: mutation.version,
-          kind: "delete",
-          id: mutation.id,
-          before: mutation.before,
-          changedFields: mutation.changedFields,
-        });
-      } else if (afterMatches && mutation.after !== undefined) {
-        subscription.groupedAccumulator.applyMutation({
-          version: mutation.version,
-          kind: "insert",
-          id: mutation.id,
-          after: mutation.after,
-          changedFields: mutation.changedFields,
-        });
-      }
-      const next = groupedAccumulatorQueryResult(subscription);
-      const operations = diffVisibleRows(
-        subscription.lastRows,
-        next.rows,
-        rowKeyForMemoryQuery(subscription.query, idField),
-      );
-      if (operations.length === 0 && subscription.lastTotalRows === next.totalRows) {
+      const materialized = materializeGroupedAccumulatorChange({
+        query: subscription.query,
+        groupedAccumulator: subscription.groupedAccumulator,
+        lastRows: subscription.lastRows,
+        lastTotalRows: subscription.lastTotalRows,
+        mutation,
+        idField,
+        options: { literalStringFields },
+      });
+      if (materialized === undefined) {
         subscription.lastVersion = toVersion;
         return;
       }
       const event: DeltaEvent<readonly RuntimeRow[]> = {
         type: "delta",
         requestId: subscription.requestId,
-        ops: operations,
+        ops: materialized.operations,
         meta: {
           fromVersion: fromVersion.toString(),
           toVersion: toVersion.toString(),
-          totalRows: next.totalRows,
+          totalRows: materialized.totalRows,
           serverTime: Date.now(),
         },
       };
-      subscription.lastRows = next.rows;
-      subscription.lastTotalRows = next.totalRows;
+      if (materialized.nextRows !== undefined) {
+        subscription.lastRows = materialized.nextRows;
+      }
+      subscription.lastTotalRows = materialized.totalRows;
       subscription.lastVersion = toVersion;
       const offered = yield* fanoutQueue.offerDelta(subscription.queue, subscription, event);
       if (!offered) {
@@ -547,24 +516,6 @@ export function makeTopicWorkerCore(
         );
       }
     });
-
-    const groupedAccumulatorQueryResult = (
-      subscription: ActiveSubscription,
-    ): QueryExecutionResult => {
-      if (!isGroupedQuery(subscription.query) || subscription.groupedAccumulator === undefined) {
-        return memoryQuery(subscription.query);
-      }
-      const sorted = stableSortRows(
-        subscription.groupedAccumulator.groupedRows(),
-        groupedQueryOrderBy(subscription.query),
-      );
-      const offset = normalizeOffset(subscription.query.offset);
-      const limit = normalizeLimit(subscription.query.limit);
-      return {
-        rows: sorted.slice(offset, offset + limit),
-        totalRows: sorted.length,
-      };
-    };
 
     function scheduleGroupedSubscriptionRefresh(requestId: string): Effect.Effect<void> {
       return Effect.gen(function* () {

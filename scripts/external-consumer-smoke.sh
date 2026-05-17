@@ -199,61 +199,56 @@ export const ordersQuery = {
 EOF
 
 cat >src/node-smoke.ts <<'EOF'
-import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import { inMemoryViewServer } from "@view-server/testing";
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
+import { makeViewServerRuntime } from "@view-server/core/runtime";
 import { config, ordersQuery } from "./view-server.ts";
 
 const program = Effect.scoped(
   Effect.gen(function* () {
-    const server = yield* inMemoryViewServer(config);
-    yield* Effect.promise(() =>
-      server.publish("orders", {
-        id: "o-1",
-        isolationId: "node-smoke",
-        symbol: "AAPL",
-        price: 100,
-        desk: "ny",
-      }),
-    );
-    yield* Effect.promise(() =>
-      server.publish("trades", {
-        id: "t-1",
-        isolationId: "node-smoke",
-        orderId: "o-1",
-        qty: 10,
-      }),
-    );
+    const runtime = yield* makeViewServerRuntime(config);
+    yield* runtime.publish("orders", {
+      id: "o-1",
+      isolationId: "node-smoke",
+      symbol: "AAPL",
+      price: 100,
+      desk: "ny",
+    });
+    yield* runtime.publish("trades", {
+      id: "t-1",
+      isolationId: "node-smoke",
+      orderId: "o-1",
+      qty: 10,
+    });
 
-    const result = yield* Effect.promise(() => server.query("orders", ordersQuery));
+    const result = yield* runtime.query("orders", ordersQuery);
     if (result.totalRows !== 1 || result.rows[0]?.symbol !== "AAPL") {
       return yield* Effect.die(new Error("query result mismatch"));
     }
 
-    const snapshotReceived = yield* Deferred.make<void>();
-    const deltaReceived = yield* Deferred.make<void>();
-    const subscription = yield* server.subscribe("orders", ordersQuery, (event) =>
-      event.type === "snapshot"
-        ? Deferred.succeed(snapshotReceived, undefined)
-        : event.type === "delta"
-          ? Deferred.succeed(deltaReceived, undefined)
-          : Effect.void,
-    );
+    const events = yield* runtime
+      .subscribe("node-smoke-sub", "orders", ordersQuery)
+      .pipe(Stream.toQueue({ capacity: 8 }));
 
-    yield* Deferred.await(snapshotReceived).pipe(Effect.timeout("1 second"));
-    yield* Effect.promise(() =>
-      server.publish("orders", {
-        id: "o-2",
-        isolationId: "node-smoke",
-        symbol: "MSFT",
-        price: 200,
-        desk: "ny",
-      }),
-    );
-    yield* Deferred.await(deltaReceived).pipe(Effect.timeout("1 second"));
-    yield* subscription.close;
+    const snapshot = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+    if (snapshot.type !== "snapshot") {
+      return yield* Effect.die(new Error("expected snapshot"));
+    }
+    yield* runtime.publish("orders", {
+      id: "o-2",
+      isolationId: "node-smoke",
+      symbol: "MSFT",
+      price: 200,
+      desk: "ny",
+    });
+    const delta = yield* Queue.take(events).pipe(Effect.timeout("1 second"));
+    if (delta.type !== "delta") {
+      return yield* Effect.die(new Error("expected delta"));
+    }
+    yield* runtime.unsubscribe("node-smoke-sub");
     yield* Effect.sleep("20 millis");
-    const health = yield* Effect.promise(() => server.health());
+    const health = yield* runtime.health;
     const subscribers = Object.values(health.topics).reduce(
       (total, topic) => total + topic.subscribers,
       0,
@@ -262,6 +257,7 @@ const program = Effect.scoped(
     if (subscribers !== 0) {
       return yield* Effect.die(new Error("subscription lifecycle mismatch"));
     }
+    yield* runtime.close;
   }),
 );
 
@@ -348,27 +344,22 @@ EOF
 
 cat >tests/testing.browser.tsx <<'EOF'
 import { describe, expect, test } from "vite-plus/test";
-import * as Effect from "effect/Effect";
-import { isolatedInMemoryViewServer } from "@view-server/testing";
-import { config, ordersQuery } from "../src/view-server";
+import {
+  createTestingViewServerReact,
+  makeTestingBrowserWebsocketClient,
+  readyUrlForRpcUrl,
+  realViewServerTestHarness,
+} from "@view-server/testing";
+import { config } from "../src/view-server";
 
 describe("packed testing package", () => {
-  test("runs the isolated in-memory helper from the public package", async () => {
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const server = yield* isolatedInMemoryViewServer(config, {
-            isolationId: "browser-smoke",
-            initialRows: {
-              orders: [{ id: "o-1", symbol: "AAPL", price: 100, desk: "ny" }],
-            },
-          });
-          const result = yield* Effect.promise(() => server.query("orders", ordersQuery));
-          expect(result.totalRows).toBe(1);
-          expect(result.rows[0]?.symbol).toBe("AAPL");
-        }),
-      ),
-    );
+  test("imports real-server testing helpers from the public package", () => {
+    const testingReact = createTestingViewServerReact(config);
+    expect(typeof testingReact.TestingViewServerProvider).toBe("function");
+    expect(typeof testingReact.useLiveQuery).toBe("function");
+    expect(typeof makeTestingBrowserWebsocketClient).toBe("function");
+    expect(typeof realViewServerTestHarness).toBe("function");
+    expect(readyUrlForRpcUrl("ws://127.0.0.1:3100/rpc")).toBe("http://127.0.0.1:3100/ready");
   });
 });
 EOF

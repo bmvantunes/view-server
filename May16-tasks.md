@@ -137,9 +137,10 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 46: ADRs added for mandatory chDB, per-topic chDB children, real-server
       isolationId testing, AsyncResult hooks, active raw views, and grouped refresh strategy.
 - [x] Task 47: Public runtime/testing seam hides memory backend from public
-      production runtime options and worker/node options, keeps memory behind the
-      explicit core internal/testing seam used by @view-server/testing, and adds
-      package/type tests proving production config has no memory backend choice.
+      production runtime options, worker/node options, core exports, and
+      @view-server/testing public exports. Memory remains package-internal test
+      infrastructure only, with package/type tests proving production config has
+      no memory backend choice.
 - [x] Task 48: Browser forbidden import guard scans React, testing browser
       helpers, and browser app source for server-only modules, broad core root
       imports, and worker imports, with focused CI-covered tests.

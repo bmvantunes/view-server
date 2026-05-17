@@ -10,6 +10,7 @@ const forbiddenImports = new Set([
   "@effect/platform-node",
   "@platformatic/kafka",
   "@view-server/core",
+  "@view-server/core/internal/testing",
   "chdb",
   "child_process",
   "fs",
@@ -31,6 +32,7 @@ const browserImportScopes = [
   {
     label: "testing browser helpers",
     files: [
+      "packages/testing/src/index.ts",
       "packages/testing/src/testing-isolation.ts",
       "packages/testing/src/real-server-harness.ts",
     ],

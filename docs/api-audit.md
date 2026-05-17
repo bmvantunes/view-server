@@ -307,9 +307,8 @@ These exports are intentionally public but must stay behind explicit Node-only s
 - `@view-server/core/kafka/platformatic`: `createPlatformaticKafkaConsumerFactory`, `createPlatformaticKafkaTopicConsumer`, `createPlatformaticKafkaTopicVerifier`, `platformaticKafkaTopicConsumerOptions`, plus `PlatformaticKafkaConsumerFactoryOptions`, `PlatformaticKafkaTopicConsumerOptions`, and `PlatformaticKafkaTopicVerifierOptions`
 - `@view-server/core/snapshot/chdb`: `createChdbSnapshotBackend`, `createChdbSnapshotBackendFactory`, plus `ChdbSnapshotBackendOptions`
 - `@view-server/core/worker/node`: `makeNodeThreadTopicWorkerHostFactory`, plus `NodeThreadTopicWorkerHostFactoryOptions`
-- `@view-server/core/internal/testing`: `makeInternalTestingViewServerRuntime`, plus `InternalTestingViewServerRuntimeOptions`. This subpath exists only so `@view-server/testing` can keep the memory backend in test helpers without exposing a production backend choice.
 
-The package does not export `./worker`, `./worker/core`, `./snapshot/chdb-query-worker-entry`, `./snapshot/snapshot-backend`, `./rpc/server`, or user-facing memory backend helpers. The `./internal/testing` subpath is reserved for `@view-server/testing`.
+The package does not export `./worker`, `./worker/core`, `./internal/testing`, `./snapshot/chdb-query-worker-entry`, `./snapshot/snapshot-backend`, `./rpc/server`, or user-facing memory backend helpers.
 
 ## `@view-server/react`
 
@@ -336,18 +335,12 @@ The React package imports public core subpaths only. It must not import Node-onl
 Runtime exports:
 
 - `createTestingViewServerReact`
-- `inMemoryViewServer`
-- `isolatedInMemoryViewServer`
 - `makeTestingBrowserWebsocketClient`
 - `readyUrlForRpcUrl`
 - `realViewServerTestHarness`
 
 Type exports:
 
-- `InMemoryViewServer`
-- `InMemoryViewServerOptions`
-- `IsolatedInMemoryViewServer`
-- `IsolatedInMemoryViewServerOptions`
 - `MissingIsolationTopics`
 - `RealViewServerTestHarness`
 - `RealViewServerTestHarnessOptions`

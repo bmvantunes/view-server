@@ -302,9 +302,10 @@ function resolveChdbQueryWorkerEntryUrl(workerEntryUrl: string | URL | undefined
   if (workerEntryUrl !== undefined) {
     return toWorkerUrl(workerEntryUrl);
   }
+  // Source runs from src/snapshot; bundled dist code lives in a shared root chunk.
   return import.meta.url.endsWith(".ts")
     ? new URL("./chdb-query-worker-entry.ts", import.meta.url)
-    : new URL("./chdb-query-worker-entry.mjs", import.meta.url);
+    : new URL("./snapshot/chdb-query-worker-entry.mjs", import.meta.url);
 }
 
 function toWorkerUrl(value: string | URL): URL {
