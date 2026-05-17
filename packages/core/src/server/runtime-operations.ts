@@ -62,8 +62,8 @@ export function makeRuntimeOperations(args: {
   readonly authPolicy: AuthPolicy;
   readonly queryLimitPolicy: QueryLimitPolicy;
   readonly shutdownController: RuntimeShutdownController;
-  readonly syncHealthTopic: Effect.Effect<void, ViewServerError>;
-  readonly syncHealthTopicIgnoringErrors: Effect.Effect<void>;
+  readonly requestHealthTopicSync: Effect.Effect<void, ViewServerError>;
+  readonly flushHealthTopicIgnoringErrors: Effect.Effect<void>;
 }): RuntimeOperations {
   const workerFor = (topic: string) => {
     const worker = args.workers.get(topic);
@@ -86,7 +86,7 @@ export function makeRuntimeOperations(args: {
       const worker = yield* workerFor(topic);
       yield* dispatch(worker, payload);
       if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
-        yield* args.syncHealthTopic;
+        yield* args.requestHealthTopicSync;
       }
     })();
 
@@ -111,7 +111,7 @@ export function makeRuntimeOperations(args: {
       const worker = yield* workerFor(topic);
       yield* worker.mutateBatch(mutations);
       if (topic !== VIEW_SERVER_HEALTH_TOPIC) {
-        yield* args.syncHealthTopic;
+        yield* args.requestHealthTopicSync;
       }
     })();
 
@@ -162,7 +162,7 @@ export function makeRuntimeOperations(args: {
     );
     yield* args.authPolicy.canReadTopic({ topic, operation: "query", payload: guardedQuery });
     if (topic === VIEW_SERVER_HEALTH_TOPIC) {
-      yield* args.syncHealthTopicIgnoringErrors;
+      yield* args.flushHealthTopicIgnoringErrors;
     }
     const worker = yield* workerFor(topic);
     const response = yield* worker.query(guardedQuery);
@@ -194,8 +194,8 @@ export function makeRuntimeOperations(args: {
     yield* args.authPolicy.canSubscribe({ topic, requestId, payload: guardedQuery });
     const worker = yield* workerFor(topic);
     return worker.subscribe(requestId, guardedQuery).pipe(
-      Stream.onFirst(() => args.syncHealthTopicIgnoringErrors),
-      Stream.ensuring(args.syncHealthTopicIgnoringErrors),
+      Stream.onFirst(() => args.requestHealthTopicSync),
+      Stream.ensuring(args.requestHealthTopicSync.pipe(Effect.ignore)),
     );
   });
 
@@ -207,7 +207,7 @@ export function makeRuntimeOperations(args: {
     yield* Effect.forEach(args.workers.values(), (worker) => worker.unsubscribe(requestId), {
       discard: true,
     });
-    yield* args.syncHealthTopicIgnoringErrors;
+    yield* args.requestHealthTopicSync;
   });
 
   return {

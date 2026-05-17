@@ -114,8 +114,8 @@ function operationInputs(args: {
     authPolicy: authPolicy(),
     queryLimitPolicy: QueryLimitPolicy.fromConfig(config),
     shutdownController: new RuntimeShutdownController(),
-    syncHealthTopic: args.syncHealth ?? Effect.void,
-    syncHealthTopicIgnoringErrors: Effect.void,
+    requestHealthTopicSync: args.syncHealth ?? Effect.void,
+    flushHealthTopicIgnoringErrors: Effect.void,
   };
 }
 

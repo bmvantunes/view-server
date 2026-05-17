@@ -24,6 +24,7 @@ import {
   type HealthResponse,
   type RuntimeHealthProjectionTopicInput,
 } from "./runtime-health-projection.ts";
+import { RuntimeHealthSyncScheduler } from "./runtime-health-sync-scheduler.ts";
 import { makeRuntimeOperations } from "./runtime-operations.ts";
 import { RuntimeShutdownController } from "./runtime-shutdown-controller.ts";
 import {
@@ -112,6 +113,7 @@ function makeViewServerRuntimeInternal(
     const queryLimitPolicy = QueryLimitPolicy.fromConfig(normalized);
     const authPolicy = options.authPolicy ?? defaultAuthPolicy(normalized);
     const shutdownController = new RuntimeShutdownController();
+    const scope = yield* Effect.scope;
 
     const collectHealth = Effect.fn("view-server.runtime.health")(function* () {
       const topics: Record<string, RuntimeHealthProjectionTopicInput> = {};
@@ -128,7 +130,7 @@ function makeViewServerRuntimeInternal(
       return projectRuntimeHealth({ closing: shutdownController.isClosing(), topics });
     });
 
-    const syncHealthTopic = Effect.fn("view-server.runtime.health_topic.sync")(function* () {
+    const syncHealthTopicNow = Effect.fn("view-server.runtime.health_topic.sync")(function* () {
       const healthWorker = workers.get(VIEW_SERVER_HEALTH_TOPIC);
       if (healthWorker === undefined) {
         return;
@@ -139,7 +141,13 @@ function makeViewServerRuntimeInternal(
       });
     });
 
-    const syncHealthTopicIgnoringErrors = syncHealthTopic().pipe(Effect.ignore);
+    const healthSyncScheduler = new RuntimeHealthSyncScheduler({
+      syncNow: syncHealthTopicNow(),
+      scope,
+    });
+    const requestHealthTopicSync = healthSyncScheduler.request;
+    const flushHealthTopic = healthSyncScheduler.flush;
+    const flushHealthTopicIgnoringErrors = flushHealthTopic.pipe(Effect.ignore);
 
     const operations = makeRuntimeOperations({
       workers,
@@ -147,16 +155,17 @@ function makeViewServerRuntimeInternal(
       authPolicy,
       queryLimitPolicy,
       shutdownController,
-      syncHealthTopic: syncHealthTopic(),
-      syncHealthTopicIgnoringErrors,
+      requestHealthTopicSync,
+      flushHealthTopicIgnoringErrors,
     });
 
     const closeRuntime = Effect.fn("view-server.runtime.close")(function* () {
       yield* shutdownController.close({
-        syncHealth: syncHealthTopicIgnoringErrors,
+        syncHealth: flushHealthTopicIgnoringErrors,
         stopSources: sourceSupervisor.shutdown(),
         workers: workers.values(),
       });
+      yield* healthSyncScheduler.close;
     });
 
     const runtime: ViewServerRuntimeShape = {
@@ -180,7 +189,7 @@ function makeViewServerRuntimeInternal(
       close: closeRuntime(),
     };
 
-    yield* syncHealthTopic();
+    yield* syncHealthTopicNow();
     yield* sourceSupervisor.start({
       publish: (topic, row) => operations.publishWithTransport(topic, row, "internal"),
       deltaPublish: (topic, patch) =>
@@ -188,7 +197,7 @@ function makeViewServerRuntimeInternal(
       deleteById: (topic, id) => operations.deleteByIdWithTransport(topic, id, "internal"),
       mutateBatch: (topic, mutations) =>
         operations.mutateBatchWithTransport(topic, mutations, "internal"),
-      syncHealth: syncHealthTopicIgnoringErrors,
+      syncHealth: requestHealthTopicSync,
     });
 
     return runtime;
