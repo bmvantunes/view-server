@@ -100,6 +100,9 @@ focused tests and the relevant integration tests still pass.
 - [x] Task 42: RuntimeSourceGraph owns source-to-topic, topic-to-worker,
       and topic-owned snapshot backend mapping plus Kafka topic verification
       before placement, with two-topic chDB child isolation and invalid startup tests.
+- [x] Task 43: Orders demo contract is covered by source-level public import
+      tests, real websocket browser smoke at desktop/mobile widths, demo build,
+      and browser bundle forbidden-dependency grep.
 - [x] Task 10: Aggregate Function Modules for count, sum, min, max, avg, count distinct,
       and string aggregates with focused BigDecimal/null/update tests.
 - [x] Task 9: GroupedAccumulator prototype for opt-in count/sum/min/max grouped subscriptions,

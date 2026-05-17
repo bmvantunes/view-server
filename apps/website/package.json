@@ -8,7 +8,8 @@
     "dev": "vp dev",
     "server": "node --experimental-strip-types src/server.ts",
     "build": "tsc && vp build",
-    "preview": "vp preview"
+    "preview": "vp preview",
+    "test": "vitest run --config vitest.browser.config.ts"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",
@@ -19,13 +20,17 @@
     "react-dom": "catalog:"
   },
   "devDependencies": {
+    "@effect/platform-browser": "catalog:",
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "catalog:",
+    "@vitest/browser-playwright": "catalog:",
+    "playwright": "catalog:",
     "typescript": "~6.0.2",
     "vite": "catalog:",
-    "vite-plus": "catalog:"
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
   },
   "engines": {
     "node": ">=26.0.0"

@@ -18,6 +18,12 @@ Run the browser:
 vp run orders-demo#dev
 ```
 
+Run the browser-mode contract smoke:
+
+```bash
+vp run orders-demo#test
+```
+
 Environment knobs:
 
 - `VIEW_SERVER_PORT=3000`

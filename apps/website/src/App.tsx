@@ -23,9 +23,9 @@ type DeskMetricRow = InferReadableQueryResult<
   typeof ordersByDeskQuery
 >[number];
 
-export function App() {
+export function App(props: { readonly rpcUrl?: string | undefined }) {
   return (
-    <ViewServerProvider url={resolveViewServerRpcUrl()}>
+    <ViewServerProvider url={props.rpcUrl ?? resolveViewServerRpcUrl()}>
       <OrdersWorkspace />
     </ViewServerProvider>
   );
