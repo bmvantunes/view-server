@@ -8,7 +8,7 @@ on:
       - master
 
 env:
-  VS_BENCH_BLOCKING: "0"
+  VS_BENCH_BLOCKING: "1"
   VS_BENCH_REGRESSION_MIN_DELTA_MS: "5"
 
 jobs:
@@ -45,15 +45,22 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Prepare artifact directory
-        run: mkdir -p packages/core/bench/.artifacts/ci
+        run: mkdir -p packages/core/bench/.artifacts/ci packages/core/bench/.artifacts/profiles
 
       - name: Run smoke benchmarks
         run: node --experimental-strip-types packages/core/bench/ci-smoke.ts
+
+      - name: Run firehose benchmarks (report-only)
+        if: always()
+        continue-on-error: true
+        env:
+          VS_BENCH_BLOCKING: "0"
+        run: node --experimental-strip-types packages/core/bench/benchmark-profile.ts --profile firehose-ci --compare
 
       - name: Upload benchmark artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-artifacts
-          path: packages/core/bench/.artifacts/ci/*.json
+          path: packages/core/bench/.artifacts/**/*.json
           if-no-files-found: warn

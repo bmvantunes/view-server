@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { copyFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -99,6 +99,38 @@ function runBenchmark(
     }
     yield* Effect.logInfo(`running benchmark ${benchmark.name}`);
     yield* spawnCommand(command, cwd, env, benchmark.name);
+    if (options.refreshBaselines && benchmark.baselineFile !== undefined) {
+      yield* refreshBaseline(profile, benchmark, cwd, artifactPath);
+    }
+  })();
+}
+
+function refreshBaseline(
+  profile: BenchmarkProfile,
+  benchmark: BenchmarkProfileBenchmark,
+  cwd: string,
+  artifactPath: string | undefined,
+): Effect.Effect<void, BenchmarkProfileError> {
+  return Effect.fn("view-server.bench.profile.refresh_baseline")(function* () {
+    const baselineFile = benchmark.baselineFile;
+    if (artifactPath === undefined || baselineFile === undefined) {
+      return;
+    }
+    const baselinePath = `${baselineRoot}/${profile.name}/${baselineFile}`;
+    const resolvedArtifactPath = resolve(cwd, artifactPath);
+    const resolvedBaselinePath = resolve(cwd, baselinePath);
+    yield* Effect.tryPromise({
+      try: () =>
+        mkdir(dirname(resolvedBaselinePath), { recursive: true }).then(() =>
+          copyFile(resolvedArtifactPath, resolvedBaselinePath),
+        ),
+      catch: (cause) =>
+        new BenchmarkProfileError({
+          message: `Failed to refresh benchmark baseline ${benchmark.name}: ${String(cause)}`,
+          cause,
+        }),
+    });
+    yield* Effect.logInfo(`refreshed benchmark baseline ${baselinePath}`);
   })();
 }
 
@@ -218,11 +250,21 @@ function benchmarkEnv(
             ? {}
             : { VS_BENCH_REGRESSION_METRICS: benchmark.metrics }),
           VS_BENCH_REGRESSION_MIN_DELTA_MS: process.env.VS_BENCH_REGRESSION_MIN_DELTA_MS ?? "5",
-          VS_BENCH_REGRESSION_REPORT_ONLY: process.env.VS_BENCH_BLOCKING === "1" ? "0" : "1",
+          VS_BENCH_REGRESSION_REPORT_ONLY: benchmarkReportOnly(benchmark),
         }
       : {}),
     ...(options.refreshBaselines ? { VS_BENCH_REFRESH_BASELINES: "1" } : {}),
   };
+}
+
+function benchmarkReportOnly(benchmark: BenchmarkProfileBenchmark): string {
+  if (benchmark.blocking === true) {
+    return "0";
+  }
+  if (benchmark.blocking === false) {
+    return "1";
+  }
+  return process.env.VS_BENCH_BLOCKING === "1" ? "0" : "1";
 }
 
 function formatProfileList(profiles: readonly BenchmarkProfile[]): string {

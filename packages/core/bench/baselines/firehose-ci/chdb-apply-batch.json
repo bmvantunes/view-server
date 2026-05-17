@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "chdb-sql-mirror",
+  "generatedAt": "2026-05-17T18:15:03.344Z",
+  "config": {
+    "rows": 10000,
+    "columns": 25,
+    "mutations": 1000,
+    "gc": false,
+    "compareLegacy": true,
+    "profile": "firehose-ci",
+    "profileBenchmark": "chdb-apply-batch"
+  },
+  "notes": [
+    "Measures chDB SQL mirror streaming column inference and one-pass JSONEachRow payload construction.",
+    "When VS_CHDB_SQL_MIRROR_COMPARE_LEGACY=1, compares one applyMutations call against the legacy one-mutation apply loop.",
+    "Run with --expose-gc and VS_CHDB_SQL_MIRROR_GC=1 for a stronger retained heap signal.",
+    "coverage gap: Report-only by policy: regressions should be investigated but should not block PRs.",
+    "coverage gap: The 1M alpha soak uses the direct worker harness with the snapshot accelerator disabled; production chDB is covered by the chDB apply benchmark.",
+    "coverage gap: The 10M raw soak is intentionally manual/nightly and is not run in CI."
+  ],
+  "results": [
+    {
+      "case": {
+        "operation": "chdbSqlMirror",
+        "scenario": "init-and-apply",
+        "rows": 10000,
+        "columns": 25,
+        "mutations": 1000
+      },
+      "metrics": [
+        {
+          "name": "initMs",
+          "value": 87.16112500000003,
+          "unit": "ms"
+        },
+        {
+          "name": "applyMutationsMs",
+          "value": 8.208708999999999,
+          "unit": "ms"
+        },
+        {
+          "name": "batchedMutationsPerSecond",
+          "value": 121821.83580877336,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "columns",
+          "value": 28,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "heapDeltaBytes",
+          "value": 10859256,
+          "unit": "bytes"
+        },
+        {
+          "name": "rssDeltaBytes",
+          "value": 259276800,
+          "unit": "bytes"
+        },
+        {
+          "name": "legacyInitMs",
+          "value": 78.51158299999997,
+          "unit": "ms"
+        },
+        {
+          "name": "legacySingleMutationApplyMs",
+          "value": 1115.484375,
+          "unit": "ms"
+        },
+        {
+          "name": "legacyMutationsPerSecond",
+          "value": 896.4715440321609,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "applySpeedupRatio",
+          "value": 135.89035437850217,
+          "unit": "ratio",
+          "lowerIsBetter": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,16 +1,27 @@
 # Benchmark CI
 
-The GitHub Actions benchmark workflow runs tiny smoke shapes only. It is meant to prove that benchmark entrypoints still run, produce JSON artifacts, append a GitHub Actions summary, and compare against a checked-in baseline. It is not the production benchmark platform.
+The GitHub Actions benchmark workflow has two layers:
 
-The workflow uploads generated artifacts from `packages/core/bench/.artifacts/ci/*.json`.
+- `ci-smoke`: tiny deterministic smoke shapes that prove benchmark entrypoints still run, produce JSON artifacts, append a GitHub Actions summary, and compare against checked-in baselines. Stable smoke regressions can block PRs.
+- `firehose-ci`: report-only firehose thresholds for the new hot-path work: worker mutation batching, chDB apply batching, fanout slow-client coalescing, and the 1M alpha worker soak. These warn loudly in the Actions summary but do not block PRs.
 
-By default benchmark regressions are reporting-only:
+The workflow uploads generated artifacts from `packages/core/bench/.artifacts/**/*.json`.
+
+The workflow sets global blocking on so deterministic `ci-smoke` regressions can fail the job:
+
+```yaml
+VS_BENCH_BLOCKING: "1"
+```
+
+Individual benchmark profiles can still mark noisy or long-running checks as report-only with
+`blocking: false`. The current report-only checks are the active-plan overlap smoke and every
+`firehose-ci` benchmark.
+
+To make a local run fully reporting-only:
 
 ```yaml
 VS_BENCH_BLOCKING: "0"
 ```
-
-Set `VS_BENCH_BLOCKING=1` in `.github/workflows/benchmarks.yml` when the smoke baselines are stable enough to block PRs.
 
 `VS_BENCH_REGRESSION_MIN_DELTA_MS=5` prevents tiny timing movements from being counted as hard regressions. A metric that exceeds the percentage threshold but moves by less than that absolute millisecond delta is reported as `warn`, not `fail`.
 
@@ -37,7 +48,8 @@ vp run core#bench:profile -- --profile dev-fast
 
 The current profiles are:
 
-- `ci-smoke`: tiny reporting-only CI visibility.
+- `ci-smoke`: tiny CI visibility; deterministic entries can block PRs.
+- `firehose-ci`: report-only firehose thresholds for batching/coalescing/1M soak regressions.
 - `dev-fast`: local 100k-ish active/grouped checks.
 - `rc-1m`: manual 1M release-candidate responsiveness checks.
 - `soak-10m`: manual/nightly raw 10M worker soak wrapper.
@@ -63,7 +75,27 @@ To run the same comparison locally without refreshing baselines:
 vp run core#bench:compare
 ```
 
-The checked-in baselines are intentionally lightweight smoke budgets. For serious performance decisions, use the larger benchmark shapes documented in the project plan.
+Refresh the report-only firehose baselines after an intentional hot-path change:
+
+```bash
+vp run core#bench:profile -- --profile firehose-ci --refresh-baselines
+```
+
+Compare local firehose results against the checked-in thresholds:
+
+```bash
+vp run core#bench:profile -- --profile firehose-ci --compare
+```
+
+The 10M raw soak is manual/nightly only. Refresh or compare it explicitly; do not add it to normal
+CI:
+
+```bash
+vp run core#bench:profile -- --profile soak-10m --refresh-baselines
+vp run core#bench:profile -- --profile soak-10m --compare
+```
+
+The checked-in baselines are performance budgets for visibility and regression triage, not hardware-independent SLAs. For serious performance decisions, use the larger benchmark shapes documented in the project plan and compare on the same machine class.
 
 ## Latest Firehose Hot-Path Pass
 

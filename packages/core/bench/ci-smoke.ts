@@ -70,7 +70,7 @@ function runBenchmark(
               ? {}
               : { VS_BENCH_REGRESSION_METRICS: benchmark.metrics }),
             VS_BENCH_REGRESSION_MIN_DELTA_MS: process.env.VS_BENCH_REGRESSION_MIN_DELTA_MS ?? "5",
-            VS_BENCH_REGRESSION_REPORT_ONLY: process.env.VS_BENCH_BLOCKING === "1" ? "0" : "1",
+            VS_BENCH_REGRESSION_REPORT_ONLY: benchmarkReportOnly(benchmark),
           }),
     };
     const child = spawn(process.execPath, ["--experimental-strip-types", script], {
@@ -134,4 +134,14 @@ function benchmarkArtifactPath(benchmark: BenchmarkProfileBenchmark): string {
 
 function benchmarkBaselinePath(benchmark: BenchmarkProfileBenchmark): string {
   return `${baselineRoot}/${benchmark.baselineFile ?? benchmark.artifactFile}`;
+}
+
+function benchmarkReportOnly(benchmark: BenchmarkProfileBenchmark): string {
+  if (benchmark.blocking === true) {
+    return "0";
+  }
+  if (benchmark.blocking === false) {
+    return "1";
+  }
+  return process.env.VS_BENCH_BLOCKING === "1" ? "0" : "1";
 }

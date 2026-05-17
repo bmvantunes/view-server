@@ -11,6 +11,7 @@ describe("benchmark profiles", () => {
   it("lists every named benchmark profile in registry order", () => {
     expect(benchmarkProfileNames).toEqual([
       "ci-smoke",
+      "firehose-ci",
       "dev-fast",
       "rc-1m",
       "soak-10m",
@@ -19,6 +20,25 @@ describe("benchmark profiles", () => {
       "chdb-worker-overlap",
     ]);
     expect(listBenchmarkProfiles().map((profile) => profile.name)).toEqual(benchmarkProfileNames);
+  });
+
+  it("keeps firehose CI thresholds report-only and artifact-backed", () => {
+    const profile = benchmarkProfiles["firehose-ci"];
+    expect(profile.ciSafe).toBe(true);
+    expect(profile.benchmarks.map((benchmark) => benchmark.name)).toEqual([
+      "worker-mutation-batch",
+      "chdb-apply-batch",
+      "fanout-slow-client",
+      "worker-soak-alpha-1m",
+    ]);
+    for (const benchmark of profile.benchmarks) {
+      expect(benchmark.blocking).toBe(false);
+      expect(benchmark.script).toMatch(/^bench\/.*\.ts$/);
+      expect(benchmark.artifactFile).toMatch(/\.json$/);
+      expect(benchmark.baselineFile).toMatch(/\.json$/);
+      expect(benchmark.metrics).toBeDefined();
+      expect(Object.keys(benchmark.env).length).toBeGreaterThan(0);
+    }
   });
 
   it("keeps CI smoke parameters centralized and artifact-backed", () => {

@@ -325,10 +325,10 @@ function benchmarkComparisons(
         continue;
       }
       const baselineMetric = baselineMetrics.get(metric.name);
-      if (baselineMetric === undefined || baselineMetric.value <= 0) {
+      if (baselineMetric === undefined || baselineMetric.value < 0) {
         continue;
       }
-      const allowed = baselineMetric.value * (1 + tolerance);
+      const allowed = baselineMetric.value === 0 ? 0 : baselineMetric.value * (1 + tolerance);
       const delta = metric.value - baselineMetric.value;
       const status = benchmarkComparisonStatus(metric, allowed, delta, minimumDeltaMs);
       comparisons.push({
@@ -339,7 +339,12 @@ function benchmarkComparisons(
         baselineValue: baselineMetric.value,
         currentValue: metric.value,
         delta,
-        deltaPercent: (delta / baselineMetric.value) * 100,
+        deltaPercent:
+          baselineMetric.value === 0
+            ? metric.value === 0
+              ? 0
+              : Number.POSITIVE_INFINITY
+            : (delta / baselineMetric.value) * 100,
         allowedValue: allowed,
         status,
         artifactPath,
@@ -489,7 +494,10 @@ function formatMetricValue(value: number, unit: BenchmarkMetric["unit"]): string
 }
 
 function formatDelta(comparison: BenchmarkComparison): string {
-  return `${comparison.deltaPercent.toFixed(1)}% (${formatMetricValue(comparison.delta, comparison.unit)})`;
+  const percent = Number.isFinite(comparison.deltaPercent)
+    ? comparison.deltaPercent.toFixed(1)
+    : "Infinity";
+  return `${percent}% (${formatMetricValue(comparison.delta, comparison.unit)})`;
 }
 
 function escapeMarkdown(value: string): string {

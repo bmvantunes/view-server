@@ -78,6 +78,7 @@
     "bench:refresh-baselines": "node --experimental-strip-types bench/ci-smoke.ts --refresh-baselines",
     "bench:worker-mutation-batch": "node --experimental-strip-types bench/worker-mutation-batch.bench.ts",
     "bench:worker-replay": "node --experimental-strip-types bench/worker-replay.bench.ts",
+    "bench:worker-soak": "node --experimental-strip-types bench/worker-soak.bench.ts",
     "build": "vp pack",
     "dev": "vp pack --watch",
     "test": "vitest run --config vitest.config.ts",

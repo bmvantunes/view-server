@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "fanout-queue",
+  "generatedAt": "2026-05-17T18:15:03.857Z",
+  "config": {
+    "deltaCounts": "10000",
+    "opsPerDelta": 1,
+    "maxQueueDepth": 100000,
+    "compareLegacy": true,
+    "profile": "firehose-ci",
+    "profileBenchmark": "fanout-slow-client"
+  },
+  "notes": [
+    "Measures slow-consumer delta coalescing without queue drain/refill.",
+    "legacyDrainRefillMs simulates the previous delta coalescing shape that drained the queue and rebuilt a coalesced delta on each offer.",
+    "coverage gap: Report-only by policy: regressions should be investigated but should not block PRs.",
+    "coverage gap: The 1M alpha soak uses the direct worker harness with the snapshot accelerator disabled; production chDB is covered by the chDB apply benchmark.",
+    "coverage gap: The 10M raw soak is intentionally manual/nightly and is not run in CI."
+  ],
+  "results": [
+    {
+      "case": {
+        "operation": "fanoutQueueCoalesce",
+        "deltaCount": 10000,
+        "opsPerDelta": 1
+      },
+      "metrics": [
+        {
+          "name": "offerMs",
+          "value": 11.383207999999996,
+          "unit": "ms"
+        },
+        {
+          "name": "queueDepth",
+          "value": 1,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "coalescedOps",
+          "value": 10000,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "legacyDrainRefillMs",
+          "value": 383.476834,
+          "unit": "ms"
+        },
+        {
+          "name": "speedupRatio",
+          "value": 33.68794051729531,
+          "unit": "ratio",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "legacyCoalescedOps",
+          "value": 10000,
+          "unit": "count",
+          "lowerIsBetter": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 export type BenchmarkProfileName =
   | "ci-smoke"
+  | "firehose-ci"
   | "dev-fast"
   | "rc-1m"
   | "soak-10m"
@@ -15,6 +16,7 @@ export type BenchmarkProfileBenchmark = {
   readonly artifactFile: string;
   readonly metrics?: string | undefined;
   readonly baselineFile?: string | undefined;
+  readonly blocking?: boolean | undefined;
   readonly script?: string | undefined;
   readonly command?: readonly string[] | undefined;
   readonly cwd?: BenchmarkProfileCwd | undefined;
@@ -31,6 +33,7 @@ export type BenchmarkProfile = {
 
 export const benchmarkProfileNames: readonly BenchmarkProfileName[] = [
   "ci-smoke",
+  "firehose-ci",
   "dev-fast",
   "rc-1m",
   "soak-10m",
@@ -55,6 +58,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
         script: "bench/active-view.bench.ts",
         artifactFile: "active-view.json",
         baselineFile: "active-view.json",
+        blocking: true,
         metrics: "activeBuildMs,activeUpdateMs",
         env: {
           VS_ACTIVE_VIEW_ROWS: "1000",
@@ -72,6 +76,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
         script: "bench/active-plan-responsiveness.bench.ts",
         artifactFile: "active-plan-responsiveness.json",
         baselineFile: "active-plan-responsiveness.json",
+        blocking: false,
         metrics: "operationP99Ms,metricsP99Ms",
         env: {
           VS_ACTIVE_PLAN_RESPONSIVENESS_ROWS: "1000",
@@ -85,6 +90,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
         script: "bench/grouped-responsiveness.bench.ts",
         artifactFile: "grouped-responsiveness.json",
         baselineFile: "grouped-responsiveness.json",
+        blocking: true,
         metrics: "operationP99Ms,metricsP99Ms",
         env: {
           VS_GROUPED_RESPONSIVENESS_ROWS: "1000",
@@ -98,12 +104,87 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
         script: "bench/grouped-refresh-overlap.bench.ts",
         artifactFile: "grouped-refresh-overlap.json",
         baselineFile: "grouped-refresh-overlap.json",
+        blocking: true,
         metrics: "operationP99Ms,startGapMaxMs",
         env: {
           VS_GROUPED_REFRESH_OVERLAP_ROWS: "1000",
           VS_GROUPED_REFRESH_OVERLAP_OPERATIONS: "3",
           VS_GROUPED_REFRESH_OVERLAP_AGGREGATES: "3",
           VS_GROUPED_REFRESH_OVERLAP_BACKEND: "memory",
+        },
+      },
+    ],
+  },
+  "firehose-ci": {
+    name: "firehose-ci",
+    description:
+      "CI-visible report-only firehose thresholds for batching, chDB apply, fanout, and the 1M alpha soak.",
+    ciSafe: true,
+    coverageGaps: [
+      "Report-only by policy: regressions should be investigated but should not block PRs.",
+      "The 1M alpha soak uses the direct worker harness with the snapshot accelerator disabled; production chDB is covered by the chDB apply benchmark.",
+      "The 10M raw soak is intentionally manual/nightly and is not run in CI.",
+    ],
+    benchmarks: [
+      {
+        name: "worker-mutation-batch",
+        description: "Worker mutateBatch latency versus single-row worker publish calls.",
+        script: "bench/worker-mutation-batch.bench.ts",
+        artifactFile: "worker-mutation-batch.json",
+        baselineFile: "worker-mutation-batch.json",
+        blocking: false,
+        metrics: "batchedMs",
+        env: {
+          VS_WORKER_MUTATION_BATCH_SIZES: "1000,10000",
+          VS_WORKER_MUTATION_BATCH_ITERATIONS: "1",
+        },
+      },
+      {
+        name: "chdb-apply-batch",
+        description: "chDB SQL mirror batched apply throughput versus legacy one-mutation loop.",
+        script: "bench/chdb-sql-mirror.bench.ts",
+        artifactFile: "chdb-apply-batch.json",
+        baselineFile: "chdb-apply-batch.json",
+        blocking: false,
+        metrics: "applyMutationsMs",
+        env: {
+          VS_CHDB_SQL_MIRROR_ROWS: "10000",
+          VS_CHDB_SQL_MIRROR_COLUMNS: "25",
+          VS_CHDB_SQL_MIRROR_MUTATIONS: "1000",
+          VS_CHDB_SQL_MIRROR_COMPARE_LEGACY: "1",
+        },
+      },
+      {
+        name: "fanout-slow-client",
+        description: "Slow-client delta coalescing without queue drain/refill.",
+        script: "bench/fanout-queue.bench.ts",
+        artifactFile: "fanout-slow-client.json",
+        baselineFile: "fanout-slow-client.json",
+        blocking: false,
+        metrics: "offerMs",
+        env: {
+          VS_FANOUT_QUEUE_DELTA_COUNTS: "10000",
+          VS_FANOUT_QUEUE_OPS_PER_DELTA: "1",
+          VS_FANOUT_QUEUE_MAX_DEPTH: "100000",
+          VS_FANOUT_QUEUE_COMPARE_LEGACY: "1",
+        },
+      },
+      {
+        name: "worker-soak-alpha-1m",
+        description: "1M alpha raw+grouped direct worker soak summary artifact.",
+        script: "bench/worker-soak.bench.ts",
+        artifactFile: "worker-soak-alpha-1m.json",
+        baselineFile: "worker-soak-alpha-1m.json",
+        blocking: false,
+        metrics: "durationMs,subscriptionSetupMs,mutationLoopMs,mutationP99Ms,cleanupLeakCount",
+        env: {
+          VS_WORKER_SOAK_SCENARIO: "alpha-1m",
+          VS_WORKER_SOAK_ROWS: "1000000",
+          VS_WORKER_SOAK_RAW_SUBSCRIPTIONS: "250",
+          VS_WORKER_SOAK_GROUPED_SUBSCRIPTIONS: "20",
+          VS_WORKER_SOAK_MUTATIONS: "10000",
+          VS_WORKER_SOAK_MUTATION_BATCH_SIZE: "1000",
+          VS_WORKER_SOAK_TIMEOUT_MS: "900000",
         },
       },
     ],
@@ -233,15 +314,22 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
       {
         name: "worker-soak-10m",
         description: "10M raw worker soak with progress JSONL and summary artifacts.",
-        command: ["pnpm", "run", "soak:10m"],
-        cwd: "repo",
+        script: "bench/worker-soak.bench.ts",
         artifactFile: "worker-soak-10m.json",
+        baselineFile: "worker-soak-10m.json",
+        blocking: false,
+        metrics: "durationMs,subscriptionSetupMs,mutationLoopMs,mutationP99Ms,cleanupLeakCount",
         env: {
+          VS_WORKER_SOAK_SCENARIO: "raw-10m",
           VS_WORKER_SOAK_ROWS: "10000000",
           VS_WORKER_SOAK_RAW_SUBSCRIPTIONS: "250",
           VS_WORKER_SOAK_GROUPED_SUBSCRIPTIONS: "0",
           VS_WORKER_SOAK_MUTATIONS: "10000",
+          VS_WORKER_SOAK_MUTATION_BATCH_SIZE: "1000",
           VS_WORKER_SOAK_ACTIVE_PLAN_AUTO_BUILD_MAX_ROWS: "1000000",
+          VS_WORKER_SOAK_TIMEOUT_MS: "7200000",
+          VS_WORKER_SOAK_PROGRESS_INTERVAL_MS: "60000",
+          NODE_OPTIONS: "--expose-gc --max-old-space-size=24576",
         },
       },
     ],
@@ -398,6 +486,8 @@ export function getBenchmarkProfile(name: string): BenchmarkProfile | undefined 
   switch (name) {
     case "ci-smoke":
       return benchmarkProfiles["ci-smoke"];
+    case "firehose-ci":
+      return benchmarkProfiles["firehose-ci"];
     case "dev-fast":
       return benchmarkProfiles["dev-fast"];
     case "rc-1m":

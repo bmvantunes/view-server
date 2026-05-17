@@ -338,6 +338,48 @@ describe("benchmark artifacts", () => {
       }),
     ),
   );
+
+  it.effect("compares zero baselines for leak sentinel metrics", () =>
+    withBenchmarkEnv(
+      {
+        VS_BENCH_ARTIFACT: undefined,
+        VS_BENCH_BASELINE: undefined,
+        VS_BENCH_REGRESSION_MIN_DELTA_MS: undefined,
+        VS_BENCH_REGRESSION_REPORT_ONLY: undefined,
+        VS_BENCH_REGRESSION_TOLERANCE: undefined,
+        VS_BENCH_REGRESSION_METRICS: undefined,
+        GITHUB_STEP_SUMMARY: undefined,
+      },
+      Effect.gen(function* () {
+        const baselinePath = yield* tempArtifactPath("baseline.json");
+        const artifactPath = yield* tempArtifactPath("current.json");
+        yield* writeJson(baselinePath, {
+          schemaVersion: 1,
+          benchmark: "worker-soak",
+          generatedAt: "2026-01-01T00:00:00.000Z",
+          config: { rows: 1_000 },
+          results: [
+            {
+              case: { operation: "workerSoak" },
+              metrics: [{ name: "cleanupLeakCount", value: 0, unit: "count" }],
+            },
+          ],
+        });
+        process.env.VS_BENCH_ARTIFACT = artifactPath;
+        process.env.VS_BENCH_BASELINE = baselinePath;
+        process.env.VS_BENCH_REGRESSION_METRICS = "cleanupLeakCount";
+
+        const exit = yield* writeBenchmarkArtifact("worker-soak", { rows: 1_000 }, [
+          {
+            case: { operation: "workerSoak" },
+            metrics: [{ name: "cleanupLeakCount", value: 1, unit: "count" }],
+          },
+        ]).pipe(Effect.exit);
+
+        expect(Exit.isFailure(exit)).toBe(true);
+      }),
+    ),
+  );
 });
 
 function withBenchmarkEnv<R, E, A>(

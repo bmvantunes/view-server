@@ -1,0 +1,197 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "worker-soak",
+  "generatedAt": "2026-05-17T18:15:29.162Z",
+  "config": {
+    "scenario": "alpha-1m",
+    "rows": 1000000,
+    "rawSubscriptions": 250,
+    "groupedSubscriptions": 20,
+    "mutations": 10000,
+    "mutationBatchSize": 1000,
+    "rawPageCycle": 10,
+    "groupedRefreshDebounceMs": 0,
+    "activePlanAutoBuildMaxRows": 1000000,
+    "gcAvailable": false,
+    "profile": "firehose-ci",
+    "profileBenchmark": "worker-soak-alpha-1m"
+  },
+  "notes": [
+    "Wraps the direct topic-worker soak test and converts its JSON summary into a benchmark artifact.",
+    "This is a worker-level capacity signal; production runtime still requires chDB and real transport smoke coverage.",
+    "progress artifact: bench/.artifacts/profiles/firehose-ci/worker-soak-alpha-1m.summary.json.progress.jsonl",
+    "coverage gap: Report-only by policy: regressions should be investigated but should not block PRs.",
+    "coverage gap: The 1M alpha soak uses the direct worker harness with the snapshot accelerator disabled; production chDB is covered by the chDB apply benchmark.",
+    "coverage gap: The 10M raw soak is intentionally manual/nightly and is not run in CI."
+  ],
+  "results": [
+    {
+      "case": {
+        "operation": "workerSoak",
+        "scenario": "alpha-1m",
+        "rows": 1000000,
+        "rawSubscriptions": 250,
+        "groupedSubscriptions": 20,
+        "mutations": 10000,
+        "mutationBatchSize": 1000
+      },
+      "metrics": [
+        {
+          "name": "durationMs",
+          "value": 24812,
+          "unit": "ms"
+        },
+        {
+          "name": "rowGenerationMs",
+          "value": 60.17,
+          "unit": "ms"
+        },
+        {
+          "name": "workerSeedMs",
+          "value": 823.83,
+          "unit": "ms"
+        },
+        {
+          "name": "subscriptionSetupMs",
+          "value": 12318.63,
+          "unit": "ms"
+        },
+        {
+          "name": "mutationLoopMs",
+          "value": 11463.42,
+          "unit": "ms"
+        },
+        {
+          "name": "mutationP50Ms",
+          "value": 931.25,
+          "unit": "ms"
+        },
+        {
+          "name": "mutationP95Ms",
+          "value": 2613.04,
+          "unit": "ms"
+        },
+        {
+          "name": "mutationP99Ms",
+          "value": 2613.04,
+          "unit": "ms"
+        },
+        {
+          "name": "mutationMaxMs",
+          "value": 2613.04,
+          "unit": "ms"
+        },
+        {
+          "name": "settleMs",
+          "value": 127.82,
+          "unit": "ms"
+        },
+        {
+          "name": "cleanupMs",
+          "value": 10.64,
+          "unit": "ms"
+        },
+        {
+          "name": "cleanupLeakCount",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "subscribersAfterCleanup",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "activePlanCountAfterCleanup",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "activeViewCountAfterCleanup",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "queueDepthAfterCleanup",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "maxSubscriptionLagVersionsAfterCleanup",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "totalSubscriptionLagVersionsAfterCleanup",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "maxSubscriptionLagVersionsAfterSettle",
+          "value": 0,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "totalSubscriptionLagVersionsAfterSettle",
+          "value": 0,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "activePlanAutoBuildSkippedCountBeforeCleanup",
+          "value": 0,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "mutationBatches",
+          "value": 10,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "finalRows",
+          "value": 1003000,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "snapshotEventCount",
+          "value": 540,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "deltaEventCount",
+          "value": 1610250,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "statusEventCount",
+          "value": 417084,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "heapGrowthRatio",
+          "value": 0.4556667865357575,
+          "unit": "ratio"
+        },
+        {
+          "name": "heapReleasedBytes",
+          "value": 561108528,
+          "unit": "bytes",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "rssReleasedBytes",
+          "value": 1588690944,
+          "unit": "bytes",
+          "lowerIsBetter": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "worker-mutation-batch",
+  "generatedAt": "2026-05-17T18:15:01.817Z",
+  "config": {
+    "batchSizes": "1000,10000",
+    "iterations": 1,
+    "profile": "firehose-ci",
+    "profileBenchmark": "worker-mutation-batch"
+  },
+  "notes": [
+    "Compares legacy single-row worker publish calls with TopicWorkerCore.mutateBatch for equivalent publish mutations.",
+    "The backend is a counting test backend so the benchmark isolates worker mutation/gate/fanout overhead.",
+    "coverage gap: Report-only by policy: regressions should be investigated but should not block PRs.",
+    "coverage gap: The 1M alpha soak uses the direct worker harness with the snapshot accelerator disabled; production chDB is covered by the chDB apply benchmark.",
+    "coverage gap: The 10M raw soak is intentionally manual/nightly and is not run in CI."
+  ],
+  "results": [
+    {
+      "case": {
+        "operation": "workerMutationBatch",
+        "batchSize": 1000
+      },
+      "metrics": [
+        {
+          "name": "singleMs",
+          "value": 18.487791,
+          "unit": "ms"
+        },
+        {
+          "name": "batchedMs",
+          "value": 3.942959000000002,
+          "unit": "ms"
+        },
+        {
+          "name": "singleMutationsPerSecond",
+          "value": 54089.75036552501,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "batchedMutationsPerSecond",
+          "value": 253616.6366426837,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "speedupRatio",
+          "value": 4.688811372372879,
+          "unit": "ratio",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "singleBackendApplyCalls",
+          "value": 1000,
+          "unit": "count"
+        },
+        {
+          "name": "batchedBackendApplyCalls",
+          "value": 1,
+          "unit": "count"
+        },
+        {
+          "name": "batchedBackendMutations",
+          "value": 1000,
+          "unit": "count",
+          "lowerIsBetter": false
+        }
+      ]
+    },
+    {
+      "case": {
+        "operation": "workerMutationBatch",
+        "batchSize": 10000
+      },
+      "metrics": [
+        {
+          "name": "singleMs",
+          "value": 77.53462499999998,
+          "unit": "ms"
+        },
+        {
+          "name": "batchedMs",
+          "value": 26.166875000000005,
+          "unit": "ms"
+        },
+        {
+          "name": "singleMutationsPerSecond",
+          "value": 128974.63552574095,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "batchedMutationsPerSecond",
+          "value": 382162.5623999808,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "speedupRatio",
+          "value": 2.9630830964721606,
+          "unit": "ratio",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "singleBackendApplyCalls",
+          "value": 10000,
+          "unit": "count"
+        },
+        {
+          "name": "batchedBackendApplyCalls",
+          "value": 1,
+          "unit": "count"
+        },
+        {
+          "name": "batchedBackendMutations",
+          "value": 10000,
+          "unit": "count",
+          "lowerIsBetter": false
+        }
+      ]
+    }
+  ]
+}
