@@ -804,7 +804,9 @@ export function makeTopicWorkerCore(
     });
 
     const discardActivePlanBuild = Effect.fnUntraced(function* (key: string) {
-      const dirtySubscriptions = activePlanCoordinator.discardBuild(key, subscriptions.values());
+      const dirtySubscriptions = activePlanCoordinator.discardBuild(key, (requestId) =>
+        subscriptions.get(requestId),
+      );
       for (const subscription of dirtySubscriptions) {
         yield* refreshSubscriptionSnapshot(
           subscription,
@@ -831,7 +833,7 @@ export function makeTopicWorkerCore(
         snapshot,
         plan,
         buildMs,
-        subscriptions: subscriptions.values(),
+        getSubscription: (requestId) => subscriptions.get(requestId),
         isGrouped: isGroupedQuery,
       });
       for (const subscription of dirtySubscriptions) {

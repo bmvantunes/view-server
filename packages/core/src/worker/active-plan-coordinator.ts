@@ -169,24 +169,22 @@ export class ActivePlanCoordinator {
 
   discardBuild(
     key: string,
-    subscriptions: Iterable<ActiveSubscription>,
+    getSubscription: (requestId: string) => ActiveSubscription | undefined,
   ): readonly ActiveSubscription[] {
     const build = this.#builds.get(key);
     if (build === undefined) {
       return [];
     }
     this.#builds.delete(key);
-    const activeSubscriptions = Array.from(subscriptions);
     const dirtySubscriptions: ActiveSubscription[] = [];
     for (const requestId of build.requestIds) {
-      for (const subscription of activeSubscriptions) {
-        if (subscription.requestId !== requestId || subscription.activePlanBuildKey !== key) {
-          continue;
-        }
-        this.#lifecycle.markActivePlanFallback(subscription);
-        if (this.#lifecycle.isDirty(subscription)) {
-          dirtySubscriptions.push(subscription);
-        }
+      const subscription = getSubscription(requestId);
+      if (subscription === undefined || subscription.activePlanBuildKey !== key) {
+        continue;
+      }
+      this.#lifecycle.markActivePlanFallback(subscription);
+      if (this.#lifecycle.isDirty(subscription)) {
+        dirtySubscriptions.push(subscription);
       }
     }
     return dirtySubscriptions;
@@ -203,7 +201,7 @@ export class ActivePlanCoordinator {
     readonly snapshot: ActivePlanBuildSnapshot;
     readonly plan: ActiveRawPlan;
     readonly buildMs: number;
-    readonly subscriptions: Iterable<ActiveSubscription>;
+    readonly getSubscription: (requestId: string) => ActiveSubscription | undefined;
     readonly isGrouped: (query: RuntimeQuery) => boolean;
   }): readonly ActiveSubscription[] {
     const build = this.#builds.get(args.snapshot.key);
@@ -219,26 +217,24 @@ export class ActivePlanCoordinator {
     this.#plans.set(args.snapshot.key, entry);
     this.#lastBuildMs = args.buildMs;
     this.#builds.delete(args.snapshot.key);
-    const activeSubscriptions = Array.from(args.subscriptions);
     const dirtySubscriptions: ActiveSubscription[] = [];
     for (const requestId of build.requestIds) {
-      for (const subscription of activeSubscriptions) {
-        if (
-          subscription.requestId !== requestId ||
-          subscription.activePlanBuildKey !== args.snapshot.key ||
-          args.isGrouped(subscription.query)
-        ) {
-          continue;
-        }
-        this.activateSubscriptionWithPlan(
-          subscription,
-          args.snapshot.key,
-          args.snapshot.query,
-          entry,
-        );
-        if (this.#lifecycle.isDirty(subscription) && subscription.activeView !== undefined) {
-          dirtySubscriptions.push(subscription);
-        }
+      const subscription = args.getSubscription(requestId);
+      if (
+        subscription === undefined ||
+        subscription.activePlanBuildKey !== args.snapshot.key ||
+        args.isGrouped(subscription.query)
+      ) {
+        continue;
+      }
+      this.activateSubscriptionWithPlan(
+        subscription,
+        args.snapshot.key,
+        args.snapshot.query,
+        entry,
+      );
+      if (this.#lifecycle.isDirty(subscription) && subscription.activeView !== undefined) {
+        dirtySubscriptions.push(subscription);
       }
     }
     if (entry.subscribers <= 0) {

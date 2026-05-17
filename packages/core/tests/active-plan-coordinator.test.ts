@@ -90,7 +90,7 @@ describe("ActivePlanCoordinator", () => {
         snapshot,
         plan,
         buildMs: 12,
-        subscriptions: [active],
+        getSubscription: byRequestId([active]),
         isGrouped: () => false,
       });
 
@@ -103,6 +103,54 @@ describe("ActivePlanCoordinator", () => {
 
       coordinator.releasePlan(active.activePlanKey);
       expect(coordinator.metrics([active]).activePlanCount).toBe(0);
+    }),
+  );
+
+  it.effect("looks up only build subscriber request ids when installing a plan", () =>
+    Effect.gen(function* () {
+      const rows = [
+        { id: "a", price: 2 },
+        { id: "b", price: 1 },
+      ];
+      const coordinator = new ActivePlanCoordinator({
+        idField: "id",
+        literalStringFields: new Set(),
+        activePlanAutoBuildMaxRows: 10,
+        lifecycle: lifecycle(),
+      });
+      const first = yield* subscription("request-1");
+      const second = yield* subscription("request-2");
+      const unrelated = yield* subscription("request-3");
+      const decision = coordinator.prepareSubscription(first, query, rows.length);
+      coordinator.prepareSubscription(second, query, rows.length);
+      expect(decision.type).toBe("queued");
+      if (decision.type !== "queued") {
+        throw new Error("Expected queued active plan");
+      }
+      const snapshot = coordinator.beginBuildSnapshot({
+        key: decision.key,
+        rows,
+        version: 0n,
+      });
+      if (snapshot === undefined) {
+        throw new Error("Expected active-plan build snapshot");
+      }
+      const lookupCalls: string[] = [];
+      const subscriptions = byRequestId([first, second, unrelated]);
+
+      coordinator.installBuild({
+        snapshot,
+        plan: makeActiveRawPlan(rows, query, "id"),
+        buildMs: 12,
+        getSubscription: (requestId) => {
+          lookupCalls.push(requestId);
+          return subscriptions(requestId);
+        },
+        isGrouped: () => false,
+      });
+
+      expect(lookupCalls).toEqual(["request-1", "request-2"]);
+      expect(unrelated.activeView).toBeUndefined();
     }),
   );
 });
@@ -132,4 +180,9 @@ function subscription(requestId: string): Effect.Effect<ActiveSubscription> {
       pendingLagVersions: 0n,
     };
   });
+}
+
+function byRequestId(subscriptions: readonly ActiveSubscription[]) {
+  const byId = new Map(subscriptions.map((subscription) => [subscription.requestId, subscription]));
+  return (requestId: string) => byId.get(requestId);
 }
