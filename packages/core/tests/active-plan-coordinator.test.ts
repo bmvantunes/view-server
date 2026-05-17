@@ -6,7 +6,10 @@ import type { ViewServerError } from "../src/errors.ts";
 import type { RuntimeRawQuery, RuntimeRow, SubscriptionEvent } from "../src/protocol/index.ts";
 import { makeActiveRawPlan } from "../src/worker/active-view.ts";
 import { ActivePlanCoordinator } from "../src/worker/active-plan-coordinator.ts";
-import type { ActiveSubscription } from "../src/worker/subscription-registry.ts";
+import {
+  SubscriptionRegistry,
+  type ActiveSubscription,
+} from "../src/worker/subscription-registry.ts";
 
 const query = {
   fields: { id: true, price: true },
@@ -21,6 +24,7 @@ describe("ActivePlanCoordinator", () => {
         idField: "id",
         literalStringFields: new Set(),
         activePlanAutoBuildMaxRows: 1,
+        lifecycle: lifecycle(),
       });
       const active = yield* subscription("request-1");
 
@@ -39,6 +43,7 @@ describe("ActivePlanCoordinator", () => {
         idField: "id",
         literalStringFields: new Set(),
         activePlanAutoBuildMaxRows: 10,
+        lifecycle: lifecycle(),
       });
       const first = yield* subscription("request-1");
       const second = yield* subscription("request-2");
@@ -62,6 +67,7 @@ describe("ActivePlanCoordinator", () => {
         idField: "id",
         literalStringFields: new Set(),
         activePlanAutoBuildMaxRows: 10,
+        lifecycle: lifecycle(),
       });
       const active = yield* subscription("request-1");
       const decision = coordinator.prepareSubscription(active, query, rows.length);
@@ -96,11 +102,18 @@ describe("ActivePlanCoordinator", () => {
       expect(coordinator.metrics([active]).activePlanCount).toBe(1);
 
       coordinator.releasePlan(active.activePlanKey);
-      active.activePlanKey = undefined;
       expect(coordinator.metrics([active]).activePlanCount).toBe(0);
     }),
   );
 });
+
+function lifecycle(): SubscriptionRegistry {
+  return new SubscriptionRegistry({
+    releaseActivePlan: () => undefined,
+    releaseActivePlanBuild: () => undefined,
+    releaseGroupedRefresh: () => undefined,
+  });
+}
 
 function subscription(requestId: string): Effect.Effect<ActiveSubscription> {
   return Effect.gen(function* () {

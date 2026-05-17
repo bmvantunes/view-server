@@ -19,6 +19,15 @@ export type GroupedRefreshInstall = {
   readonly version: WorkerVersion;
 };
 
+export type GroupedRefreshSubscriptionLifecycle = {
+  readonly markGroupedRefreshScheduled: (subscription: ActiveSubscription) => void;
+  readonly markGroupedRefreshInFlight: (subscription: ActiveSubscription) => void;
+  readonly markGroupedRefreshIdle: (subscription: ActiveSubscription) => void;
+  readonly isGroupedRefreshScheduled: (subscription: ActiveSubscription) => boolean;
+  readonly isGroupedRefreshInFlight: (subscription: ActiveSubscription) => boolean;
+  readonly dirtyTargetVersion: (subscription: ActiveSubscription) => WorkerVersion | undefined;
+};
+
 type GroupedRefreshEntry = {
   readonly key: string;
   readonly query: RuntimeGroupedQuery;
@@ -30,6 +39,11 @@ type GroupedRefreshEntry = {
 
 export class GroupedRefreshCoordinator {
   readonly #entries = new Map<string, GroupedRefreshEntry>();
+  readonly #lifecycle: GroupedRefreshSubscriptionLifecycle;
+
+  constructor(options: { readonly lifecycle: GroupedRefreshSubscriptionLifecycle }) {
+    this.#lifecycle = options.lifecycle;
+  }
 
   schedule(subscription: ActiveSubscription):
     | { readonly type: "new"; readonly key: string }
@@ -37,14 +51,14 @@ export class GroupedRefreshCoordinator {
         readonly type: "none";
       } {
     if (
-      subscription.groupedRefreshScheduled === true ||
-      subscription.groupedRefreshInFlight === true ||
+      this.#lifecycle.isGroupedRefreshScheduled(subscription) ||
+      this.#lifecycle.isGroupedRefreshInFlight(subscription) ||
       !isGroupedQuery(subscription.query)
     ) {
       return { type: "none" };
     }
     const key = groupedRefreshKey(subscription.query);
-    subscription.groupedRefreshScheduled = true;
+    this.#lifecycle.markGroupedRefreshScheduled(subscription);
     const existing = this.#entries.get(key);
     if (existing !== undefined) {
       if (existing.state === "queued") {
@@ -80,7 +94,7 @@ export class GroupedRefreshCoordinator {
       return (
         subscription !== undefined &&
         isGroupedQuery(subscription.query) &&
-        subscription.dirtyTargetVersion !== undefined
+        this.#lifecycle.dirtyTargetVersion(subscription) !== undefined
       );
     });
     entry.requestIds.clear();
@@ -94,8 +108,7 @@ export class GroupedRefreshCoordinator {
       entry.runningRequestIds.add(requestId);
       const subscription = args.subscriptions.get(requestId);
       if (subscription !== undefined) {
-        subscription.groupedRefreshScheduled = false;
-        subscription.groupedRefreshInFlight = true;
+        this.#lifecycle.markGroupedRefreshInFlight(subscription);
       }
     }
     return {
@@ -125,14 +138,12 @@ export class GroupedRefreshCoordinator {
       if (subscription === undefined) {
         continue;
       }
-      subscription.groupedRefreshInFlight = false;
+      this.#lifecycle.markGroupedRefreshIdle(subscription);
       if (!isGroupedQuery(subscription.query)) {
         continue;
       }
-      if (
-        subscription.dirtyTargetVersion !== undefined &&
-        subscription.dirtyTargetVersion > args.snapshot.version
-      ) {
+      const dirtyTargetVersion = this.#lifecycle.dirtyTargetVersion(subscription);
+      if (dirtyTargetVersion !== undefined && dirtyTargetVersion > args.snapshot.version) {
         reschedule.add(subscription.requestId);
         continue;
       }
@@ -165,9 +176,8 @@ export class GroupedRefreshCoordinator {
       if (subscription === undefined) {
         continue;
       }
-      subscription.groupedRefreshScheduled = false;
-      subscription.groupedRefreshInFlight = false;
-      if (subscription.dirtyTargetVersion !== undefined) {
+      this.#lifecycle.markGroupedRefreshIdle(subscription);
+      if (this.#lifecycle.dirtyTargetVersion(subscription) !== undefined) {
         reschedule.push(requestId);
       }
     }

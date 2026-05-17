@@ -156,8 +156,9 @@ export function makeTopicWorkerCore(
       maxActivePlans,
       maxActivePlanEstimatedBytes,
       activePlanAutoBuildMaxRows,
+      lifecycle: subscriptions,
     });
-    const groupedRefreshCoordinator = new GroupedRefreshCoordinator();
+    const groupedRefreshCoordinator = new GroupedRefreshCoordinator({ lifecycle: subscriptions });
     const healthProjection = new WorkerHealthProjection({
       topic,
       rows: () => mutationStore.rows().length,
@@ -307,7 +308,7 @@ export function makeTopicWorkerCore(
                   subscription.activeView.applyMutation(mutation),
                 );
           if (materialized === undefined) {
-            subscription.lastVersion = toVersion;
+            subscriptions.advanceVersion(subscription, toVersion);
             return Effect.void;
           }
           return Effect.gen(function* () {
@@ -322,11 +323,7 @@ export function makeTopicWorkerCore(
                 serverTime: Date.now(),
               },
             };
-            if (materialized.nextRows !== undefined) {
-              subscription.lastRows = materialized.nextRows;
-            }
-            subscription.lastTotalRows = materialized.totalRows;
-            subscription.lastVersion = toVersion;
+            subscriptions.applyDelta(subscription, materialized, toVersion);
             const offered = yield* fanoutQueue.offerDelta(subscription.queue, subscription, event);
             if (!offered) {
               removeSubscription(subscription.requestId);
@@ -407,19 +404,19 @@ export function makeTopicWorkerCore(
       if (isGroupedQuery(subscription.query)) {
         return;
       }
-      subscription.dirtyTargetVersion = targetVersion;
-      subscription.lastTotalRows = pendingActivePlanTotalRows(
+      const totalRows = pendingActivePlanTotalRows(
         subscription.lastTotalRows,
         subscription.query,
         mutation,
       );
+      subscriptions.markDirty(subscription, targetVersion, totalRows);
       const offered = yield* fanoutQueue.offerStatus(subscription.queue, subscription, {
         type: "status",
         requestId: subscription.requestId,
         status: "stale",
         meta: {
           version: targetVersion.toString(),
-          totalRows: subscription.lastTotalRows,
+          totalRows,
           serverTime: Date.now(),
         },
       });
@@ -439,7 +436,7 @@ export function makeTopicWorkerCore(
       subscription: ActiveSubscription,
       targetVersion: WorkerVersion,
     ) {
-      subscription.dirtyTargetVersion = targetVersion;
+      subscriptions.markDirty(subscription, targetVersion);
       const offered = yield* fanoutQueue.offerStatus(subscription.queue, subscription, {
         type: "status",
         requestId: subscription.requestId,
@@ -461,7 +458,7 @@ export function makeTopicWorkerCore(
         );
         return;
       }
-      if (subscription.groupedRefreshInFlight !== true) {
+      if (!subscriptions.isGroupedRefreshInFlight(subscription)) {
         yield* scheduleGroupedSubscriptionRefresh(subscription.requestId);
       }
     });
@@ -485,7 +482,7 @@ export function makeTopicWorkerCore(
         options: { literalStringFields },
       });
       if (materialized === undefined) {
-        subscription.lastVersion = toVersion;
+        subscriptions.advanceVersion(subscription, toVersion);
         return;
       }
       const event: DeltaEvent<readonly RuntimeRow[]> = {
@@ -499,11 +496,7 @@ export function makeTopicWorkerCore(
           serverTime: Date.now(),
         },
       };
-      if (materialized.nextRows !== undefined) {
-        subscription.lastRows = materialized.nextRows;
-      }
-      subscription.lastTotalRows = materialized.totalRows;
-      subscription.lastVersion = toVersion;
+      subscriptions.applyDelta(subscription, materialized, toVersion);
       const offered = yield* fanoutQueue.offerDelta(subscription.queue, subscription, event);
       if (!offered) {
         removeSubscription(subscription.requestId);
@@ -642,9 +635,8 @@ export function makeTopicWorkerCore(
             if (subscription === undefined) {
               return Effect.void;
             }
-            subscription.groupedRefreshScheduled = false;
-            subscription.groupedRefreshInFlight = false;
-            return subscription.dirtyTargetVersion === undefined
+            subscriptions.markGroupedRefreshIdle(subscription);
+            return subscriptions.dirtyTargetVersion(subscription) === undefined
               ? Effect.void
               : scheduleGroupedSubscriptionRefresh(requestId);
           },
@@ -728,7 +720,7 @@ export function makeTopicWorkerCore(
         idOf: rowKey.get,
       });
       if (accumulator !== undefined) {
-        subscription.groupedAccumulator = accumulator;
+        subscriptions.setGroupedAccumulator(subscription, accumulator);
       }
     };
 
@@ -755,10 +747,7 @@ export function makeTopicWorkerCore(
           serverTime: Date.now(),
         },
       };
-      subscription.lastRows = result.rows;
-      subscription.lastTotalRows = result.totalRows;
-      subscription.lastVersion = targetVersion;
-      subscription.dirtyTargetVersion = undefined;
+      subscriptions.applySnapshot(subscription, result, targetVersion);
       const offered = yield* fanoutQueue.offerSnapshot(subscription.queue, subscription, event);
       if (!offered) {
         removeSubscription(subscription.requestId);

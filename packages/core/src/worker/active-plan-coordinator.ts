@@ -51,12 +51,27 @@ export type ActivePlanPrepareDecision =
   | { readonly type: "fallback" }
   | { readonly type: "skipped" };
 
+export type ActivePlanSubscriptionLifecycle = {
+  readonly resetActivePlanAdmission: (subscription: ActiveSubscription) => void;
+  readonly markActivePlanBuildQueued: (subscription: ActiveSubscription, key: string) => void;
+  readonly markActivePlanBuildCleared: (subscription: ActiveSubscription) => void;
+  readonly markActivePlanFallback: (subscription: ActiveSubscription) => void;
+  readonly markActivePlanAutoBuildSkipped: (subscription: ActiveSubscription) => void;
+  readonly activateActivePlan: (
+    subscription: ActiveSubscription,
+    key: string,
+    activeView: ReturnType<typeof makeActiveRawViewFromPlan>,
+  ) => void;
+  readonly isDirty: (subscription: ActiveSubscription) => boolean;
+};
+
 export class ActivePlanCoordinator {
   readonly #idField: string;
   readonly #literalStringFields: ReadonlySet<string>;
   readonly #maxActivePlans: number | undefined;
   readonly #maxActivePlanEstimatedBytes: number | undefined;
   readonly #activePlanAutoBuildMaxRows: number;
+  readonly #lifecycle: ActivePlanSubscriptionLifecycle;
   readonly #plans = new Map<string, ActiveRawPlanEntry>();
   readonly #builds = new Map<string, ActivePlanBuildEntry>();
   #lastBuildMs = 0;
@@ -67,12 +82,14 @@ export class ActivePlanCoordinator {
     readonly maxActivePlans?: number | undefined;
     readonly maxActivePlanEstimatedBytes?: number | undefined;
     readonly activePlanAutoBuildMaxRows: number;
+    readonly lifecycle: ActivePlanSubscriptionLifecycle;
   }) {
     this.#idField = options.idField;
     this.#literalStringFields = options.literalStringFields;
     this.#maxActivePlans = options.maxActivePlans;
     this.#maxActivePlanEstimatedBytes = options.maxActivePlanEstimatedBytes;
     this.#activePlanAutoBuildMaxRows = options.activePlanAutoBuildMaxRows;
+    this.#lifecycle = options.lifecycle;
   }
 
   prepareSubscription(
@@ -86,22 +103,19 @@ export class ActivePlanCoordinator {
       this.activateSubscriptionWithPlan(subscription, key, query, existing);
       return { type: "activated", key };
     }
-    subscription.activePlanFallback = false;
-    subscription.activePlanAutoBuildSkipped = false;
+    this.#lifecycle.resetActivePlanAdmission(subscription);
     const pending = this.#builds.get(key);
     if (pending !== undefined) {
       pending.requestIds.add(subscription.requestId);
-      subscription.activePlanBuildKey = key;
+      this.#lifecycle.markActivePlanBuildQueued(subscription, key);
       return { type: "joined", key };
     }
     if (rowCount > this.#activePlanAutoBuildMaxRows) {
-      subscription.activePlanAutoBuildSkipped = true;
-      subscription.activePlanBuildKey = undefined;
+      this.#lifecycle.markActivePlanAutoBuildSkipped(subscription);
       return { type: "skipped" };
     }
     if (this.wouldExceedCountLimitForNewBuild()) {
-      subscription.activePlanFallback = true;
-      subscription.activePlanBuildKey = undefined;
+      this.#lifecycle.markActivePlanFallback(subscription);
       return { type: "fallback" };
     }
     const remainingBytes = this.estimatedBytesRemaining();
@@ -111,8 +125,7 @@ export class ActivePlanCoordinator {
         literalStringFields: this.#literalStringFields,
       }) > remainingBytes
     ) {
-      subscription.activePlanFallback = true;
-      subscription.activePlanBuildKey = undefined;
+      this.#lifecycle.markActivePlanFallback(subscription);
       return { type: "fallback" };
     }
     this.#builds.set(key, {
@@ -121,7 +134,7 @@ export class ActivePlanCoordinator {
       requestIds: new Set([subscription.requestId]),
       state: "queued",
     });
-    subscription.activePlanBuildKey = key;
+    this.#lifecycle.markActivePlanBuildQueued(subscription, key);
     return { type: "queued", key };
   }
 
@@ -170,9 +183,8 @@ export class ActivePlanCoordinator {
         if (subscription.requestId !== requestId || subscription.activePlanBuildKey !== key) {
           continue;
         }
-        subscription.activePlanBuildKey = undefined;
-        subscription.activePlanFallback = true;
-        if (subscription.dirtyTargetVersion !== undefined) {
+        this.#lifecycle.markActivePlanFallback(subscription);
+        if (this.#lifecycle.isDirty(subscription)) {
           dirtySubscriptions.push(subscription);
         }
       }
@@ -224,10 +236,7 @@ export class ActivePlanCoordinator {
           args.snapshot.query,
           entry,
         );
-        if (
-          subscription.dirtyTargetVersion !== undefined &&
-          subscription.activeView !== undefined
-        ) {
+        if (this.#lifecycle.isDirty(subscription) && subscription.activeView !== undefined) {
           dirtySubscriptions.push(subscription);
         }
       }
@@ -342,11 +351,11 @@ export class ActivePlanCoordinator {
       return;
     }
     entry.subscribers++;
-    subscription.activePlanKey = key;
-    subscription.activePlanBuildKey = undefined;
-    subscription.activePlanFallback = false;
-    subscription.activePlanAutoBuildSkipped = false;
-    subscription.activeView = makeActiveRawViewFromPlan(entry.plan, query, this.#idField);
+    this.#lifecycle.activateActivePlan(
+      subscription,
+      key,
+      makeActiveRawViewFromPlan(entry.plan, query, this.#idField),
+    );
   }
 
   private estimatedBytes(): number {

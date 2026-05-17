@@ -5,6 +5,8 @@ import type { RuntimeQuery, RuntimeRow, SubscriptionEvent } from "../protocol/in
 import type { ActiveRawView } from "./active-view.ts";
 import type { GroupedAccumulator } from "./grouped-accumulator.ts";
 import type { WorkerVersion } from "./mutation-log.ts";
+import type { MaterializedSubscriptionChange } from "./grouped-accumulator-fanout.ts";
+import type { QueryExecutionResult } from "./query-engine.ts";
 
 export type ActiveSubscription = {
   readonly requestId: string;
@@ -99,6 +101,114 @@ export class SubscriptionRegistry {
     );
     this.#subscriptions.clear();
     return shutdownSubscriptions;
+  }
+
+  advanceVersion(subscription: ActiveSubscription, version: WorkerVersion): void {
+    subscription.lastVersion = version;
+  }
+
+  applyDelta(
+    subscription: ActiveSubscription,
+    change: MaterializedSubscriptionChange,
+    version: WorkerVersion,
+  ): void {
+    if (change.nextRows !== undefined) {
+      subscription.lastRows = change.nextRows;
+    }
+    subscription.lastTotalRows = change.totalRows;
+    subscription.lastVersion = version;
+  }
+
+  applySnapshot(
+    subscription: ActiveSubscription,
+    result: QueryExecutionResult,
+    version: WorkerVersion,
+  ): void {
+    subscription.lastRows = result.rows;
+    subscription.lastTotalRows = result.totalRows;
+    subscription.lastVersion = version;
+    subscription.dirtyTargetVersion = undefined;
+  }
+
+  markDirty(
+    subscription: ActiveSubscription,
+    targetVersion: WorkerVersion,
+    totalRows: number = subscription.lastTotalRows,
+  ): void {
+    subscription.dirtyTargetVersion = targetVersion;
+    subscription.lastTotalRows = totalRows;
+  }
+
+  dirtyTargetVersion(subscription: ActiveSubscription): WorkerVersion | undefined {
+    return subscription.dirtyTargetVersion;
+  }
+
+  isDirty(subscription: ActiveSubscription): boolean {
+    return subscription.dirtyTargetVersion !== undefined;
+  }
+
+  resetActivePlanAdmission(subscription: ActiveSubscription): void {
+    subscription.activePlanFallback = false;
+    subscription.activePlanAutoBuildSkipped = false;
+  }
+
+  markActivePlanBuildQueued(subscription: ActiveSubscription, key: string): void {
+    subscription.activePlanBuildKey = key;
+  }
+
+  markActivePlanBuildCleared(subscription: ActiveSubscription): void {
+    subscription.activePlanBuildKey = undefined;
+  }
+
+  markActivePlanFallback(subscription: ActiveSubscription): void {
+    subscription.activePlanBuildKey = undefined;
+    subscription.activePlanFallback = true;
+  }
+
+  markActivePlanAutoBuildSkipped(subscription: ActiveSubscription): void {
+    subscription.activePlanAutoBuildSkipped = true;
+    subscription.activePlanBuildKey = undefined;
+  }
+
+  activateActivePlan(
+    subscription: ActiveSubscription,
+    key: string,
+    activeView: ActiveRawView,
+  ): void {
+    subscription.activePlanKey = key;
+    subscription.activePlanBuildKey = undefined;
+    subscription.activePlanFallback = false;
+    subscription.activePlanAutoBuildSkipped = false;
+    subscription.activeView = activeView;
+  }
+
+  markGroupedRefreshScheduled(subscription: ActiveSubscription): void {
+    subscription.groupedRefreshScheduled = true;
+  }
+
+  markGroupedRefreshInFlight(subscription: ActiveSubscription): void {
+    subscription.groupedRefreshScheduled = false;
+    subscription.groupedRefreshInFlight = true;
+  }
+
+  markGroupedRefreshIdle(subscription: ActiveSubscription): void {
+    subscription.groupedRefreshScheduled = false;
+    subscription.groupedRefreshInFlight = false;
+  }
+
+  isGroupedRefreshScheduled(subscription: ActiveSubscription): boolean {
+    return subscription.groupedRefreshScheduled === true;
+  }
+
+  isGroupedRefreshInFlight(subscription: ActiveSubscription): boolean {
+    return subscription.groupedRefreshInFlight === true;
+  }
+
+  setGroupedAccumulator(
+    subscription: ActiveSubscription,
+    groupedAccumulator: GroupedAccumulator,
+  ): void {
+    subscription.groupedAccumulator = groupedAccumulator;
   }
 }
 

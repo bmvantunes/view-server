@@ -8,7 +8,10 @@ import {
   GroupedRefreshCoordinator,
   groupedRefreshKey,
 } from "../src/worker/grouped-refresh-coordinator.ts";
-import type { ActiveSubscription } from "../src/worker/subscription-registry.ts";
+import {
+  SubscriptionRegistry,
+  type ActiveSubscription,
+} from "../src/worker/subscription-registry.ts";
 
 const groupedQuery = {
   groupBy: ["symbol"],
@@ -21,7 +24,8 @@ const groupedQuery = {
 describe("GroupedRefreshCoordinator", () => {
   it.effect("shares queued refresh work by grouped query key", () =>
     Effect.gen(function* () {
-      const coordinator = new GroupedRefreshCoordinator();
+      const lifecycle = subscriptionLifecycle();
+      const coordinator = new GroupedRefreshCoordinator({ lifecycle });
       const first = yield* subscription("request-1");
       const second = yield* subscription("request-2");
 
@@ -43,7 +47,8 @@ describe("GroupedRefreshCoordinator", () => {
 
   it.effect("reschedules subscriptions dirtied beyond the computed snapshot version", () =>
     Effect.gen(function* () {
-      const coordinator = new GroupedRefreshCoordinator();
+      const lifecycle = subscriptionLifecycle();
+      const coordinator = new GroupedRefreshCoordinator({ lifecycle });
       const active = yield* subscription("request-1");
       coordinator.schedule(active);
       const snapshot = coordinator.begin({
@@ -55,7 +60,7 @@ describe("GroupedRefreshCoordinator", () => {
       if (snapshot === undefined) {
         throw new Error("Expected grouped refresh snapshot");
       }
-      active.dirtyTargetVersion = 2n;
+      lifecycle.markDirty(active, 2n);
 
       const installed = coordinator.install({
         snapshot,
@@ -70,7 +75,8 @@ describe("GroupedRefreshCoordinator", () => {
 
   it.effect("releases queued request ids on unsubscribe and resets in-flight entries", () =>
     Effect.gen(function* () {
-      const coordinator = new GroupedRefreshCoordinator();
+      const lifecycle = subscriptionLifecycle();
+      const coordinator = new GroupedRefreshCoordinator({ lifecycle });
       const first = yield* subscription("request-1");
       const second = yield* subscription("request-2");
       coordinator.schedule(first);
@@ -94,6 +100,14 @@ describe("GroupedRefreshCoordinator", () => {
     }),
   );
 });
+
+function subscriptionLifecycle(): SubscriptionRegistry {
+  return new SubscriptionRegistry({
+    releaseActivePlan: () => undefined,
+    releaseActivePlanBuild: () => undefined,
+    releaseGroupedRefresh: () => undefined,
+  });
+}
 
 function registry(subscriptions: readonly ActiveSubscription[]) {
   const byId = new Map(subscriptions.map((subscription) => [subscription.requestId, subscription]));
