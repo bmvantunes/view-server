@@ -1,6 +1,7 @@
 export type BenchmarkProfileName =
   | "ci-smoke"
   | "firehose-ci"
+  | "websocket-fanout"
   | "dev-fast"
   | "rc-1m"
   | "soak-10m"
@@ -34,6 +35,7 @@ export type BenchmarkProfile = {
 export const benchmarkProfileNames: readonly BenchmarkProfileName[] = [
   "ci-smoke",
   "firehose-ci",
+  "websocket-fanout",
   "dev-fast",
   "rc-1m",
   "soak-10m",
@@ -122,7 +124,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
         baselineFile: "runtime-websocket-soak.json",
         blocking: true,
         metrics:
-          "cleanupLeakCount,retryCount,backpressureCount,maxQueueDepthAfterCleanup,maxSubscriptionLagVersionsAfterCleanup,chdbPendingRequestsAfterCleanup,chdbBackendLagVersionsAfterCleanup,chdbNotReadyAfterCleanupCount",
+          "cleanupLeakCount,retryCount,backpressureCount,maxQueueDepthAfterCleanup,maxSubscriptionLagVersionsAfterCleanup,chdbPendingRequestsAfterCleanup,chdbBackendLagVersionsAfterCleanup,chdbNotReadyAfterCleanupCount,websocketActiveClientsAfterCleanup",
         env: {
           VS_RUNTIME_WEBSOCKET_SOAK_ROWS: "1000",
           VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS: "12",
@@ -217,7 +219,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
         baselineFile: "runtime-websocket-soak-100-client.json",
         blocking: false,
         metrics:
-          "mutationP50Ms,mutationP95Ms,mutationP99Ms,mutationMaxMs,retryCount,backpressureCount,cleanupLeakCount,maxQueueDepthObserved,maxSubscriptionLagVersionsObserved,maxChdbPendingRequestsObserved,maxChdbBackendLagVersionsObserved,maxQueueDepthAfterCleanup,maxSubscriptionLagVersionsAfterCleanup,chdbPendingRequestsAfterCleanup,chdbBackendLagVersionsAfterCleanup,chdbNotReadyAfterCleanupCount",
+          "mutationP50Ms,mutationP95Ms,mutationP99Ms,mutationMaxMs,retryCount,backpressureCount,cleanupLeakCount,maxQueueDepthObserved,maxSubscriptionLagVersionsObserved,maxChdbPendingRequestsObserved,maxChdbBackendLagVersionsObserved,maxQueueDepthAfterCleanup,maxSubscriptionLagVersionsAfterCleanup,chdbPendingRequestsAfterCleanup,chdbBackendLagVersionsAfterCleanup,chdbNotReadyAfterCleanupCount,websocketActiveClientsAfterCleanup,websocketTotalEncodeMs,websocketTotalWriteMs,websocketMaxClientQueuedMessages,websocketMaxClientQueuedBytes,websocketMaxBatchBytes,websocketMaxEncodeMs,websocketMaxWriteMs,websocketTotalBytes,snapshotPayloadBytes,deltaPayloadBytes,statusPayloadBytes",
         env: {
           VS_RUNTIME_WEBSOCKET_SOAK_ROWS: "10000",
           VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS: "80",
@@ -225,6 +227,55 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
           VS_RUNTIME_WEBSOCKET_SOAK_MUTATIONS: "1000",
           VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS: "50",
           VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS: "120000",
+          VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL: "25",
+        },
+      },
+    ],
+  },
+  "websocket-fanout": {
+    name: "websocket-fanout",
+    description:
+      "Manual websocket fanout and serialization profile for 100-client and 250-client transport loads.",
+    ciSafe: false,
+    coverageGaps: [
+      "Hardware-sensitive; use this to explain websocket/event-loop tail latency on the target machine.",
+      "The runtime keeps Effect RPC over NDJSON; compact/binary encodings are benchmark follow-ups, not current behavior.",
+      "Payload byte metrics in this profile are application-event JSON approximations; websocketTotalBytes is the encoded batched RPC wire byte count.",
+    ],
+    benchmarks: [
+      {
+        name: "runtime-websocket-soak-100-client",
+        description:
+          "Real websocket 100-client runtime soak with chDB, reconnects, payload bytes, and fanout attribution.",
+        script: "bench/runtime-websocket-soak.bench.ts",
+        artifactFile: "runtime-websocket-soak-100-client.json",
+        metrics:
+          "mutationP50Ms,mutationP95Ms,mutationP99Ms,mutationMaxMs,retryCount,backpressureCount,cleanupLeakCount,websocketTotalBytes,websocketTotalEncodeMs,websocketTotalWriteMs,websocketMaxClientQueuedMessages,websocketMaxClientQueuedBytes,websocketMaxBatchMessages,websocketMaxBatchBytes,websocketMaxEncodeMs,websocketMaxWriteMs,snapshotPayloadBytes,deltaPayloadBytes,statusPayloadBytes",
+        env: {
+          VS_RUNTIME_WEBSOCKET_SOAK_ROWS: "10000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS: "80",
+          VS_RUNTIME_WEBSOCKET_SOAK_GROUPED_CLIENTS: "20",
+          VS_RUNTIME_WEBSOCKET_SOAK_MUTATIONS: "1000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS: "50",
+          VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS: "120000",
+          VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL: "25",
+        },
+      },
+      {
+        name: "runtime-websocket-soak-250-client",
+        description:
+          "Real websocket 250-client runtime soak with chDB, reconnects, payload bytes, and fanout attribution.",
+        script: "bench/runtime-websocket-soak.bench.ts",
+        artifactFile: "runtime-websocket-soak-250-client.json",
+        metrics:
+          "mutationP50Ms,mutationP95Ms,mutationP99Ms,mutationMaxMs,retryCount,backpressureCount,cleanupLeakCount,websocketTotalBytes,websocketTotalEncodeMs,websocketTotalWriteMs,websocketMaxClientQueuedMessages,websocketMaxClientQueuedBytes,websocketMaxBatchMessages,websocketMaxBatchBytes,websocketMaxEncodeMs,websocketMaxWriteMs,snapshotPayloadBytes,deltaPayloadBytes,statusPayloadBytes",
+        env: {
+          VS_RUNTIME_WEBSOCKET_SOAK_ROWS: "10000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS: "200",
+          VS_RUNTIME_WEBSOCKET_SOAK_GROUPED_CLIENTS: "50",
+          VS_RUNTIME_WEBSOCKET_SOAK_MUTATIONS: "1000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS: "50",
+          VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS: "180000",
           VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL: "25",
         },
       },

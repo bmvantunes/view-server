@@ -50,6 +50,7 @@ The current profiles are:
 
 - `ci-smoke`: tiny CI visibility; deterministic entries can block PRs.
 - `firehose-ci`: report-only firehose thresholds for batching/coalescing/1M soak regressions and the 100-client runtime websocket transport profile.
+- `websocket-fanout`: manual 100-client and 250-client websocket fanout/serialization profiles.
 - `dev-fast`: local 100k-ish active/grouped checks.
 - `rc-1m`: manual 1M release-candidate responsiveness checks.
 - `soak-10m`: manual/nightly raw 10M worker soak wrapper.
@@ -100,7 +101,18 @@ benchmark metrics. The CI smoke profile blocks only deterministic invariants:
 
 The 100-client firehose profile is report-only and tracks mutation p50/p95/p99/max, retry and
 backpressure counts, cleanup leaks, observed queue/lag/chDB pressure, reconnect count, and top slow
-sample count. Use it for regression visibility, not as a GitHub-runner SLA.
+sample count. It also records websocket fanout counters: total encoded RPC bytes, total messages,
+total batched writes, encode/write time, max per-client queued messages, max batch size, and
+max encoded bytes drained from one client queue, plus application-event payload bytes for snapshots,
+deltas, and status events. Use it for regression visibility, not as a GitHub-runner SLA.
+
+For larger transport checks outside CI, run the dedicated websocket fanout profile:
+
+```bash
+vp run core#bench:profile -- --profile websocket-fanout
+```
+
+The 250-client entry is intentionally manual because it is hardware and event-loop sensitive.
 
 The 10M raw soak is manual/nightly only. Refresh or compare it explicitly; do not add it to normal
 CI:

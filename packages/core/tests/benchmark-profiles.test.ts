@@ -12,6 +12,7 @@ describe("benchmark profiles", () => {
     expect(benchmarkProfileNames).toEqual([
       "ci-smoke",
       "firehose-ci",
+      "websocket-fanout",
       "dev-fast",
       "rc-1m",
       "soak-10m",

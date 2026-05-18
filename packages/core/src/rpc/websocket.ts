@@ -15,11 +15,16 @@ import {
 import type { ViewServerConfig } from "../config/index.ts";
 import type { ViewServerError } from "../errors.ts";
 import { layerViewServerHealthRoutes } from "../server/index.ts";
+import { layerBatchedWebsocketProtocolRoute } from "./websocket-fanout.ts";
 import { ViewServerRpcs } from "./rpcs.ts";
 import { ViewServerHandlersLive } from "./server.ts";
+export {
+  ViewServerWebsocketFanoutMetrics,
+  type WebsocketFanoutMetricsSnapshot,
+} from "./websocket-fanout.ts";
 
 export const layerViewServerWebsocketProtocolRoute = (path: HttpRouter.PathInput = "/rpc") =>
-  RpcServer.layerProtocolWebsocket({ path });
+  layerBatchedWebsocketProtocolRoute(path);
 
 export const layerViewServerWebsocketProtocol = (path: HttpRouter.PathInput = "/rpc") =>
   layerViewServerWebsocketProtocolRoute(path).pipe(Layer.provide(HttpRouter.layer));

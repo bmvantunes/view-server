@@ -36,11 +36,32 @@ type SoakEventCounts = {
   readonly status: number;
 };
 
+type SoakPayloadBytes = {
+  readonly snapshots: number;
+  readonly deltas: number;
+  readonly status: number;
+};
+
 type RuntimeWebsocketObservedMetrics = {
   readonly maxQueueDepth: number;
   readonly maxSubscriptionLagVersions: number;
   readonly maxChdbPendingRequests: number;
   readonly maxChdbBackendLagVersions: number;
+};
+
+type WebsocketFanoutMetricsSnapshot = {
+  readonly activeClients: number;
+  readonly totalMessages: number;
+  readonly totalBatches: number;
+  readonly totalBytes: number;
+  readonly totalEncodeMs: number;
+  readonly totalWriteMs: number;
+  readonly maxClientQueuedMessages: number;
+  readonly maxClientQueuedBytes: number;
+  readonly maxBatchMessages: number;
+  readonly maxBatchBytes: number;
+  readonly maxEncodeMs: number;
+  readonly maxWriteMs: number;
 };
 
 type RuntimeWebsocketSoakSummary = {
@@ -69,10 +90,12 @@ type RuntimeWebsocketSoakSummary = {
   readonly chdbStatusAfterCleanup: string;
   readonly chdbPendingRequestsAfterCleanup: number;
   readonly events: SoakEventCounts;
+  readonly payloadBytes: SoakPayloadBytes;
   readonly retries: number;
   readonly backpressureErrors: number;
   readonly reconnects: number;
   readonly observed: RuntimeWebsocketObservedMetrics;
+  readonly websocketFanout: WebsocketFanoutMetricsSnapshot;
   readonly topSlowMutations: readonly unknown[];
 };
 
@@ -227,7 +250,9 @@ function decodeRuntimeWebsocketSoakSummary(value: unknown): RuntimeWebsocketSoak
   const shape = recordField(record, "shape");
   const mutationLatencyMs = recordField(record, "mutationLatencyMs");
   const events = recordField(record, "events");
+  const payloadBytes = recordField(record, "payloadBytes");
   const observed = recordField(record, "observed");
+  const websocketFanout = recordField(record, "websocketFanout");
   return {
     shape: {
       rows: numberField(shape, "rows"),
@@ -288,6 +313,11 @@ function decodeRuntimeWebsocketSoakSummary(value: unknown): RuntimeWebsocketSoak
       deltas: numberField(events, "deltas"),
       status: numberField(events, "status"),
     },
+    payloadBytes: {
+      snapshots: numberField(payloadBytes, "snapshots"),
+      deltas: numberField(payloadBytes, "deltas"),
+      status: numberField(payloadBytes, "status"),
+    },
     retries: numberField(record, "retries"),
     backpressureErrors: numberField(record, "backpressureErrors"),
     reconnects: numberField(record, "reconnects"),
@@ -296,6 +326,20 @@ function decodeRuntimeWebsocketSoakSummary(value: unknown): RuntimeWebsocketSoak
       maxSubscriptionLagVersions: numberField(observed, "maxSubscriptionLagVersions"),
       maxChdbPendingRequests: numberField(observed, "maxChdbPendingRequests"),
       maxChdbBackendLagVersions: numberField(observed, "maxChdbBackendLagVersions"),
+    },
+    websocketFanout: {
+      activeClients: numberField(websocketFanout, "activeClients"),
+      totalMessages: numberField(websocketFanout, "totalMessages"),
+      totalBatches: numberField(websocketFanout, "totalBatches"),
+      totalBytes: numberField(websocketFanout, "totalBytes"),
+      totalEncodeMs: numberField(websocketFanout, "totalEncodeMs"),
+      totalWriteMs: numberField(websocketFanout, "totalWriteMs"),
+      maxClientQueuedMessages: numberField(websocketFanout, "maxClientQueuedMessages"),
+      maxClientQueuedBytes: numberField(websocketFanout, "maxClientQueuedBytes"),
+      maxBatchMessages: numberField(websocketFanout, "maxBatchMessages"),
+      maxBatchBytes: numberField(websocketFanout, "maxBatchBytes"),
+      maxEncodeMs: numberField(websocketFanout, "maxEncodeMs"),
+      maxWriteMs: numberField(websocketFanout, "maxWriteMs"),
     },
     topSlowMutations: arrayField(record, "topSlowMutations"),
   };
@@ -383,6 +427,70 @@ function runtimeWebsocketSoakMetrics(
       lowerIsBetter: false,
     },
     {
+      name: "websocketActiveClientsAfterCleanup",
+      value: summary.websocketFanout.activeClients,
+      unit: "count",
+    },
+    {
+      name: "websocketTotalMessages",
+      value: summary.websocketFanout.totalMessages,
+      unit: "count",
+      lowerIsBetter: false,
+    },
+    {
+      name: "websocketTotalBatches",
+      value: summary.websocketFanout.totalBatches,
+      unit: "count",
+      lowerIsBetter: false,
+    },
+    {
+      name: "websocketTotalBytes",
+      value: summary.websocketFanout.totalBytes,
+      unit: "bytes",
+      lowerIsBetter: false,
+    },
+    {
+      name: "websocketTotalEncodeMs",
+      value: summary.websocketFanout.totalEncodeMs,
+      unit: "ms",
+    },
+    {
+      name: "websocketTotalWriteMs",
+      value: summary.websocketFanout.totalWriteMs,
+      unit: "ms",
+    },
+    {
+      name: "websocketMaxClientQueuedMessages",
+      value: summary.websocketFanout.maxClientQueuedMessages,
+      unit: "count",
+    },
+    {
+      name: "websocketMaxClientQueuedBytes",
+      value: summary.websocketFanout.maxClientQueuedBytes,
+      unit: "bytes",
+    },
+    {
+      name: "websocketMaxBatchMessages",
+      value: summary.websocketFanout.maxBatchMessages,
+      unit: "count",
+      lowerIsBetter: false,
+    },
+    {
+      name: "websocketMaxBatchBytes",
+      value: summary.websocketFanout.maxBatchBytes,
+      unit: "bytes",
+    },
+    {
+      name: "websocketMaxEncodeMs",
+      value: summary.websocketFanout.maxEncodeMs,
+      unit: "ms",
+    },
+    {
+      name: "websocketMaxWriteMs",
+      value: summary.websocketFanout.maxWriteMs,
+      unit: "ms",
+    },
+    {
       name: "topSlowSampleCount",
       value: summary.topSlowMutations.length,
       unit: "count",
@@ -395,15 +503,40 @@ function runtimeWebsocketSoakMetrics(
       lowerIsBetter: false,
     },
     {
+      name: "snapshotPayloadBytes",
+      value: summary.payloadBytes.snapshots,
+      unit: "bytes",
+      lowerIsBetter: false,
+    },
+    {
       name: "deltaEventCount",
       value: summary.events.deltas,
       unit: "count",
       lowerIsBetter: false,
     },
     {
+      name: "deltaPayloadBytes",
+      value: summary.payloadBytes.deltas,
+      unit: "bytes",
+      lowerIsBetter: false,
+    },
+    {
       name: "statusEventCount",
       value: summary.events.status,
       unit: "count",
+      lowerIsBetter: false,
+    },
+    {
+      name: "statusPayloadBytes",
+      value: summary.payloadBytes.status,
+      unit: "bytes",
+      lowerIsBetter: false,
+    },
+    {
+      name: "totalPayloadBytes",
+      value:
+        summary.payloadBytes.snapshots + summary.payloadBytes.deltas + summary.payloadBytes.status,
+      unit: "bytes",
       lowerIsBetter: false,
     },
     { name: "finalRows", value: summary.finalRows, unit: "count", lowerIsBetter: false },
@@ -438,7 +571,8 @@ function cleanupLeakCount(summary: RuntimeWebsocketSoakSummary): number {
     summary.totalSubscriptionLagVersionsAfterCleanup +
     summary.chdbPendingRequestsAfterCleanup +
     chdbBackendLagVersionsAfterCleanup(summary) +
-    (summary.chdbStatusAfterCleanup === "ready" ? 0 : 1)
+    (summary.chdbStatusAfterCleanup === "ready" ? 0 : 1) +
+    summary.websocketFanout.activeClients
   );
 }
 

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "benchmark": "runtime-websocket-soak",
-  "generatedAt": "2026-05-18T00:13:58.938Z",
+  "generatedAt": "2026-05-18T00:40:08.959Z",
   "config": {
     "rows": 1000,
     "rawClients": 12,
@@ -10,12 +10,17 @@
     "reconnectClients": 10,
     "connectConcurrency": 10,
     "rawPageCycle": 6,
-    "healthSampleInterval": 10
+    "healthSampleInterval": 10,
+    "profile": "ci-smoke",
+    "profileBenchmark": "runtime-websocket-soak"
   },
   "notes": [
     "Wraps the real websocket runtime soak test and converts its JSON summary into a benchmark artifact.",
     "CI smoke should block only on deterministic cleanup/retry/backpressure invariants; latency thresholds are visibility signals.",
-    "summary artifact: bench/.artifacts/runtime-websocket-soak-1779063237232.summary.json"
+    "summary artifact: bench/.artifacts/ci/runtime-websocket-soak.summary.json",
+    "coverage gap: Active-plan responsiveness can complete before a build overlaps at smoke scale; large local benchmarks remain the source of truth.",
+    "coverage gap: Grouped refresh smoke uses small row counts; 1M/10M chDB grouped overlap remains manual/nightly evidence.",
+    "coverage gap: Runtime websocket soak smoke blocks only cleanup/retry/backpressure invariants; the 100-client profile remains report-only."
   ],
   "results": [
     {
@@ -31,42 +36,42 @@
       "metrics": [
         {
           "name": "durationMs",
-          "value": 1138.12,
+          "value": 834.74,
           "unit": "ms"
         },
         {
           "name": "subscriptionSetupMs",
-          "value": 103.76,
+          "value": 85.63,
           "unit": "ms"
         },
         {
           "name": "mutationLoopMs",
-          "value": 449.76,
+          "value": 480.13,
           "unit": "ms"
         },
         {
           "name": "mutationP50Ms",
-          "value": 1.7,
+          "value": 1.92,
           "unit": "ms"
         },
         {
           "name": "mutationP95Ms",
-          "value": 5.96,
+          "value": 5.47,
           "unit": "ms"
         },
         {
           "name": "mutationP99Ms",
-          "value": 6.15,
+          "value": 6.9,
           "unit": "ms"
         },
         {
           "name": "mutationMaxMs",
-          "value": 35.12,
+          "value": 32.76,
           "unit": "ms"
         },
         {
           "name": "cleanupMs",
-          "value": 6.66,
+          "value": 6.56,
           "unit": "ms"
         },
         {
@@ -136,6 +141,70 @@
           "lowerIsBetter": false
         },
         {
+          "name": "websocketActiveClientsAfterCleanup",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "websocketTotalMessages",
+          "value": 2040,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "websocketTotalBatches",
+          "value": 2013,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "websocketTotalBytes",
+          "value": 1486103,
+          "unit": "bytes",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "websocketTotalEncodeMs",
+          "value": 4.493315999998799,
+          "unit": "ms"
+        },
+        {
+          "name": "websocketTotalWriteMs",
+          "value": 17.07214999999792,
+          "unit": "ms"
+        },
+        {
+          "name": "websocketMaxClientQueuedMessages",
+          "value": 2,
+          "unit": "count"
+        },
+        {
+          "name": "websocketMaxClientQueuedBytes",
+          "value": 3067,
+          "unit": "bytes"
+        },
+        {
+          "name": "websocketMaxBatchMessages",
+          "value": 2,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "websocketMaxBatchBytes",
+          "value": 3067,
+          "unit": "bytes"
+        },
+        {
+          "name": "websocketMaxEncodeMs",
+          "value": 0.025749999999902684,
+          "unit": "ms"
+        },
+        {
+          "name": "websocketMaxWriteMs",
+          "value": 0.19933300000002419,
+          "unit": "ms"
+        },
+        {
           "name": "topSlowSampleCount",
           "value": 10,
           "unit": "count",
@@ -148,15 +217,39 @@
           "lowerIsBetter": false
         },
         {
+          "name": "snapshotPayloadBytes",
+          "value": 34758,
+          "unit": "bytes",
+          "lowerIsBetter": false
+        },
+        {
           "name": "deltaEventCount",
-          "value": 1420,
+          "value": 1430,
           "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "deltaPayloadBytes",
+          "value": 1217191,
+          "unit": "bytes",
           "lowerIsBetter": false
         },
         {
           "name": "statusEventCount",
           "value": 360,
           "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "statusPayloadBytes",
+          "value": 54396,
+          "unit": "bytes",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "totalPayloadBytes",
+          "value": 1306345,
+          "unit": "bytes",
           "lowerIsBetter": false
         },
         {

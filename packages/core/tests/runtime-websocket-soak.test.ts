@@ -6,6 +6,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { HttpServer } from "effect/unstable/http";
+import { Buffer } from "node:buffer";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { ActiveSubscription, ViewServerClient } from "../src/client/index.ts";
@@ -17,7 +18,12 @@ import type {
   RuntimeRow,
   SubscriptionEvent,
 } from "../src/protocol/index.ts";
-import { layerViewServerWebsocketServer, makeNodeWebsocketClient } from "../src/rpc/websocket.ts";
+import {
+  layerViewServerWebsocketServer,
+  makeNodeWebsocketClient,
+  type WebsocketFanoutMetricsSnapshot,
+  ViewServerWebsocketFanoutMetrics,
+} from "../src/rpc/websocket.ts";
 import { layerViewServerRuntime, type HealthResponse } from "../src/server/index.ts";
 
 const Order = Schema.Struct({
@@ -94,6 +100,7 @@ describe("runtime websocket soak", () => {
 
         yield* Effect.gen(function* () {
           const url = yield* websocketUrl();
+          const websocketFanoutMetrics = yield* ViewServerWebsocketFanoutMetrics;
           const publisher = yield* makeNodeWebsocketClient(url, runtimeWebsocketSoakConfig);
           const clients: SoakClient[] = [];
           let activeClients: SoakClient[] = [];
@@ -166,6 +173,7 @@ describe("runtime websocket soak", () => {
             yield* recordSlowMutationSample({
               samples: topSlowMutations,
               client: publisher,
+              websocketFanoutMetrics,
               observed,
               index,
               operation,
@@ -173,6 +181,7 @@ describe("runtime websocket soak", () => {
               reconnectActive,
               elapsedMs: performance.now() - startedAt,
               events: totalEvents(clients),
+              payloadBytes: totalPayloadBytes(clients),
             });
             if (index % shape.healthSampleInterval === 0) {
               const health = yield* publisher.health();
@@ -253,7 +262,17 @@ describe("runtime websocket soak", () => {
           expect(released.topics.orders?.activePlanIndexEstimatedBytes).toBe(0);
 
           const events = totalEvents(clients);
+          const payloadBytes = totalPayloadBytes(clients);
           const lifecycle = totalLifecycle(clients);
+          const websocketFanout = yield* waitForWebsocketFanout(
+            websocketFanoutMetrics,
+            (snapshot) => snapshot.activeClients === 0,
+            "cleanup",
+          );
+          expect(websocketFanout.activeClients).toBe(0);
+          expect(websocketFanout.totalMessages).toBeGreaterThan(0);
+          expect(websocketFanout.maxClientQueuedBytes).toBeGreaterThan(0);
+          expect(websocketFanout.maxBatchBytes).toBeGreaterThan(0);
           expect(events.snapshots).toBeGreaterThanOrEqual(descriptors.length + reconnects);
           expect(events.deltas + events.status).toBeGreaterThan(0);
 
@@ -290,6 +309,7 @@ describe("runtime websocket soak", () => {
             chdbStatusAfterCleanup: released.topics.orders?.chdbStatus ?? "stopped",
             chdbPendingRequestsAfterCleanup: released.topics.orders?.chdbPendingRequests ?? -1,
             events,
+            payloadBytes,
             retries: lifecycle.retries,
             backpressureErrors: lifecycle.backpressureErrors,
             reconnects,
@@ -299,6 +319,7 @@ describe("runtime websocket soak", () => {
               mutationsDuringReconnect,
             },
             observed,
+            websocketFanout,
             groupedRefreshCountsAvailable: false,
             topSlowMutations,
           };
@@ -349,6 +370,7 @@ type RuntimeWebsocketSoakSummary = {
   readonly chdbStatusAfterCleanup: HealthResponse["topics"][string]["chdbStatus"];
   readonly chdbPendingRequestsAfterCleanup: number;
   readonly events: SoakEventCounts;
+  readonly payloadBytes: SoakPayloadBytes;
   readonly retries: number;
   readonly backpressureErrors: number;
   readonly reconnects: number;
@@ -358,6 +380,7 @@ type RuntimeWebsocketSoakSummary = {
     readonly mutationsDuringReconnect: number;
   };
   readonly observed: RuntimeWebsocketObservedMetrics;
+  readonly websocketFanout: WebsocketFanoutMetricsSnapshot;
   readonly groupedRefreshCountsAvailable: boolean;
   readonly topSlowMutations: readonly SlowMutationSample[];
 };
@@ -380,6 +403,7 @@ type SoakClient = {
   readonly subscription: ActiveSubscription;
   readonly lifecycle: SoakLifecycleCounts;
   readonly events: SoakEventCounts;
+  readonly payloadBytes: SoakPayloadBytes;
   readonly requestIds: readonly string[];
 };
 
@@ -390,6 +414,12 @@ type SoakLifecycleCounts = {
 };
 
 type SoakEventCounts = {
+  snapshots: number;
+  deltas: number;
+  status: number;
+};
+
+type SoakPayloadBytes = {
   snapshots: number;
   deltas: number;
   status: number;
@@ -424,7 +454,9 @@ type SlowMutationSample = {
   readonly reconnectActive: boolean;
   readonly elapsedMs: number;
   readonly events: SoakEventCounts;
+  readonly payloadBytes: SoakPayloadBytes;
   readonly health: MutationHealthSnapshot;
+  readonly websocketFanout: WebsocketFanoutMetricsSnapshot;
 };
 
 type MutationHealthSnapshot = {
@@ -465,6 +497,7 @@ function connectSoakClient(
     const client = yield* makeNodeWebsocketClient(url, runtimeWebsocketSoakConfig);
     const firstSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
     const events: SoakEventCounts = eventCounts();
+    const payloadBytes: SoakPayloadBytes = payloadByteCounts();
     const lifecycle: SoakLifecycleCounts = { attempts: 0, retries: 0, backpressureErrors: 0 };
     const requestIds: string[] = [];
     const subscription = yield* client.subscribe(
@@ -473,7 +506,7 @@ function connectSoakClient(
       (event) =>
         Effect.sync(() => {
           requestIds.push(event.requestId);
-          recordEvent(events, event);
+          recordEvent(events, payloadBytes, event);
         }).pipe(
           Effect.flatMap(() =>
             event.type === "snapshot"
@@ -512,6 +545,7 @@ function connectSoakClient(
       subscription,
       lifecycle,
       events,
+      payloadBytes,
       requestIds,
     };
   })();
@@ -642,6 +676,29 @@ function waitForClientHealth(
   });
 }
 
+function waitForWebsocketFanout(
+  metrics: WebsocketFanoutMetricsSnapshotService,
+  predicate: (snapshot: WebsocketFanoutMetricsSnapshot) => boolean,
+  label: string,
+): Effect.Effect<WebsocketFanoutMetricsSnapshot> {
+  return Effect.gen(function* () {
+    let lastSnapshot: WebsocketFanoutMetricsSnapshot | undefined;
+    for (let attempt = 0; attempt < 250; attempt++) {
+      const snapshot = yield* metrics.snapshot;
+      lastSnapshot = snapshot;
+      if (predicate(snapshot)) {
+        return snapshot;
+      }
+      yield* sleepHost(20);
+    }
+    return yield* Effect.die(
+      new Error(
+        `Timed out waiting for runtime websocket fanout ${label}: ${JSON.stringify(lastSnapshot)}`,
+      ),
+    );
+  });
+}
+
 function sleepHost(milliseconds: number): Effect.Effect<void> {
   return Effect.promise(() => new Promise((resolve) => setTimeout(resolve, milliseconds)));
 }
@@ -663,20 +720,33 @@ function clientDescriptors(shape: RuntimeWebsocketSoakShape): readonly SoakClien
 
 function recordEvent(
   counts: SoakEventCounts,
+  payloadBytes: SoakPayloadBytes,
   event: SubscriptionEvent<readonly RuntimeRow[]>,
 ): void {
+  const bytes = Buffer.byteLength(JSON.stringify(event));
   if (event.type === "snapshot") {
     counts.snapshots += 1;
+    payloadBytes.snapshots += bytes;
     return;
   }
   if (event.type === "delta") {
     counts.deltas += 1;
+    payloadBytes.deltas += bytes;
     return;
   }
   counts.status += 1;
+  payloadBytes.status += bytes;
 }
 
 function eventCounts(): SoakEventCounts {
+  return {
+    snapshots: 0,
+    deltas: 0,
+    status: 0,
+  };
+}
+
+function payloadByteCounts(): SoakPayloadBytes {
   return {
     snapshots: 0,
     deltas: 0,
@@ -695,6 +765,17 @@ function totalEvents(clients: readonly SoakClient[]): SoakEventCounts {
   );
 }
 
+function totalPayloadBytes(clients: readonly SoakClient[]): SoakPayloadBytes {
+  return clients.reduce(
+    (total, client) => ({
+      snapshots: total.snapshots + client.payloadBytes.snapshots,
+      deltas: total.deltas + client.payloadBytes.deltas,
+      status: total.status + client.payloadBytes.status,
+    }),
+    payloadByteCounts(),
+  );
+}
+
 function totalLifecycle(clients: readonly SoakClient[]): SoakLifecycleCounts {
   return clients.reduce(
     (total, client) => ({
@@ -709,6 +790,7 @@ function totalLifecycle(clients: readonly SoakClient[]): SoakLifecycleCounts {
 function recordSlowMutationSample(args: {
   readonly samples: SlowMutationSample[];
   readonly client: Pick<ViewServerClient<typeof runtimeWebsocketSoakConfig>, "health">;
+  readonly websocketFanoutMetrics: WebsocketFanoutMetricsSnapshotService;
   readonly observed: RuntimeWebsocketObservedMetrics;
   readonly index: number;
   readonly operation: MutationOperation;
@@ -716,12 +798,14 @@ function recordSlowMutationSample(args: {
   readonly reconnectActive: boolean;
   readonly elapsedMs: number;
   readonly events: SoakEventCounts;
+  readonly payloadBytes: SoakPayloadBytes;
 }): Effect.Effect<void, ViewServerError> {
   return Effect.fnUntraced(function* () {
     if (!isSlowMutationCandidate(args.samples, args.latencyMs)) {
       return;
     }
     const health = yield* args.client.health();
+    const websocketFanout = yield* args.websocketFanoutMetrics.snapshot;
     recordHealthObservation(args.observed, health);
     args.samples.push({
       index: args.index,
@@ -730,7 +814,9 @@ function recordSlowMutationSample(args: {
       reconnectActive: args.reconnectActive,
       elapsedMs: roundMs(args.elapsedMs),
       events: args.events,
+      payloadBytes: args.payloadBytes,
       health: mutationHealthSnapshot(health),
+      websocketFanout,
     });
     args.samples.sort((left, right) => right.latencyMs - left.latencyMs);
     if (args.samples.length > 10) {
@@ -738,6 +824,10 @@ function recordSlowMutationSample(args: {
     }
   })();
 }
+
+type WebsocketFanoutMetricsSnapshotService = {
+  readonly snapshot: Effect.Effect<WebsocketFanoutMetricsSnapshot>;
+};
 
 function observedMetrics(): RuntimeWebsocketObservedMetrics {
   return {
