@@ -30,6 +30,7 @@ describe("benchmark profiles", () => {
       "chdb-apply-batch",
       "fanout-slow-client",
       "worker-soak-alpha-1m",
+      "runtime-websocket-soak-100-client",
     ]);
     for (const benchmark of profile.benchmarks) {
       expect(benchmark.blocking).toBe(false);
@@ -49,6 +50,7 @@ describe("benchmark profiles", () => {
       "active-plan-responsiveness",
       "grouped-responsiveness",
       "grouped-refresh-overlap",
+      "runtime-websocket-soak",
     ]);
     for (const benchmark of profile.benchmarks) {
       expect(benchmark.script).toMatch(/^bench\/.*\.ts$/);

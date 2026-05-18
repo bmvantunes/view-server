@@ -2,8 +2,8 @@
 
 The GitHub Actions benchmark workflow has two layers:
 
-- `ci-smoke`: tiny deterministic smoke shapes that prove benchmark entrypoints still run, produce JSON artifacts, append a GitHub Actions summary, and compare against checked-in baselines. Stable smoke regressions can block PRs.
-- `firehose-ci`: report-only firehose thresholds for the new hot-path work: worker mutation batching, chDB apply batching, fanout slow-client coalescing, and the 1M alpha worker soak. These warn loudly in the Actions summary but do not block PRs.
+- `ci-smoke`: tiny deterministic smoke shapes that prove benchmark entrypoints still run, produce JSON artifacts, append a GitHub Actions summary, and compare against checked-in baselines. Stable smoke regressions can block PRs, including the real websocket runtime soak cleanup/retry/backpressure invariants.
+- `firehose-ci`: report-only firehose thresholds for the new hot-path work: worker mutation batching, chDB apply batching, fanout slow-client coalescing, the 1M alpha worker soak, and the 100-client real websocket soak. These warn loudly in the Actions summary but do not block PRs.
 
 The workflow uploads generated artifacts from `packages/core/bench/.artifacts/**/*.json`.
 
@@ -15,7 +15,7 @@ VS_BENCH_BLOCKING: "1"
 
 Individual benchmark profiles can still mark noisy or long-running checks as report-only with
 `blocking: false`. The current report-only checks are the active-plan overlap smoke and every
-`firehose-ci` benchmark.
+`firehose-ci` benchmark, including the 100-client runtime websocket soak.
 
 To make a local run fully reporting-only:
 
@@ -49,7 +49,7 @@ vp run core#bench:profile -- --profile dev-fast
 The current profiles are:
 
 - `ci-smoke`: tiny CI visibility; deterministic entries can block PRs.
-- `firehose-ci`: report-only firehose thresholds for batching/coalescing/1M soak regressions.
+- `firehose-ci`: report-only firehose thresholds for batching/coalescing/1M soak regressions and the 100-client runtime websocket transport profile.
 - `dev-fast`: local 100k-ish active/grouped checks.
 - `rc-1m`: manual 1M release-candidate responsiveness checks.
 - `soak-10m`: manual/nightly raw 10M worker soak wrapper.
@@ -86,6 +86,21 @@ Compare local firehose results against the checked-in thresholds:
 ```bash
 vp run core#bench:profile -- --profile firehose-ci --compare
 ```
+
+The runtime websocket soak wrapper converts `tests/runtime-websocket-soak.test.ts` summary JSON into
+benchmark metrics. The CI smoke profile blocks only deterministic invariants:
+
+- `cleanupLeakCount === 0`
+- `retryCount === 0`
+- `backpressureCount === 0`
+- `maxQueueDepthAfterCleanup === 0`
+- `maxSubscriptionLagVersionsAfterCleanup === 0`
+- `chdbPendingRequestsAfterCleanup === 0`
+- `chdbBackendLagVersionsAfterCleanup === 0`
+
+The 100-client firehose profile is report-only and tracks mutation p50/p95/p99/max, retry and
+backpressure counts, cleanup leaks, observed queue/lag/chDB pressure, reconnect count, and top slow
+sample count. Use it for regression visibility, not as a GitHub-runner SLA.
 
 The 10M raw soak is manual/nightly only. Refresh or compare it explicitly; do not add it to normal
 CI:

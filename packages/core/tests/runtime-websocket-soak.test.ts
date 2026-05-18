@@ -107,6 +107,7 @@ describe("runtime websocket soak", () => {
           let reconnectStartedAtMs: number | null = null;
           let reconnectCompletedAtMs: number | null = null;
           let reconnectFiber: Fiber.Fiber<ReconnectResult, ViewServerError> | undefined;
+          const observed = observedMetrics();
 
           const subscriptionStartedAt = performance.now();
           const descriptors = clientDescriptors(shape);
@@ -124,6 +125,7 @@ describe("runtime websocket soak", () => {
             (health) => health.topics.orders?.subscribers === activeClients.length,
             "initial subscriptions",
           );
+          recordHealthObservation(observed, ready);
           expect(ready.topics.orders?.chdbStatus).toBe("ready");
           expect(ready.topics.orders?.chdbPendingRequests).toBe(0);
 
@@ -164,6 +166,7 @@ describe("runtime websocket soak", () => {
             yield* recordSlowMutationSample({
               samples: topSlowMutations,
               client: publisher,
+              observed,
               index,
               operation,
               latencyMs,
@@ -171,6 +174,10 @@ describe("runtime websocket soak", () => {
               elapsedMs: performance.now() - startedAt,
               events: totalEvents(clients),
             });
+            if (index % shape.healthSampleInterval === 0) {
+              const health = yield* publisher.health();
+              recordHealthObservation(observed, health);
+            }
             if (index % 10 === 0) {
               yield* Effect.yieldNow;
             }
@@ -205,6 +212,7 @@ describe("runtime websocket soak", () => {
             },
             "post-mutation settle",
           );
+          recordHealthObservation(observed, settled);
           expect(settled.ok).toBe(true);
           expect(settled.topics.orders?.chdbStatus).toBe("ready");
           expect(settled.topics.__view_server_health?.rows).toBeGreaterThan(0);
@@ -240,6 +248,7 @@ describe("runtime websocket soak", () => {
             },
             "cleanup",
           );
+          recordHealthObservation(observed, released);
           const cleanupMs = performance.now() - cleanupStartedAt;
           expect(released.topics.orders?.activePlanIndexEstimatedBytes).toBe(0);
 
@@ -263,6 +272,7 @@ describe("runtime websocket soak", () => {
             workerVersionBeforeCleanup: settled.topics.orders?.version ?? "0",
             finalRows: released.topics.orders?.rows ?? 0,
             finalVersion: released.topics.orders?.version ?? "0",
+            chdbBackendVersionAfterCleanup: released.topics.orders?.chdbBackendVersion ?? "0",
             subscribersAfterCleanup: released.topics.orders?.subscribers ?? -1,
             activePlanCountAfterCleanup: released.topics.orders?.activePlanCount ?? -1,
             activeViewCountAfterCleanup: released.topics.orders?.activeViewCount ?? -1,
@@ -288,6 +298,7 @@ describe("runtime websocket soak", () => {
               completedAtMs: reconnectCompletedAtMs,
               mutationsDuringReconnect,
             },
+            observed,
             groupedRefreshCountsAvailable: false,
             topSlowMutations,
           };
@@ -309,6 +320,7 @@ type RuntimeWebsocketSoakShape = {
   readonly reconnectClients: number;
   readonly connectConcurrency: number;
   readonly rawPageCycle: number;
+  readonly healthSampleInterval: number;
 };
 
 type RuntimeWebsocketSoakSummary = {
@@ -324,6 +336,7 @@ type RuntimeWebsocketSoakSummary = {
   readonly workerVersionBeforeCleanup: string;
   readonly finalRows: number;
   readonly finalVersion: string;
+  readonly chdbBackendVersionAfterCleanup: string;
   readonly subscribersAfterCleanup: number;
   readonly activePlanCountAfterCleanup: number;
   readonly activeViewCountAfterCleanup: number;
@@ -344,6 +357,7 @@ type RuntimeWebsocketSoakSummary = {
     readonly completedAtMs: number | null;
     readonly mutationsDuringReconnect: number;
   };
+  readonly observed: RuntimeWebsocketObservedMetrics;
   readonly groupedRefreshCountsAvailable: boolean;
   readonly topSlowMutations: readonly SlowMutationSample[];
 };
@@ -428,6 +442,13 @@ type MutationHealthSnapshot = {
   readonly chdbBackendVersion: string;
   readonly workerVersion: string;
   readonly chdbBackendLagVersions: number;
+};
+
+type RuntimeWebsocketObservedMetrics = {
+  maxQueueDepth: number;
+  maxSubscriptionLagVersions: number;
+  maxChdbPendingRequests: number;
+  maxChdbBackendLagVersions: number;
 };
 
 type ReconnectResult = {
@@ -688,6 +709,7 @@ function totalLifecycle(clients: readonly SoakClient[]): SoakLifecycleCounts {
 function recordSlowMutationSample(args: {
   readonly samples: SlowMutationSample[];
   readonly client: Pick<ViewServerClient<typeof runtimeWebsocketSoakConfig>, "health">;
+  readonly observed: RuntimeWebsocketObservedMetrics;
   readonly index: number;
   readonly operation: MutationOperation;
   readonly latencyMs: number;
@@ -700,6 +722,7 @@ function recordSlowMutationSample(args: {
       return;
     }
     const health = yield* args.client.health();
+    recordHealthObservation(args.observed, health);
     args.samples.push({
       index: args.index,
       operation: args.operation,
@@ -714,6 +737,35 @@ function recordSlowMutationSample(args: {
       args.samples.pop();
     }
   })();
+}
+
+function observedMetrics(): RuntimeWebsocketObservedMetrics {
+  return {
+    maxQueueDepth: 0,
+    maxSubscriptionLagVersions: 0,
+    maxChdbPendingRequests: 0,
+    maxChdbBackendLagVersions: 0,
+  };
+}
+
+function recordHealthObservation(
+  observed: RuntimeWebsocketObservedMetrics,
+  health: HealthResponse,
+): void {
+  const snapshot = mutationHealthSnapshot(health);
+  observed.maxQueueDepth = Math.max(observed.maxQueueDepth, snapshot.queueDepth);
+  observed.maxSubscriptionLagVersions = Math.max(
+    observed.maxSubscriptionLagVersions,
+    snapshot.maxSubscriptionLagVersions,
+  );
+  observed.maxChdbPendingRequests = Math.max(
+    observed.maxChdbPendingRequests,
+    snapshot.chdbPendingRequests,
+  );
+  observed.maxChdbBackendLagVersions = Math.max(
+    observed.maxChdbBackendLagVersions,
+    snapshot.chdbBackendLagVersions,
+  );
 }
 
 function isSlowMutationCandidate(
@@ -812,6 +864,10 @@ function websocketSoakShape(): RuntimeWebsocketSoakShape {
     reconnectClients: envNumber("VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS", reconnectFallback),
     connectConcurrency: Math.max(1, envNumber("VS_RUNTIME_WEBSOCKET_SOAK_CONNECT_CONCURRENCY", 10)),
     rawPageCycle: Math.max(1, envNumber("VS_RUNTIME_WEBSOCKET_SOAK_RAW_PAGE_CYCLE", 6)),
+    healthSampleInterval: Math.max(
+      1,
+      envNumber("VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL", 25),
+    ),
   };
 }
 

@@ -1,0 +1,171 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "runtime-websocket-soak",
+  "generatedAt": "2026-05-18T00:13:58.938Z",
+  "config": {
+    "rows": 1000,
+    "rawClients": 12,
+    "groupedClients": 3,
+    "mutations": 120,
+    "reconnectClients": 10,
+    "connectConcurrency": 10,
+    "rawPageCycle": 6,
+    "healthSampleInterval": 10
+  },
+  "notes": [
+    "Wraps the real websocket runtime soak test and converts its JSON summary into a benchmark artifact.",
+    "CI smoke should block only on deterministic cleanup/retry/backpressure invariants; latency thresholds are visibility signals.",
+    "summary artifact: bench/.artifacts/runtime-websocket-soak-1779063237232.summary.json"
+  ],
+  "results": [
+    {
+      "case": {
+        "operation": "runtimeWebsocketSoak",
+        "rows": 1000,
+        "clients": 15,
+        "rawClients": 12,
+        "groupedClients": 3,
+        "mutations": 120,
+        "reconnectClients": 10
+      },
+      "metrics": [
+        {
+          "name": "durationMs",
+          "value": 1138.12,
+          "unit": "ms"
+        },
+        {
+          "name": "subscriptionSetupMs",
+          "value": 103.76,
+          "unit": "ms"
+        },
+        {
+          "name": "mutationLoopMs",
+          "value": 449.76,
+          "unit": "ms"
+        },
+        {
+          "name": "mutationP50Ms",
+          "value": 1.7,
+          "unit": "ms"
+        },
+        {
+          "name": "mutationP95Ms",
+          "value": 5.96,
+          "unit": "ms"
+        },
+        {
+          "name": "mutationP99Ms",
+          "value": 6.15,
+          "unit": "ms"
+        },
+        {
+          "name": "mutationMaxMs",
+          "value": 35.12,
+          "unit": "ms"
+        },
+        {
+          "name": "cleanupMs",
+          "value": 6.66,
+          "unit": "ms"
+        },
+        {
+          "name": "retryCount",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "backpressureCount",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "cleanupLeakCount",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "maxQueueDepthObserved",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "maxSubscriptionLagVersionsObserved",
+          "value": 120,
+          "unit": "count"
+        },
+        {
+          "name": "maxChdbPendingRequestsObserved",
+          "value": 1,
+          "unit": "count"
+        },
+        {
+          "name": "maxChdbBackendLagVersionsObserved",
+          "value": 1,
+          "unit": "count"
+        },
+        {
+          "name": "maxQueueDepthAfterCleanup",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "maxSubscriptionLagVersionsAfterCleanup",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "chdbPendingRequestsAfterCleanup",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "chdbBackendLagVersionsAfterCleanup",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "chdbNotReadyAfterCleanupCount",
+          "value": 0,
+          "unit": "count"
+        },
+        {
+          "name": "reconnectCount",
+          "value": 10,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "topSlowSampleCount",
+          "value": 10,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "snapshotEventCount",
+          "value": 25,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "deltaEventCount",
+          "value": 1420,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "statusEventCount",
+          "value": 360,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "finalRows",
+          "value": 1036,
+          "unit": "count",
+          "lowerIsBetter": false
+        }
+      ]
+    }
+  ]
+}

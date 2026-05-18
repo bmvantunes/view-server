@@ -50,6 +50,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
     coverageGaps: [
       "Active-plan responsiveness can complete before a build overlaps at smoke scale; large local benchmarks remain the source of truth.",
       "Grouped refresh smoke uses small row counts; 1M/10M chDB grouped overlap remains manual/nightly evidence.",
+      "Runtime websocket soak smoke blocks only cleanup/retry/backpressure invariants; the 100-client profile remains report-only.",
     ],
     benchmarks: [
       {
@@ -113,6 +114,25 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
           VS_GROUPED_REFRESH_OVERLAP_BACKEND: "memory",
         },
       },
+      {
+        name: "runtime-websocket-soak",
+        description: "Real websocket runtime soak invariant smoke with chDB and reconnects.",
+        script: "bench/runtime-websocket-soak.bench.ts",
+        artifactFile: "runtime-websocket-soak.json",
+        baselineFile: "runtime-websocket-soak.json",
+        blocking: true,
+        metrics:
+          "cleanupLeakCount,retryCount,backpressureCount,maxQueueDepthAfterCleanup,maxSubscriptionLagVersionsAfterCleanup,chdbPendingRequestsAfterCleanup,chdbBackendLagVersionsAfterCleanup,chdbNotReadyAfterCleanupCount",
+        env: {
+          VS_RUNTIME_WEBSOCKET_SOAK_ROWS: "1000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS: "12",
+          VS_RUNTIME_WEBSOCKET_SOAK_GROUPED_CLIENTS: "3",
+          VS_RUNTIME_WEBSOCKET_SOAK_MUTATIONS: "120",
+          VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS: "10",
+          VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS: "60000",
+          VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL: "10",
+        },
+      },
     ],
   },
   "firehose-ci": {
@@ -124,6 +144,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
       "Report-only by policy: regressions should be investigated but should not block PRs.",
       "The 1M alpha soak uses the direct worker harness with the snapshot accelerator disabled; production chDB is covered by the chDB apply benchmark.",
       "The 10M raw soak is intentionally manual/nightly and is not run in CI.",
+      "The runtime websocket 100-client profile is transport-real but hardware-sensitive, so it warns only.",
     ],
     benchmarks: [
       {
@@ -185,6 +206,26 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
           VS_WORKER_SOAK_MUTATIONS: "10000",
           VS_WORKER_SOAK_MUTATION_BATCH_SIZE: "1000",
           VS_WORKER_SOAK_TIMEOUT_MS: "900000",
+        },
+      },
+      {
+        name: "runtime-websocket-soak-100-client",
+        description:
+          "Real websocket 100-client runtime soak with chDB, reconnects, and tail attribution.",
+        script: "bench/runtime-websocket-soak.bench.ts",
+        artifactFile: "runtime-websocket-soak-100-client.json",
+        baselineFile: "runtime-websocket-soak-100-client.json",
+        blocking: false,
+        metrics:
+          "mutationP50Ms,mutationP95Ms,mutationP99Ms,mutationMaxMs,retryCount,backpressureCount,cleanupLeakCount,maxQueueDepthObserved,maxSubscriptionLagVersionsObserved,maxChdbPendingRequestsObserved,maxChdbBackendLagVersionsObserved,maxQueueDepthAfterCleanup,maxSubscriptionLagVersionsAfterCleanup,chdbPendingRequestsAfterCleanup,chdbBackendLagVersionsAfterCleanup,chdbNotReadyAfterCleanupCount",
+        env: {
+          VS_RUNTIME_WEBSOCKET_SOAK_ROWS: "10000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS: "80",
+          VS_RUNTIME_WEBSOCKET_SOAK_GROUPED_CLIENTS: "20",
+          VS_RUNTIME_WEBSOCKET_SOAK_MUTATIONS: "1000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS: "50",
+          VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS: "120000",
+          VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL: "25",
         },
       },
     ],

@@ -33,6 +33,18 @@ state, and the top 10 slowest mutation samples with health snapshots. Keep this 
 at large sizes; the default test already exercises the transport lifecycle without turning every
 push into a capacity run.
 
+For regression-visible artifacts, run the benchmark wrapper instead of invoking the test directly:
+
+```bash
+VS_BENCH_BLOCKING=0 \
+node --experimental-strip-types packages/core/bench/benchmark-profile.ts --profile firehose-ci --compare
+```
+
+The `runtime-websocket-soak-100-client` entry is report-only. It compares mutation p50/p95/p99/max,
+retry/backpressure counts, cleanup leaks, observed queue and subscription lag, observed chDB pending
+requests/version lag, reconnect count, and top slow sample count. The smaller `ci-smoke` entry blocks
+only deterministic cleanup/retry/backpressure invariants.
+
 Latest local runtime websocket soak results, May 17 2026:
 
 | profile |   rows | websocket clients | raw/grouped | mutations | reconnects | duration | mutation p50/p95/p99/max       | events                                      | cleanup                                                          |

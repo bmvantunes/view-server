@@ -76,6 +76,7 @@
     "bench:mutation-log": "node --experimental-strip-types bench/mutation-log.bench.ts",
     "bench:query-engine": "node --experimental-strip-types bench/query-engine.bench.ts",
     "bench:refresh-baselines": "node --experimental-strip-types bench/ci-smoke.ts --refresh-baselines",
+    "bench:runtime-websocket-soak": "node --experimental-strip-types bench/runtime-websocket-soak.bench.ts",
     "bench:worker-mutation-batch": "node --experimental-strip-types bench/worker-mutation-batch.bench.ts",
     "bench:worker-replay": "node --experimental-strip-types bench/worker-replay.bench.ts",
     "bench:worker-soak": "node --experimental-strip-types bench/worker-soak.bench.ts",
