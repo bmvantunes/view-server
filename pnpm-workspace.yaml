@@ -27,6 +27,8 @@ catalog:
   vitest: 4.1.5
   vite-plus: latest
   "@effect/language-service": 0.86.1
+  "@types/ws": 8.18.1
+  ws: 8.20.0
 overrides:
   vite: "catalog:"
   vitest: "catalog:"

@@ -50,7 +50,7 @@ The current profiles are:
 
 - `ci-smoke`: tiny CI visibility; deterministic entries can block PRs.
 - `firehose-ci`: report-only firehose thresholds for batching/coalescing/1M soak regressions and the 100-client runtime websocket transport profile.
-- `websocket-fanout`: manual 100-client and 250-client websocket fanout/serialization profiles.
+- `websocket-fanout`: manual in-process and isolated websocket fanout/serialization profiles.
 - `dev-fast`: local 100k-ish active/grouped checks.
 - `rc-1m`: manual 1M release-candidate responsiveness checks.
 - `soak-10m`: manual/nightly raw 10M worker soak wrapper.
@@ -105,8 +105,10 @@ sample count. It also records worker timing buckets for gate wait, memory apply,
 updates, fanout, delta construction, and stream offer; websocket fanout counters for total encoded
 RPC bytes, total messages, total batched writes, encode/write/protocol-queue time, max per-client
 queued messages, max batch size, and max encoded bytes drained from one client queue; event-loop
-delay; and application-event payload bytes for snapshots, deltas, and status events. Use it for
-regression visibility, not as a GitHub-runner SLA.
+delay; isolated transport-worker event-loop delay; `transport*` metric aliases for active clients,
+queue depth, bytes, encode/write time, protocol queue wait, and event-loop delay; and
+application-event payload bytes for snapshots, deltas, and status events. Use it for regression
+visibility, not as a GitHub-runner SLA.
 
 For larger transport checks outside CI, run the dedicated websocket fanout profile:
 
@@ -115,6 +117,17 @@ vp run core#bench:profile -- --profile websocket-fanout
 ```
 
 The 250-client entry is intentionally manual because it is hardware and event-loop sensitive.
+The profile also includes `runtime-websocket-soak-100-client-isolated`,
+`runtime-websocket-soak-250-client-isolated`, and a manual
+`runtime-websocket-soak-500-client-isolated` entry. Those entries set
+`VS_RUNTIME_WEBSOCKET_TRANSPORT_MODE=isolated` and compare the dedicated websocket transport worker
+against the in-process route without changing query/RPC semantics.
+
+The May 18 local run showed that isolated transport separates socket event-loop pressure but is not
+yet a blanket latency win: the transport worker event-loop max stayed near 14ms, while the remaining
+250/500-client tail came from runtime event-loop and subscription fanout/stream-offer pressure before
+the socket worker. Keep this profile report-only until target hardware and product latency budgets are
+known.
 
 The 10M raw soak is manual/nightly only. Refresh or compare it explicitly; do not add it to normal
 CI:

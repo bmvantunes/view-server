@@ -60,6 +60,7 @@ type RuntimeWebsocketObservedMetrics = {
 };
 
 type WebsocketFanoutMetricsSnapshot = {
+  readonly transportMode: "in-process" | "isolated";
   readonly activeClients: number;
   readonly totalMessages: number;
   readonly totalBatches: number;
@@ -76,6 +77,7 @@ type WebsocketFanoutMetricsSnapshot = {
   readonly maxWriteMs: number;
   readonly maxProtocolOfferMs: number;
   readonly maxProtocolQueueWaitMs: number;
+  readonly transportEventLoopDelay: EventLoopDelayStats;
 };
 
 type EventLoopDelayStats = {
@@ -90,6 +92,7 @@ type EventLoopDelayStats = {
 
 type RuntimeWebsocketSoakSummary = {
   readonly shape: RuntimeWebsocketSoakShape;
+  readonly transportMode: "in-process" | "isolated";
   readonly durationMs: number;
   readonly subscriptionSetupMs: number;
   readonly mutationLoopMs: number;
@@ -290,6 +293,7 @@ function decodeRuntimeWebsocketSoakSummary(value: unknown): RuntimeWebsocketSoak
       rawPageCycle: numberField(shape, "rawPageCycle"),
       healthSampleInterval: numberField(shape, "healthSampleInterval"),
     },
+    transportMode: transportModeField(record, "transportMode"),
     durationMs: numberField(record, "durationMs"),
     subscriptionSetupMs: numberField(record, "subscriptionSetupMs"),
     mutationLoopMs: numberField(record, "mutationLoopMs"),
@@ -370,6 +374,7 @@ function decodeRuntimeWebsocketSoakSummary(value: unknown): RuntimeWebsocketSoak
       workerTotalSnapshotsGenerated: numberField(observed, "workerTotalSnapshotsGenerated"),
     },
     websocketFanout: {
+      transportMode: transportModeField(websocketFanout, "transportMode"),
       activeClients: numberField(websocketFanout, "activeClients"),
       totalMessages: numberField(websocketFanout, "totalMessages"),
       totalBatches: numberField(websocketFanout, "totalBatches"),
@@ -386,6 +391,7 @@ function decodeRuntimeWebsocketSoakSummary(value: unknown): RuntimeWebsocketSoak
       maxWriteMs: numberField(websocketFanout, "maxWriteMs"),
       maxProtocolOfferMs: numberField(websocketFanout, "maxProtocolOfferMs"),
       maxProtocolQueueWaitMs: numberField(websocketFanout, "maxProtocolQueueWaitMs"),
+      transportEventLoopDelay: eventLoopDelayField(websocketFanout, "transportEventLoopDelay"),
     },
     eventLoopDelay: {
       minMs: numberField(eventLoopDelay, "minMs"),
@@ -410,6 +416,7 @@ function runtimeWebsocketSoakResult(summary: RuntimeWebsocketSoakSummary): Bench
       groupedClients: summary.shape.groupedClients,
       mutations: summary.shape.mutations,
       reconnectClients: summary.shape.reconnectClients,
+      transportMode: summary.transportMode,
     },
     metrics: runtimeWebsocketSoakMetrics(summary),
   };
@@ -619,6 +626,68 @@ function runtimeWebsocketSoakMetrics(
       unit: "ms",
     },
     {
+      name: "transportActiveClientsAfterCleanup",
+      value: summary.websocketFanout.activeClients,
+      unit: "count",
+    },
+    {
+      name: "transportTotalMessages",
+      value: summary.websocketFanout.totalMessages,
+      unit: "count",
+      lowerIsBetter: false,
+    },
+    {
+      name: "transportTotalBytes",
+      value: summary.websocketFanout.totalBytes,
+      unit: "bytes",
+      lowerIsBetter: false,
+    },
+    {
+      name: "transportTotalEncodeMs",
+      value: summary.websocketFanout.totalEncodeMs,
+      unit: "ms",
+    },
+    {
+      name: "transportTotalWriteMs",
+      value: summary.websocketFanout.totalWriteMs,
+      unit: "ms",
+    },
+    {
+      name: "transportTotalProtocolQueueWaitMs",
+      value: summary.websocketFanout.totalProtocolQueueWaitMs,
+      unit: "ms",
+    },
+    {
+      name: "transportMaxQueueDepthMessages",
+      value: summary.websocketFanout.maxClientQueuedMessages,
+      unit: "count",
+    },
+    {
+      name: "transportMaxQueueDepthBytes",
+      value: summary.websocketFanout.maxClientQueuedBytes,
+      unit: "bytes",
+    },
+    {
+      name: "transportMaxProtocolQueueWaitMs",
+      value: summary.websocketFanout.maxProtocolQueueWaitMs,
+      unit: "ms",
+    },
+    {
+      name: "transportEventLoopDelayP95Ms",
+      value: summary.websocketFanout.transportEventLoopDelay.p95Ms,
+      unit: "ms",
+    },
+    {
+      name: "transportEventLoopDelayP99Ms",
+      value: summary.websocketFanout.transportEventLoopDelay.p99Ms,
+      unit: "ms",
+    },
+    {
+      name: "transportEventLoopDelayMaxMs",
+      value: summary.websocketFanout.transportEventLoopDelay.maxMs,
+      unit: "ms",
+    },
+    {
       name: "eventLoopDelayP50Ms",
       value: summary.eventLoopDelay.p50Ms,
       unit: "ms",
@@ -698,6 +767,7 @@ function runtimeWebsocketSoakConfig(
     rows: summary.shape.rows,
     rawClients: summary.shape.rawClients,
     groupedClients: summary.shape.groupedClients,
+    transportMode: summary.transportMode,
     mutations: summary.shape.mutations,
     reconnectClients: summary.shape.reconnectClients,
     connectConcurrency: summary.shape.connectConcurrency,
@@ -778,6 +848,33 @@ function numberField(parent: Readonly<Record<string, unknown>>, field: string): 
     throw new Error(`${field} must be a finite number`);
   }
   return value;
+}
+
+function eventLoopDelayField(
+  parent: Readonly<Record<string, unknown>>,
+  field: string,
+): EventLoopDelayStats {
+  const value = recordField(parent, field);
+  return {
+    minMs: numberField(value, "minMs"),
+    meanMs: numberField(value, "meanMs"),
+    maxMs: numberField(value, "maxMs"),
+    stddevMs: numberField(value, "stddevMs"),
+    p50Ms: numberField(value, "p50Ms"),
+    p95Ms: numberField(value, "p95Ms"),
+    p99Ms: numberField(value, "p99Ms"),
+  };
+}
+
+function transportModeField(
+  parent: Readonly<Record<string, unknown>>,
+  field: string,
+): RuntimeWebsocketSoakSummary["transportMode"] {
+  const value = stringField(parent, field);
+  if (value === "in-process" || value === "isolated") {
+    return value;
+  }
+  throw new Error(`${field} must be in-process or isolated`);
 }
 
 function stringField(parent: Readonly<Record<string, unknown>>, field: string): string {

@@ -56,13 +56,23 @@ larger batching wins. `websocketTotalBytes` is the encoded batched RPC wire byte
 snapshot/delta/status payload byte fields are approximate application-event JSON sizes and are useful
 for payload mix, not exact wire accounting.
 
+The runtime websocket soak can run with `VS_RUNTIME_WEBSOCKET_TRANSPORT_MODE=in-process` or
+`isolated`. `in-process` uses the normal Effect HTTP websocket route. `isolated` moves websocket
+accept/NDJSON encode/write/coalescing into a dedicated Node worker while the main runtime still owns
+Effect RPC handlers, query semantics, topic workers, and chDB. Soak summaries include
+`transportMode` plus transport-worker event-loop delay metrics so runtime event-loop pressure and
+socket/write pressure can be compared separately.
+
 Latest local runtime websocket soak results, May 18 2026:
 
-| profile |   rows | websocket clients | raw/grouped | mutations | reconnects | duration | mutation p50/p95/p99/max        | events                                       | cleanup                                                          |
-| ------- | -----: | ----------------: | ----------: | --------: | ---------: | -------: | ------------------------------- | -------------------------------------------- | ---------------------------------------------------------------- |
-| default |  1,000 |                15 |        12/3 |       120 |         10 |    0.80s | 1.95 / 5.02 / 6.40 / 31.09ms    | 25 snapshots, 1,430 deltas, 360 status       | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
-| manual  | 10,000 |               100 |       80/20 |     1,000 |         50 |   13.40s | 7.07 / 24.15 / 26.45 / 171.5ms  | 150 snapshots, 79,765 deltas, 20,000 status  | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
-| manual  | 10,000 |               250 |      200/50 |     1,000 |         50 |   33.10s | 17.83 / 60.10 / 64.35 / 235.8ms | 300 snapshots, 199,767 deltas, 50,000 status | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+| transport  |   rows | websocket clients | raw/grouped | mutations | reconnects | duration | mutation p50/p95/p99/max         | cleanup                                                          |
+| ---------- | -----: | ----------------: | ----------: | --------: | ---------: | -------: | -------------------------------- | ---------------------------------------------------------------- |
+| in-process |  1,000 |                15 |        12/3 |       120 |         10 |    0.80s | 1.95 / 5.02 / 6.40 / 31.09ms     | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+| in-process | 10,000 |               100 |       80/20 |     1,000 |         50 |   13.66s | 7.07 / 23.77 / 24.50 / 137.6ms   | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+| in-process | 10,000 |               250 |      200/50 |     1,000 |         50 |   33.15s | 17.68 / 60.06 / 62.28 / 256.4ms  | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+| isolated   | 10,000 |               100 |       80/20 |     1,000 |         50 |   13.17s | 6.84 / 24.53 / 33.06 / 167.4ms   | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+| isolated   | 10,000 |               250 |      200/50 |     1,000 |         50 |   29.03s | 12.97 / 56.01 / 70.17 / 331.6ms  | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+| isolated   | 10,000 |               500 |     400/100 |     1,000 |         50 |   56.93s | 25.24 / 111.01 / 142.4 / 436.5ms | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
 
 All runs reported `retries=0`, `backpressureErrors=0`, and `chdbBackendVersionBeforeCleanup`
 matching the worker version. The manual profile intentionally leaves grouped subscriptions stale
@@ -81,25 +91,22 @@ events.
 
 Worker/protocol/event-loop attribution from the latest manual profiles:
 
-| clients | worker fanout max | delta construction max | stream offer max | protocol queue-wait max | event-loop delay p99/max |
-| ------: | ----------------: | ---------------------: | ---------------: | ----------------------: | -----------------------: |
-|     100 |            1.95ms |                 0.65ms |           0.48ms |                    25ms |          21.23 / 128.7ms |
-|     250 |            5.41ms |                 2.47ms |           2.32ms |                   193ms |          35.23 / 283.1ms |
+| transport  | clients | worker fanout max | stream offer max | protocol queue-wait max | runtime event-loop p99/max | transport event-loop p99/max |
+| ---------- | ------: | ----------------: | ---------------: | ----------------------: | -------------------------: | ---------------------------: |
+| in-process |     100 |            1.91ms |           0.46ms |                   122ms |           20.20 / 112.66ms |                            - |
+| in-process |     250 |            4.39ms |           2.36ms |                   249ms |           34.90 / 224.53ms |                            - |
+| isolated   |     100 |            1.90ms |           0.45ms |                    35ms |           22.74 / 132.38ms |              12.26 / 12.89ms |
+| isolated   |     250 |           19.50ms |          17.25ms |                   280ms |           39.42 / 290.98ms |              12.84 / 14.24ms |
+| isolated   |     500 |          341.81ms |         143.24ms |                   391ms |           36.67 / 319.03ms |              12.80 / 14.34ms |
 
-Top slow samples now point away from memory/query/fanout CPU and websocket write cost. In the
-100-client run, the slowest mutation was `deltaPublish o-997` at index 897 with 171.5ms client
-latency, but the worker mutation took 0.92ms total, fanout took 0.86ms, stream offer took 0.18ms,
-websocket write max was 0.23ms, queue depth was 0, and chDB pending was 0. The event-loop monitor had
-already observed a 128.7ms delay. In the 250-client run, the slowest mutation was `deltaPublish
-o-246` at index 146 with 235.8ms client latency, while the worker mutation took 2.01ms, fanout took
-1.95ms, stream offer took 0.47ms, websocket write max was 0.32ms, and event-loop delay reached
-208.8ms at that sample.
-
-The current tail-latency explanation is therefore event-loop/GC/scheduler delay, plus websocket
-protocol queue wait under 250 clients, not chDB, active-plan build, delta construction, worker fanout,
-or encode/write cost. This is acceptable for the current alpha soak because p99 stays under the
-current report-only baseline, cleanup is clean, and no backpressure/retry occurred. Treat repeated
-max spikes above the product latency budget as a follow-up GC/event-loop profiling task.
+Top slow samples still point away from query math and websocket encode/write cost. In-process
+250-client runs are dominated by runtime event-loop delay and protocol queue wait. The isolated
+transport worker cleanly separates socket pressure (`transportEventLoopDelayMaxMs` stayed around
+14ms), but it is not a default latency win on this machine: 100 clients reduced protocol queue-wait
+max, 250 clients stayed roughly comparable, and 500 clients exposed runtime-side subscription fanout
+and stream-offer pressure before the transport worker. Treat isolated transport as an operational
+profiling/scaling mode for now, not as proof that socket isolation alone fixes high-client tail
+latency.
 
 The summary currently records `groupedRefreshCountsAvailable=false`; grouped stale pressure is still
 visible through subscription lag/status counts, but grouped refresh pending/in-flight counters are

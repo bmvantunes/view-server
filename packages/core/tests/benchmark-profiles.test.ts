@@ -23,6 +23,12 @@ describe("benchmark profiles", () => {
     expect(listBenchmarkProfiles().map((profile) => profile.name)).toEqual(benchmarkProfileNames);
   });
 
+  it("resolves every named benchmark profile from the CLI lookup", () => {
+    for (const name of benchmarkProfileNames) {
+      expect(getBenchmarkProfile(name)?.name).toBe(name);
+    }
+  });
+
   it("keeps firehose CI thresholds report-only and artifact-backed", () => {
     const profile = benchmarkProfiles["firehose-ci"];
     expect(profile.ciSafe).toBe(true);

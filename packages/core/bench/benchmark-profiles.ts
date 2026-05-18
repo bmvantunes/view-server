@@ -85,6 +85,18 @@ const runtimeWebsocketAttributionMetrics = [
   "websocketMaxWriteMs",
   "websocketMaxProtocolOfferMs",
   "websocketMaxProtocolQueueWaitMs",
+  "transportActiveClientsAfterCleanup",
+  "transportTotalMessages",
+  "transportTotalBytes",
+  "transportTotalEncodeMs",
+  "transportTotalWriteMs",
+  "transportTotalProtocolQueueWaitMs",
+  "transportMaxQueueDepthMessages",
+  "transportMaxQueueDepthBytes",
+  "transportMaxProtocolQueueWaitMs",
+  "transportEventLoopDelayP95Ms",
+  "transportEventLoopDelayP99Ms",
+  "transportEventLoopDelayMaxMs",
   "eventLoopDelayP95Ms",
   "eventLoopDelayP99Ms",
   "eventLoopDelayMaxMs",
@@ -183,6 +195,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
           VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS: "10",
           VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS: "60000",
           VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL: "10",
+          VS_RUNTIME_WEBSOCKET_TRANSPORT_MODE: "in-process",
         },
       },
     ],
@@ -277,6 +290,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
           VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS: "50",
           VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS: "120000",
           VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL: "25",
+          VS_RUNTIME_WEBSOCKET_TRANSPORT_MODE: "in-process",
         },
       },
     ],
@@ -307,6 +321,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
           VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS: "50",
           VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS: "120000",
           VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL: "25",
+          VS_RUNTIME_WEBSOCKET_TRANSPORT_MODE: "in-process",
         },
       },
       {
@@ -324,6 +339,61 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
           VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS: "50",
           VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS: "180000",
           VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL: "25",
+          VS_RUNTIME_WEBSOCKET_TRANSPORT_MODE: "in-process",
+        },
+      },
+      {
+        name: "runtime-websocket-soak-100-client-isolated",
+        description:
+          "Real websocket 100-client runtime soak with isolated transport worker and fanout attribution.",
+        script: "bench/runtime-websocket-soak.bench.ts",
+        artifactFile: "runtime-websocket-soak-100-client-isolated.json",
+        metrics: runtimeWebsocketAttributionMetrics,
+        env: {
+          VS_RUNTIME_WEBSOCKET_SOAK_ROWS: "10000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS: "80",
+          VS_RUNTIME_WEBSOCKET_SOAK_GROUPED_CLIENTS: "20",
+          VS_RUNTIME_WEBSOCKET_SOAK_MUTATIONS: "1000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS: "50",
+          VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS: "120000",
+          VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL: "25",
+          VS_RUNTIME_WEBSOCKET_TRANSPORT_MODE: "isolated",
+        },
+      },
+      {
+        name: "runtime-websocket-soak-250-client-isolated",
+        description:
+          "Real websocket 250-client runtime soak with isolated transport worker and fanout attribution.",
+        script: "bench/runtime-websocket-soak.bench.ts",
+        artifactFile: "runtime-websocket-soak-250-client-isolated.json",
+        metrics: runtimeWebsocketAttributionMetrics,
+        env: {
+          VS_RUNTIME_WEBSOCKET_SOAK_ROWS: "10000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS: "200",
+          VS_RUNTIME_WEBSOCKET_SOAK_GROUPED_CLIENTS: "50",
+          VS_RUNTIME_WEBSOCKET_SOAK_MUTATIONS: "1000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS: "50",
+          VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS: "180000",
+          VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL: "25",
+          VS_RUNTIME_WEBSOCKET_TRANSPORT_MODE: "isolated",
+        },
+      },
+      {
+        name: "runtime-websocket-soak-500-client-isolated",
+        description:
+          "Manual 500-client runtime soak for isolated transport tail-latency exploration.",
+        script: "bench/runtime-websocket-soak.bench.ts",
+        artifactFile: "runtime-websocket-soak-500-client-isolated.json",
+        metrics: runtimeWebsocketAttributionMetrics,
+        env: {
+          VS_RUNTIME_WEBSOCKET_SOAK_ROWS: "10000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS: "400",
+          VS_RUNTIME_WEBSOCKET_SOAK_GROUPED_CLIENTS: "100",
+          VS_RUNTIME_WEBSOCKET_SOAK_MUTATIONS: "1000",
+          VS_RUNTIME_WEBSOCKET_SOAK_RECONNECT_CLIENTS: "50",
+          VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS: "240000",
+          VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL: "25",
+          VS_RUNTIME_WEBSOCKET_TRANSPORT_MODE: "isolated",
         },
       },
     ],
@@ -627,6 +697,8 @@ export function getBenchmarkProfile(name: string): BenchmarkProfile | undefined 
       return benchmarkProfiles["ci-smoke"];
     case "firehose-ci":
       return benchmarkProfiles["firehose-ci"];
+    case "websocket-fanout":
+      return benchmarkProfiles["websocket-fanout"];
     case "dev-fast":
       return benchmarkProfiles["dev-fast"];
     case "rc-1m":

@@ -14,6 +14,7 @@ export default defineConfig({
       "src/snapshot.ts",
       "src/kafka/platformatic-consumer.ts",
       "src/rpc/websocket.ts",
+      "src/rpc/websocket-transport-worker-entry.ts",
       "src/snapshot/chdb-backend.ts",
       "src/worker/topic-worker-node-host.ts",
       "src/worker/topic-worker-node-entry.ts",

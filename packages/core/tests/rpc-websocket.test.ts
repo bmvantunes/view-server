@@ -18,7 +18,14 @@ import { defineConfig } from "../src/config/index.ts";
 import { backpressureExceeded, transportError, type ViewServerError } from "../src/errors.ts";
 import type { RawQuery, RuntimeRow, SubscriptionEvent } from "../src/protocol/index.ts";
 import { ViewServerRpcs } from "../src/rpc/index.ts";
-import { layerViewServerWebsocketServer, makeNodeWebsocketClient } from "../src/rpc/websocket.ts";
+import {
+  layerViewServerIsolatedWebsocketServer,
+  layerViewServerWebsocketServer,
+  makeNodeWebsocketClient,
+  ViewServerIsolatedWebsocketTransport,
+  ViewServerWebsocketFanoutMetrics,
+  type WebsocketFanoutMetricsSnapshot,
+} from "../src/rpc/websocket.ts";
 import {
   layerInternalTestingViewServerRuntime,
   layerViewServerRuntime,
@@ -452,6 +459,26 @@ function isRuntimeRow(value: unknown): value is RuntimeRow {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function waitForWebsocketMetric(
+  metrics: { readonly snapshot: Effect.Effect<WebsocketFanoutMetricsSnapshot> },
+  predicate: (snapshot: WebsocketFanoutMetricsSnapshot) => boolean,
+) {
+  return Effect.gen(function* () {
+    let lastSnapshot: WebsocketFanoutMetricsSnapshot | undefined;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const snapshot = yield* metrics.snapshot;
+      lastSnapshot = snapshot;
+      if (predicate(snapshot)) {
+        return snapshot;
+      }
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)));
+    }
+    return yield* Effect.die(
+      new Error(`Timed out waiting for websocket metrics: ${JSON.stringify(lastSnapshot)}`),
+    );
+  });
+}
+
 describe("Effect RPC websocket", () => {
   it.effect("serves health and readiness probes beside the websocket route", () =>
     Effect.gen(function* () {
@@ -716,6 +743,60 @@ describe("Effect RPC websocket", () => {
       }).pipe(Effect.scoped),
     );
   });
+
+  it.effect("serves generated clients through isolated websocket transport worker", () =>
+    Effect.gen(function* () {
+      const serverLayer = layerViewServerIsolatedWebsocketServer({ path: "/rpc" }).pipe(
+        Layer.provide(
+          layerViewServerRuntime(config, {
+            initialRows: {
+              orders: [{ id: "o-1", symbol: "AAPL", price: 100 }],
+            },
+          }),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const address = yield* ViewServerIsolatedWebsocketTransport;
+        const metrics = yield* ViewServerWebsocketFanoutMetrics;
+        const client = yield* makeNodeWebsocketClient<typeof config>(address.url, config);
+        const firstSnapshot = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+        const firstDelta = yield* Deferred.make<SubscriptionEvent<readonly RuntimeRow[]>>();
+
+        const result = yield* client.query("orders", query).pipe(Effect.timeout("1 second"));
+        expect(result.totalRows).toBe(1);
+        expect(result.rows).toEqual([{ id: "o-1", price: 100 }]);
+
+        const subscription = yield* client.subscribe("orders", query, (event) => {
+          if (event.type === "snapshot") {
+            return Deferred.succeed(firstSnapshot, event).pipe(Effect.asVoid);
+          }
+          return Deferred.succeed(firstDelta, event).pipe(Effect.asVoid);
+        });
+        const snapshot = yield* Deferred.await(firstSnapshot).pipe(Effect.timeout("1 second"));
+        expect(snapshot.type).toBe("snapshot");
+        expect(snapshot.requestId).toBe(subscription.requestId);
+
+        yield* client
+          .publish("orders", { id: "o-2", symbol: "MSFT", price: 200 })
+          .pipe(Effect.timeout("1 second"));
+        const delta = yield* Deferred.await(firstDelta).pipe(Effect.timeout("1 second"));
+        expect(delta.type).toBe("delta");
+        expect(delta.requestId).toBe(subscription.requestId);
+
+        yield* subscription.close.pipe(Effect.timeout("1 second"), Effect.orDie);
+        const healthAfterClose = yield* client.health().pipe(Effect.timeout("1 second"));
+        expect(healthAfterClose.topics.orders?.subscribers).toBe(0);
+        const cleanupMetrics = yield* waitForWebsocketMetric(
+          metrics,
+          (snapshot) => snapshot.activeClients === 0,
+        ).pipe(Effect.timeout("5 seconds"), Effect.orDie);
+        expect(cleanupMetrics.transportMode).toBe("isolated");
+        expect(cleanupMetrics.activeClients).toBe(0);
+        expect(cleanupMetrics.totalMessages).toBeGreaterThan(0);
+      }).pipe(Effect.provide(serverLayer));
+    }).pipe(Effect.scoped),
+  );
 
   it.effect("multiplexes multiple subscriptions over one websocket client", () =>
     Effect.gen(function* () {

@@ -86,7 +86,8 @@
     "check": "vp check"
   },
   "dependencies": {
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "ws": "catalog:"
   },
   "devDependencies": {
     "@effect/platform-node": "catalog:",
@@ -94,6 +95,7 @@
     "@effect/vitest": "catalog:",
     "@platformatic/kafka": "catalog:",
     "@types/node": "catalog:",
+    "@types/ws": "catalog:",
     "@vitest/coverage-v8": "catalog:",
     "chdb": "catalog:",
     "typescript": "catalog:",

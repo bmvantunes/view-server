@@ -18,16 +18,30 @@ import { layerViewServerHealthRoutes } from "../server/index.ts";
 import { layerBatchedWebsocketProtocolRoute } from "./websocket-fanout.ts";
 import { ViewServerRpcs } from "./rpcs.ts";
 import { ViewServerHandlersLive } from "./server.ts";
+import {
+  layerIsolatedWebsocketProtocol,
+  type IsolatedWebsocketTransportOptions,
+} from "./websocket-isolated-transport.ts";
 export {
   ViewServerWebsocketFanoutMetrics,
   type WebsocketFanoutMetricsSnapshot,
+  type WebsocketTransportEventLoopDelayStats,
 } from "./websocket-fanout.ts";
+export {
+  ViewServerIsolatedWebsocketTransport,
+  type IsolatedWebsocketTransportOptions,
+  type ViewServerIsolatedWebsocketTransportAddress,
+} from "./websocket-isolated-transport.ts";
 
 export const layerViewServerWebsocketProtocolRoute = (path: HttpRouter.PathInput = "/rpc") =>
   layerBatchedWebsocketProtocolRoute(path);
 
 export const layerViewServerWebsocketProtocol = (path: HttpRouter.PathInput = "/rpc") =>
   layerViewServerWebsocketProtocolRoute(path).pipe(Layer.provide(HttpRouter.layer));
+
+export const layerViewServerIsolatedWebsocketProtocol = (
+  options: IsolatedWebsocketTransportOptions = {},
+) => layerIsolatedWebsocketProtocol(options);
 
 export const layerViewServerWebsocketServer = (path: HttpRouter.PathInput = "/rpc") => {
   const routes = Layer.mergeAll(
@@ -41,6 +55,15 @@ export const layerViewServerWebsocketServer = (path: HttpRouter.PathInput = "/rp
     Layer.provide(RpcSerialization.layerNdjson),
   );
 };
+
+export const layerViewServerIsolatedWebsocketServer = (
+  options: IsolatedWebsocketTransportOptions = {},
+) =>
+  RpcServer.layer(ViewServerRpcs).pipe(
+    Layer.provide(ViewServerHandlersLive),
+    Layer.provideMerge(layerViewServerIsolatedWebsocketProtocol(options)),
+    Layer.provide(RpcSerialization.layerNdjson),
+  );
 
 export const layerNodeWebsocketRpcClient = (url: string) =>
   RpcClient.layerProtocolSocket().pipe(
@@ -58,22 +81,26 @@ export function makeNodeWebsocketClient<TConfig extends ViewServerConfig>(
 }
 
 function nodeWebsocketTransport(url: string): ViewServerRpcTransport {
-  const clientLayer = layerNodeWebsocketRpcClient(url);
   const runRpc = <A>(
     run: (rpcClient: RpcClientForWebsocket) => Effect.Effect<A, ViewServerError | RpcClientError>,
-  ): Effect.Effect<A, ViewServerError | RpcClientError> =>
-    Effect.scoped(
+  ): Effect.Effect<A, ViewServerError | RpcClientError> => {
+    const clientLayer = layerNodeWebsocketRpcClient(url);
+    return Effect.scoped(
       RpcClient.make(ViewServerRpcs).pipe(Effect.flatMap((rpcClient) => run(rpcClient))),
     ).pipe(Effect.provide(clientLayer));
+  };
 
   return {
     Query: (payload) => runRpc((rpcClient) => rpcClient.Query(payload)),
     Subscribe: (payload) =>
-      RpcClient.make(ViewServerRpcs).pipe(
-        Effect.map((rpcClient) => rpcClient.Subscribe(payload)),
-        Stream.unwrap,
-        Stream.provide(clientLayer),
-      ),
+      Stream.suspend(() => {
+        const clientLayer = layerNodeWebsocketRpcClient(url);
+        return RpcClient.make(ViewServerRpcs).pipe(
+          Effect.map((rpcClient) => rpcClient.Subscribe(payload)),
+          Stream.unwrap,
+          Stream.provide(clientLayer),
+        );
+      }),
     Unsubscribe: (payload) => runRpc((rpcClient) => rpcClient.Unsubscribe(payload)),
     Publish: (payload) => runRpc((rpcClient) => rpcClient.Publish(payload)),
     DeltaPublish: (payload) => runRpc((rpcClient) => rpcClient.DeltaPublish(payload)),

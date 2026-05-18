@@ -15,6 +15,7 @@ import { Buffer } from "node:buffer";
 import { performance } from "node:perf_hooks";
 
 export type WebsocketFanoutMetricsSnapshot = {
+  readonly transportMode: "in-process" | "isolated";
   readonly activeClients: number;
   readonly totalMessages: number;
   readonly totalBatches: number;
@@ -31,9 +32,20 @@ export type WebsocketFanoutMetricsSnapshot = {
   readonly maxWriteMs: number;
   readonly maxProtocolOfferMs: number;
   readonly maxProtocolQueueWaitMs: number;
+  readonly transportEventLoopDelay: WebsocketTransportEventLoopDelayStats;
 };
 
-type WebsocketFanoutMetricsShape = {
+export type WebsocketTransportEventLoopDelayStats = {
+  readonly minMs: number;
+  readonly meanMs: number;
+  readonly maxMs: number;
+  readonly stddevMs: number;
+  readonly p50Ms: number;
+  readonly p95Ms: number;
+  readonly p99Ms: number;
+};
+
+export type WebsocketFanoutMetricsShape = {
   readonly clientConnected: (clientId: number) => void;
   readonly clientDisconnected: (clientId: number) => void;
   readonly recordQueued: (clientId: number, queuedMessages: number) => void;
@@ -318,7 +330,7 @@ function decodeClientMessages(
   }
 }
 
-function withRequestHeaders(
+export function withRequestHeaders(
   message: FromClientEncoded,
   headers: ReadonlyArray<[string, string]> | undefined,
 ): FromClientEncoded {
@@ -330,7 +342,7 @@ function withRequestHeaders(
     : message;
 }
 
-function encodeServerBatch(
+export function encodeServerBatch(
   parser: RpcSerialization.Parser,
   batch: readonly FromServerEncoded[],
 ): Uint8Array | string | undefined {
@@ -352,11 +364,11 @@ function writeDefect(
   return encoded === undefined ? Effect.void : writeRaw(encoded);
 }
 
-function payloadBytes(payload: Uint8Array | string): number {
+export function payloadBytes(payload: Uint8Array | string): number {
   return typeof payload === "string" ? Buffer.byteLength(payload) : payload.byteLength;
 }
 
-function isFromClientEncoded(value: unknown): value is FromClientEncoded {
+export function isFromClientEncoded(value: unknown): value is FromClientEncoded {
   if (!isRecord(value)) {
     return false;
   }
@@ -378,7 +390,10 @@ function isFromClientEncoded(value: unknown): value is FromClientEncoded {
   }
 }
 
-function makeWebsocketFanoutMetrics(): WebsocketFanoutMetricsShape {
+export function makeWebsocketFanoutMetrics(
+  transportMode: WebsocketFanoutMetricsSnapshot["transportMode"] = "in-process",
+  transportEventLoopDelay: () => WebsocketTransportEventLoopDelayStats = emptyTransportEventLoopDelayStats,
+): WebsocketFanoutMetricsShape {
   const clientQueuedMessages = new Map<number, number>();
   let totalMessages = 0;
   let totalBatches = 0;
@@ -427,6 +442,7 @@ function makeWebsocketFanoutMetrics(): WebsocketFanoutMetricsShape {
       clientQueuedMessages.set(sample.clientId, 0);
     },
     snapshot: Effect.sync(() => ({
+      transportMode,
       activeClients: clientQueuedMessages.size,
       totalMessages,
       totalBatches,
@@ -443,11 +459,24 @@ function makeWebsocketFanoutMetrics(): WebsocketFanoutMetricsShape {
       maxWriteMs,
       maxProtocolOfferMs,
       maxProtocolQueueWaitMs,
+      transportEventLoopDelay: transportEventLoopDelay(),
     })),
   };
 }
 
-function serverBatchQueueWaitMs(batch: readonly FromServerEncoded[], nowMs: number): number {
+export function emptyTransportEventLoopDelayStats(): WebsocketTransportEventLoopDelayStats {
+  return {
+    minMs: 0,
+    meanMs: 0,
+    maxMs: 0,
+    stddevMs: 0,
+    p50Ms: 0,
+    p95Ms: 0,
+    p99Ms: 0,
+  };
+}
+
+export function serverBatchQueueWaitMs(batch: readonly FromServerEncoded[], nowMs: number): number {
   let max = 0;
   for (const response of batch) {
     const responseMax = responseQueueWaitMs(response, nowMs);

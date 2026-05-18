@@ -20,8 +20,10 @@ import type {
   SubscriptionEvent,
 } from "../src/protocol/index.ts";
 import {
+  layerViewServerIsolatedWebsocketServer,
   layerViewServerWebsocketServer,
   makeNodeWebsocketClient,
+  ViewServerIsolatedWebsocketTransport,
   type WebsocketFanoutMetricsSnapshot,
   ViewServerWebsocketFanoutMetrics,
 } from "../src/rpc/websocket.ts";
@@ -94,249 +96,265 @@ describe("runtime websocket soak", () => {
             eventLoopDelay.disable();
           }),
         );
+        const transportMode = websocketTransportMode();
         const initialRows = Array.from({ length: shape.rows }, (_, index) => orderRow(index));
-        const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
-          Layer.provide(
-            layerViewServerRuntime(runtimeWebsocketSoakConfig, {
-              initialRows: {
-                orders: initialRows,
+        const runtimeLayer = layerViewServerRuntime(runtimeWebsocketSoakConfig, {
+          initialRows: {
+            orders: initialRows,
+          },
+        });
+        const runSoak = (url: string) =>
+          Effect.gen(function* () {
+            const websocketFanoutMetrics = yield* ViewServerWebsocketFanoutMetrics;
+            const publisher = yield* makeNodeWebsocketClient(url, runtimeWebsocketSoakConfig);
+            const clients: SoakClient[] = [];
+            let activeClients: SoakClient[] = [];
+            let reconnects = 0;
+            let nextId = shape.rows;
+            let deleteCursor = 0;
+            const mutationLatenciesMs: number[] = [];
+            const topSlowMutations: SlowMutationSample[] = [];
+            let reconnectActive = false;
+            let mutationsDuringReconnect = 0;
+            let reconnectStartedAtMs: number | null = null;
+            let reconnectCompletedAtMs: number | null = null;
+            let reconnectFiber: Fiber.Fiber<ReconnectResult, ViewServerError> | undefined;
+            const observed = observedMetrics();
+
+            const subscriptionStartedAt = performance.now();
+            const descriptors = clientDescriptors(shape);
+            const connected = yield* Effect.forEach(
+              descriptors,
+              (descriptor) => connectSoakClient(url, descriptor, undefined),
+              { concurrency: shape.connectConcurrency },
+            );
+            clients.push(...connected);
+            activeClients = connected;
+            const subscriptionSetupMs = performance.now() - subscriptionStartedAt;
+
+            const ready = yield* waitForClientHealth(
+              publisher,
+              (health) => health.topics.orders?.subscribers === activeClients.length,
+              "initial subscriptions",
+            );
+            recordHealthObservation(observed, ready);
+            expect(ready.topics.orders?.chdbStatus).toBe("ready");
+            expect(ready.topics.orders?.chdbPendingRequests).toBe(0);
+
+            const mutationStartedAt = performance.now();
+            for (let index = 0; index < shape.mutations; index++) {
+              if (
+                index === Math.floor(shape.mutations / 2) &&
+                shape.reconnectClients > 0 &&
+                reconnectFiber === undefined
+              ) {
+                reconnectActive = true;
+                reconnectStartedAtMs = roundMs(performance.now() - startedAt);
+                reconnectFiber = yield* reconnectSoakClients({
+                  url,
+                  healthClient: publisher,
+                  activeClients,
+                  reconnectCount: shape.reconnectClients,
+                  concurrency: shape.connectConcurrency,
+                }).pipe(
+                  Effect.ensuring(
+                    Effect.sync(() => {
+                      reconnectActive = false;
+                      reconnectCompletedAtMs = roundMs(performance.now() - startedAt);
+                    }),
+                  ),
+                  Effect.forkScoped,
+                );
+              }
+
+              if (reconnectActive) {
+                mutationsDuringReconnect += 1;
+              }
+              const operation = mutationOperation(index, nextId, deleteCursor, shape.rows);
+              const operationStartedAt = performance.now();
+              yield* applyMixedMutation(publisher, operation);
+              const latencyMs = performance.now() - operationStartedAt;
+              mutationLatenciesMs.push(latencyMs);
+              yield* recordSlowMutationSample({
+                samples: topSlowMutations,
+                client: publisher,
+                websocketFanoutMetrics,
+                observed,
+                eventLoopDelay,
+                index,
+                operation,
+                latencyMs,
+                reconnectActive,
+                elapsedMs: performance.now() - startedAt,
+                events: totalEvents(clients),
+                payloadBytes: totalPayloadBytes(clients),
+              });
+              if (index % shape.healthSampleInterval === 0) {
+                const health = yield* publisher.health();
+                recordHealthObservation(observed, health);
+              }
+              if (index % 10 === 0) {
+                yield* Effect.yieldNow;
+              }
+              if (operation.type === "publish") {
+                nextId += 1;
+              }
+              if (operation.type === "deleteById") {
+                deleteCursor += 1;
+              }
+            }
+            if (reconnectFiber !== undefined) {
+              const reconnectResult = yield* Fiber.join(reconnectFiber);
+              activeClients = reconnectResult.activeClients;
+              clients.push(...reconnectResult.reconnected);
+              reconnects += reconnectResult.reconnected.length;
+            }
+            const mutationLoopMs = performance.now() - mutationStartedAt;
+
+            const settled = yield* waitForClientHealth(
+              publisher,
+              (health) => {
+                const topic = health.topics.orders;
+                return (
+                  topic !== undefined &&
+                  topic.subscribers === activeClients.length &&
+                  topic.queueDepth === 0 &&
+                  topic.activePlanBuildQueueDepth === 0 &&
+                  topic.activePlanBuildingCount === 0 &&
+                  topic.activePlanPendingCount === 0 &&
+                  topic.chdbPendingRequests === 0
+                );
               },
-            }),
-          ),
+              "post-mutation settle",
+            );
+            recordHealthObservation(observed, settled);
+            expect(settled.ok).toBe(true);
+            expect(settled.topics.orders?.chdbStatus).toBe("ready");
+            expect(settled.topics.__view_server_health?.rows).toBeGreaterThan(0);
+
+            for (const client of activeClients) {
+              expect(
+                client.requestIds.every((requestId) => requestId === client.subscription.requestId),
+              ).toBe(true);
+            }
+
+            const cleanupStartedAt = performance.now();
+            yield* Effect.forEach(activeClients, (client) => client.subscription.close, {
+              discard: true,
+              concurrency: shape.connectConcurrency,
+            });
+            const released = yield* waitForClientHealth(
+              publisher,
+              (health) => {
+                const topic = health.topics.orders;
+                return (
+                  topic !== undefined &&
+                  topic.subscribers === 0 &&
+                  topic.queueDepth === 0 &&
+                  topic.maxSubscriptionLagVersions === 0 &&
+                  topic.totalSubscriptionLagVersions === 0 &&
+                  topic.activePlanCount === 0 &&
+                  topic.activeViewCount === 0 &&
+                  topic.activePlanBuildQueueDepth === 0 &&
+                  topic.activePlanBuildingCount === 0 &&
+                  topic.activePlanPendingCount === 0 &&
+                  topic.chdbPendingRequests === 0
+                );
+              },
+              "cleanup",
+            );
+            recordHealthObservation(observed, released);
+            const cleanupMs = performance.now() - cleanupStartedAt;
+            expect(released.topics.orders?.activePlanIndexEstimatedBytes).toBe(0);
+
+            const events = totalEvents(clients);
+            const payloadBytes = totalPayloadBytes(clients);
+            const lifecycle = totalLifecycle(clients);
+            const websocketFanout = yield* waitForWebsocketFanout(
+              websocketFanoutMetrics,
+              (snapshot) => snapshot.activeClients === 0,
+              "cleanup",
+            );
+            expect(websocketFanout.activeClients).toBe(0);
+            expect(websocketFanout.totalMessages).toBeGreaterThan(0);
+            expect(websocketFanout.maxClientQueuedBytes).toBeGreaterThan(0);
+            expect(websocketFanout.maxBatchBytes).toBeGreaterThan(0);
+            expect(events.snapshots).toBeGreaterThanOrEqual(descriptors.length + reconnects);
+            expect(events.deltas + events.status).toBeGreaterThan(0);
+
+            const summary: RuntimeWebsocketSoakSummary = {
+              shape,
+              transportMode,
+              durationMs: roundMs(performance.now() - startedAt),
+              subscriptionSetupMs: roundMs(subscriptionSetupMs),
+              mutationLoopMs: roundMs(mutationLoopMs),
+              cleanupMs: roundMs(cleanupMs),
+              mutationLatencyMs: latencyStats(mutationLatenciesMs),
+              maxSubscriptionLagVersionsBeforeCleanup:
+                settled.topics.orders?.maxSubscriptionLagVersions ?? -1,
+              totalSubscriptionLagVersionsBeforeCleanup:
+                settled.topics.orders?.totalSubscriptionLagVersions ?? -1,
+              chdbBackendVersionBeforeCleanup: settled.topics.orders?.chdbBackendVersion ?? "0",
+              workerVersionBeforeCleanup: settled.topics.orders?.version ?? "0",
+              finalRows: released.topics.orders?.rows ?? 0,
+              finalVersion: released.topics.orders?.version ?? "0",
+              chdbBackendVersionAfterCleanup: released.topics.orders?.chdbBackendVersion ?? "0",
+              subscribersAfterCleanup: released.topics.orders?.subscribers ?? -1,
+              activePlanCountAfterCleanup: released.topics.orders?.activePlanCount ?? -1,
+              activeViewCountAfterCleanup: released.topics.orders?.activeViewCount ?? -1,
+              activePlanBuildQueueDepthAfterCleanup:
+                released.topics.orders?.activePlanBuildQueueDepth ?? -1,
+              activePlanBuildingCountAfterCleanup:
+                released.topics.orders?.activePlanBuildingCount ?? -1,
+              activePlanPendingCountAfterCleanup:
+                released.topics.orders?.activePlanPendingCount ?? -1,
+              queueDepthAfterCleanup: released.topics.orders?.queueDepth ?? -1,
+              maxSubscriptionLagVersionsAfterCleanup:
+                released.topics.orders?.maxSubscriptionLagVersions ?? -1,
+              totalSubscriptionLagVersionsAfterCleanup:
+                released.topics.orders?.totalSubscriptionLagVersions ?? -1,
+              chdbStatusAfterCleanup: released.topics.orders?.chdbStatus ?? "stopped",
+              chdbPendingRequestsAfterCleanup: released.topics.orders?.chdbPendingRequests ?? -1,
+              events,
+              payloadBytes,
+              retries: lifecycle.retries,
+              backpressureErrors: lifecycle.backpressureErrors,
+              reconnects,
+              reconnectWindow: {
+                startedAtMs: reconnectStartedAtMs,
+                completedAtMs: reconnectCompletedAtMs,
+                mutationsDuringReconnect,
+              },
+              observed,
+              websocketFanout,
+              eventLoopDelay: eventLoopDelayStats(eventLoopDelay),
+              groupedRefreshCountsAvailable: false,
+              topSlowMutations,
+            };
+            yield* writeRuntimeWebsocketSoakSummary(summary);
+            yield* Effect.logInfo(
+              `runtime websocket soak transport=${transportMode} clients=${descriptors.length} reconnects=${reconnects} mutations=${shape.mutations} snapshots=${events.snapshots} deltas=${events.deltas} status=${events.status} mutationP99Ms=${summary.mutationLatencyMs.p99Ms}`,
+            );
+          });
+
+        if (transportMode === "isolated") {
+          const serverLayer = layerViewServerIsolatedWebsocketServer({ path: "/rpc" }).pipe(
+            Layer.provide(runtimeLayer),
+          );
+          yield* Effect.gen(function* () {
+            const address = yield* ViewServerIsolatedWebsocketTransport;
+            yield* runSoak(address.url);
+          }).pipe(Effect.provide(serverLayer));
+          return;
+        }
+
+        const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
+          Layer.provide(runtimeLayer),
         );
         const testServerLayer = serverLayer.pipe(Layer.provideMerge(NodeHttpServer.layerTest));
-
         yield* Effect.gen(function* () {
           const url = yield* websocketUrl();
-          const websocketFanoutMetrics = yield* ViewServerWebsocketFanoutMetrics;
-          const publisher = yield* makeNodeWebsocketClient(url, runtimeWebsocketSoakConfig);
-          const clients: SoakClient[] = [];
-          let activeClients: SoakClient[] = [];
-          let reconnects = 0;
-          let nextId = shape.rows;
-          let deleteCursor = 0;
-          const mutationLatenciesMs: number[] = [];
-          const topSlowMutations: SlowMutationSample[] = [];
-          let reconnectActive = false;
-          let mutationsDuringReconnect = 0;
-          let reconnectStartedAtMs: number | null = null;
-          let reconnectCompletedAtMs: number | null = null;
-          let reconnectFiber: Fiber.Fiber<ReconnectResult, ViewServerError> | undefined;
-          const observed = observedMetrics();
-
-          const subscriptionStartedAt = performance.now();
-          const descriptors = clientDescriptors(shape);
-          const connected = yield* Effect.forEach(
-            descriptors,
-            (descriptor) => connectSoakClient(url, descriptor, undefined),
-            { concurrency: shape.connectConcurrency },
-          );
-          clients.push(...connected);
-          activeClients = connected;
-          const subscriptionSetupMs = performance.now() - subscriptionStartedAt;
-
-          const ready = yield* waitForClientHealth(
-            publisher,
-            (health) => health.topics.orders?.subscribers === activeClients.length,
-            "initial subscriptions",
-          );
-          recordHealthObservation(observed, ready);
-          expect(ready.topics.orders?.chdbStatus).toBe("ready");
-          expect(ready.topics.orders?.chdbPendingRequests).toBe(0);
-
-          const mutationStartedAt = performance.now();
-          for (let index = 0; index < shape.mutations; index++) {
-            if (
-              index === Math.floor(shape.mutations / 2) &&
-              shape.reconnectClients > 0 &&
-              reconnectFiber === undefined
-            ) {
-              reconnectActive = true;
-              reconnectStartedAtMs = roundMs(performance.now() - startedAt);
-              reconnectFiber = yield* reconnectSoakClients({
-                url,
-                healthClient: publisher,
-                activeClients,
-                reconnectCount: shape.reconnectClients,
-                concurrency: shape.connectConcurrency,
-              }).pipe(
-                Effect.ensuring(
-                  Effect.sync(() => {
-                    reconnectActive = false;
-                    reconnectCompletedAtMs = roundMs(performance.now() - startedAt);
-                  }),
-                ),
-                Effect.forkScoped,
-              );
-            }
-
-            if (reconnectActive) {
-              mutationsDuringReconnect += 1;
-            }
-            const operation = mutationOperation(index, nextId, deleteCursor, shape.rows);
-            const operationStartedAt = performance.now();
-            yield* applyMixedMutation(publisher, operation);
-            const latencyMs = performance.now() - operationStartedAt;
-            mutationLatenciesMs.push(latencyMs);
-            yield* recordSlowMutationSample({
-              samples: topSlowMutations,
-              client: publisher,
-              websocketFanoutMetrics,
-              observed,
-              eventLoopDelay,
-              index,
-              operation,
-              latencyMs,
-              reconnectActive,
-              elapsedMs: performance.now() - startedAt,
-              events: totalEvents(clients),
-              payloadBytes: totalPayloadBytes(clients),
-            });
-            if (index % shape.healthSampleInterval === 0) {
-              const health = yield* publisher.health();
-              recordHealthObservation(observed, health);
-            }
-            if (index % 10 === 0) {
-              yield* Effect.yieldNow;
-            }
-            if (operation.type === "publish") {
-              nextId += 1;
-            }
-            if (operation.type === "deleteById") {
-              deleteCursor += 1;
-            }
-          }
-          if (reconnectFiber !== undefined) {
-            const reconnectResult = yield* Fiber.join(reconnectFiber);
-            activeClients = reconnectResult.activeClients;
-            clients.push(...reconnectResult.reconnected);
-            reconnects += reconnectResult.reconnected.length;
-          }
-          const mutationLoopMs = performance.now() - mutationStartedAt;
-
-          const settled = yield* waitForClientHealth(
-            publisher,
-            (health) => {
-              const topic = health.topics.orders;
-              return (
-                topic !== undefined &&
-                topic.subscribers === activeClients.length &&
-                topic.queueDepth === 0 &&
-                topic.activePlanBuildQueueDepth === 0 &&
-                topic.activePlanBuildingCount === 0 &&
-                topic.activePlanPendingCount === 0 &&
-                topic.chdbPendingRequests === 0
-              );
-            },
-            "post-mutation settle",
-          );
-          recordHealthObservation(observed, settled);
-          expect(settled.ok).toBe(true);
-          expect(settled.topics.orders?.chdbStatus).toBe("ready");
-          expect(settled.topics.__view_server_health?.rows).toBeGreaterThan(0);
-
-          for (const client of activeClients) {
-            expect(
-              client.requestIds.every((requestId) => requestId === client.subscription.requestId),
-            ).toBe(true);
-          }
-
-          const cleanupStartedAt = performance.now();
-          yield* Effect.forEach(activeClients, (client) => client.subscription.close, {
-            discard: true,
-            concurrency: shape.connectConcurrency,
-          });
-          const released = yield* waitForClientHealth(
-            publisher,
-            (health) => {
-              const topic = health.topics.orders;
-              return (
-                topic !== undefined &&
-                topic.subscribers === 0 &&
-                topic.queueDepth === 0 &&
-                topic.maxSubscriptionLagVersions === 0 &&
-                topic.totalSubscriptionLagVersions === 0 &&
-                topic.activePlanCount === 0 &&
-                topic.activeViewCount === 0 &&
-                topic.activePlanBuildQueueDepth === 0 &&
-                topic.activePlanBuildingCount === 0 &&
-                topic.activePlanPendingCount === 0 &&
-                topic.chdbPendingRequests === 0
-              );
-            },
-            "cleanup",
-          );
-          recordHealthObservation(observed, released);
-          const cleanupMs = performance.now() - cleanupStartedAt;
-          expect(released.topics.orders?.activePlanIndexEstimatedBytes).toBe(0);
-
-          const events = totalEvents(clients);
-          const payloadBytes = totalPayloadBytes(clients);
-          const lifecycle = totalLifecycle(clients);
-          const websocketFanout = yield* waitForWebsocketFanout(
-            websocketFanoutMetrics,
-            (snapshot) => snapshot.activeClients === 0,
-            "cleanup",
-          );
-          expect(websocketFanout.activeClients).toBe(0);
-          expect(websocketFanout.totalMessages).toBeGreaterThan(0);
-          expect(websocketFanout.maxClientQueuedBytes).toBeGreaterThan(0);
-          expect(websocketFanout.maxBatchBytes).toBeGreaterThan(0);
-          expect(events.snapshots).toBeGreaterThanOrEqual(descriptors.length + reconnects);
-          expect(events.deltas + events.status).toBeGreaterThan(0);
-
-          const summary: RuntimeWebsocketSoakSummary = {
-            shape,
-            durationMs: roundMs(performance.now() - startedAt),
-            subscriptionSetupMs: roundMs(subscriptionSetupMs),
-            mutationLoopMs: roundMs(mutationLoopMs),
-            cleanupMs: roundMs(cleanupMs),
-            mutationLatencyMs: latencyStats(mutationLatenciesMs),
-            maxSubscriptionLagVersionsBeforeCleanup:
-              settled.topics.orders?.maxSubscriptionLagVersions ?? -1,
-            totalSubscriptionLagVersionsBeforeCleanup:
-              settled.topics.orders?.totalSubscriptionLagVersions ?? -1,
-            chdbBackendVersionBeforeCleanup: settled.topics.orders?.chdbBackendVersion ?? "0",
-            workerVersionBeforeCleanup: settled.topics.orders?.version ?? "0",
-            finalRows: released.topics.orders?.rows ?? 0,
-            finalVersion: released.topics.orders?.version ?? "0",
-            chdbBackendVersionAfterCleanup: released.topics.orders?.chdbBackendVersion ?? "0",
-            subscribersAfterCleanup: released.topics.orders?.subscribers ?? -1,
-            activePlanCountAfterCleanup: released.topics.orders?.activePlanCount ?? -1,
-            activeViewCountAfterCleanup: released.topics.orders?.activeViewCount ?? -1,
-            activePlanBuildQueueDepthAfterCleanup:
-              released.topics.orders?.activePlanBuildQueueDepth ?? -1,
-            activePlanBuildingCountAfterCleanup:
-              released.topics.orders?.activePlanBuildingCount ?? -1,
-            activePlanPendingCountAfterCleanup:
-              released.topics.orders?.activePlanPendingCount ?? -1,
-            queueDepthAfterCleanup: released.topics.orders?.queueDepth ?? -1,
-            maxSubscriptionLagVersionsAfterCleanup:
-              released.topics.orders?.maxSubscriptionLagVersions ?? -1,
-            totalSubscriptionLagVersionsAfterCleanup:
-              released.topics.orders?.totalSubscriptionLagVersions ?? -1,
-            chdbStatusAfterCleanup: released.topics.orders?.chdbStatus ?? "stopped",
-            chdbPendingRequestsAfterCleanup: released.topics.orders?.chdbPendingRequests ?? -1,
-            events,
-            payloadBytes,
-            retries: lifecycle.retries,
-            backpressureErrors: lifecycle.backpressureErrors,
-            reconnects,
-            reconnectWindow: {
-              startedAtMs: reconnectStartedAtMs,
-              completedAtMs: reconnectCompletedAtMs,
-              mutationsDuringReconnect,
-            },
-            observed,
-            websocketFanout,
-            eventLoopDelay: eventLoopDelayStats(eventLoopDelay),
-            groupedRefreshCountsAvailable: false,
-            topSlowMutations,
-          };
-          yield* writeRuntimeWebsocketSoakSummary(summary);
-          yield* Effect.logInfo(
-            `runtime websocket soak clients=${descriptors.length} reconnects=${reconnects} mutations=${shape.mutations} snapshots=${events.snapshots} deltas=${events.deltas} status=${events.status} mutationP99Ms=${summary.mutationLatencyMs.p99Ms}`,
-          );
+          yield* runSoak(url);
         }).pipe(Effect.provide(testServerLayer));
       }).pipe(Effect.scoped),
     envNumber("VS_RUNTIME_WEBSOCKET_SOAK_TIMEOUT_MS", 45_000),
@@ -356,6 +374,7 @@ type RuntimeWebsocketSoakShape = {
 
 type RuntimeWebsocketSoakSummary = {
   readonly shape: RuntimeWebsocketSoakShape;
+  readonly transportMode: RuntimeWebsocketTransportMode;
   readonly durationMs: number;
   readonly subscriptionSetupMs: number;
   readonly mutationLoopMs: number;
@@ -482,6 +501,8 @@ type EventLoopDelayStats = {
   readonly p95Ms: number;
   readonly p99Ms: number;
 };
+
+type RuntimeWebsocketTransportMode = "in-process" | "isolated";
 
 type MutationHealthSnapshot = {
   readonly subscribers: number;
@@ -1080,6 +1101,10 @@ function websocketSoakShape(): RuntimeWebsocketSoakShape {
       envNumber("VS_RUNTIME_WEBSOCKET_SOAK_HEALTH_SAMPLE_INTERVAL", 25),
     ),
   };
+}
+
+function websocketTransportMode(): RuntimeWebsocketTransportMode {
+  return process.env.VS_RUNTIME_WEBSOCKET_TRANSPORT_MODE === "isolated" ? "isolated" : "in-process";
 }
 
 function envNumber(name: string, fallback: number): number {

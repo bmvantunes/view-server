@@ -303,7 +303,7 @@ Type exports:
 
 These exports are intentionally public but must stay behind explicit Node-only subpaths:
 
-- `@view-server/core/rpc/websocket`: `layerNodeWebsocketRpcClient`, `layerViewServerWebsocketProtocol`, `layerViewServerWebsocketProtocolRoute`, `layerViewServerWebsocketServer`, `makeNodeWebsocketClient`, `ViewServerWebsocketFanoutMetrics`, plus `WebsocketFanoutMetricsSnapshot`
+- `@view-server/core/rpc/websocket`: `layerNodeWebsocketRpcClient`, `layerViewServerWebsocketProtocol`, `layerViewServerWebsocketProtocolRoute`, `layerViewServerWebsocketServer`, `layerViewServerIsolatedWebsocketProtocol`, `layerViewServerIsolatedWebsocketServer`, `makeNodeWebsocketClient`, `ViewServerIsolatedWebsocketTransport`, `ViewServerWebsocketFanoutMetrics`, plus `IsolatedWebsocketTransportOptions`, `ViewServerIsolatedWebsocketTransportAddress`, `WebsocketFanoutMetricsSnapshot`, and `WebsocketTransportEventLoopDelayStats`
 - `@view-server/core/kafka/platformatic`: `createPlatformaticKafkaConsumerFactory`, `createPlatformaticKafkaTopicConsumer`, `createPlatformaticKafkaTopicVerifier`, `platformaticKafkaTopicConsumerOptions`, plus `PlatformaticKafkaConsumerFactoryOptions`, `PlatformaticKafkaTopicConsumerOptions`, and `PlatformaticKafkaTopicVerifierOptions`
 - `@view-server/core/snapshot/chdb`: `createChdbSnapshotBackend`, `createChdbSnapshotBackendFactory`, plus `ChdbSnapshotBackendOptions`
 - `@view-server/core/worker/node`: `makeNodeThreadTopicWorkerHostFactory`, plus `NodeThreadTopicWorkerHostFactoryOptions`
