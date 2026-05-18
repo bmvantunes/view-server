@@ -101,10 +101,12 @@ benchmark metrics. The CI smoke profile blocks only deterministic invariants:
 
 The 100-client firehose profile is report-only and tracks mutation p50/p95/p99/max, retry and
 backpressure counts, cleanup leaks, observed queue/lag/chDB pressure, reconnect count, and top slow
-sample count. It also records websocket fanout counters: total encoded RPC bytes, total messages,
-total batched writes, encode/write time, max per-client queued messages, max batch size, and
-max encoded bytes drained from one client queue, plus application-event payload bytes for snapshots,
-deltas, and status events. Use it for regression visibility, not as a GitHub-runner SLA.
+sample count. It also records worker timing buckets for gate wait, memory apply, active/grouped view
+updates, fanout, delta construction, and stream offer; websocket fanout counters for total encoded
+RPC bytes, total messages, total batched writes, encode/write/protocol-queue time, max per-client
+queued messages, max batch size, and max encoded bytes drained from one client queue; event-loop
+delay; and application-event payload bytes for snapshots, deltas, and status events. Use it for
+regression visibility, not as a GitHub-runner SLA.
 
 For larger transport checks outside CI, run the dedicated websocket fanout profile:
 

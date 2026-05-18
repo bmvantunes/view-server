@@ -9,6 +9,7 @@ import { HttpServer } from "effect/unstable/http";
 import { Buffer } from "node:buffer";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import type { ActiveSubscription, ViewServerClient } from "../src/client/index.ts";
 import { defineConfig } from "../src/config/index.ts";
 import type { ViewServerError } from "../src/errors.ts";
@@ -86,6 +87,13 @@ describe("runtime websocket soak", () => {
       Effect.gen(function* () {
         const shape = websocketSoakShape();
         const startedAt = performance.now();
+        const eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
+        eventLoopDelay.enable();
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            eventLoopDelay.disable();
+          }),
+        );
         const initialRows = Array.from({ length: shape.rows }, (_, index) => orderRow(index));
         const serverLayer = layerViewServerWebsocketServer("/rpc").pipe(
           Layer.provide(
@@ -175,6 +183,7 @@ describe("runtime websocket soak", () => {
               client: publisher,
               websocketFanoutMetrics,
               observed,
+              eventLoopDelay,
               index,
               operation,
               latencyMs,
@@ -320,6 +329,7 @@ describe("runtime websocket soak", () => {
             },
             observed,
             websocketFanout,
+            eventLoopDelay: eventLoopDelayStats(eventLoopDelay),
             groupedRefreshCountsAvailable: false,
             topSlowMutations,
           };
@@ -381,6 +391,7 @@ type RuntimeWebsocketSoakSummary = {
   };
   readonly observed: RuntimeWebsocketObservedMetrics;
   readonly websocketFanout: WebsocketFanoutMetricsSnapshot;
+  readonly eventLoopDelay: EventLoopDelayStats;
   readonly groupedRefreshCountsAvailable: boolean;
   readonly topSlowMutations: readonly SlowMutationSample[];
 };
@@ -457,6 +468,19 @@ type SlowMutationSample = {
   readonly payloadBytes: SoakPayloadBytes;
   readonly health: MutationHealthSnapshot;
   readonly websocketFanout: WebsocketFanoutMetricsSnapshot;
+  readonly eventLoopDelay: EventLoopDelayStats;
+};
+
+type WorkerPerformanceSnapshot = HealthResponse["topics"][string]["performance"];
+
+type EventLoopDelayStats = {
+  readonly minMs: number;
+  readonly meanMs: number;
+  readonly maxMs: number;
+  readonly stddevMs: number;
+  readonly p50Ms: number;
+  readonly p95Ms: number;
+  readonly p99Ms: number;
 };
 
 type MutationHealthSnapshot = {
@@ -474,6 +498,7 @@ type MutationHealthSnapshot = {
   readonly chdbBackendVersion: string;
   readonly workerVersion: string;
   readonly chdbBackendLagVersions: number;
+  readonly performance: WorkerPerformanceSnapshot;
 };
 
 type RuntimeWebsocketObservedMetrics = {
@@ -481,6 +506,16 @@ type RuntimeWebsocketObservedMetrics = {
   maxSubscriptionLagVersions: number;
   maxChdbPendingRequests: number;
   maxChdbBackendLagVersions: number;
+  maxWorkerGateWaitMs: number;
+  maxWorkerApplyMemoryMs: number;
+  maxWorkerActiveGroupedViewUpdateMs: number;
+  maxWorkerFanoutLoopMs: number;
+  maxWorkerDeltaConstructionMs: number;
+  maxWorkerStreamOfferMs: number;
+  maxWorkerSubscriptionsTouchedPerMutation: number;
+  workerTotalDeltasGenerated: number;
+  workerTotalStatusGenerated: number;
+  workerTotalSnapshotsGenerated: number;
 };
 
 type ReconnectResult = {
@@ -792,6 +827,7 @@ function recordSlowMutationSample(args: {
   readonly client: Pick<ViewServerClient<typeof runtimeWebsocketSoakConfig>, "health">;
   readonly websocketFanoutMetrics: WebsocketFanoutMetricsSnapshotService;
   readonly observed: RuntimeWebsocketObservedMetrics;
+  readonly eventLoopDelay: ReturnType<typeof monitorEventLoopDelay>;
   readonly index: number;
   readonly operation: MutationOperation;
   readonly latencyMs: number;
@@ -817,6 +853,7 @@ function recordSlowMutationSample(args: {
       payloadBytes: args.payloadBytes,
       health: mutationHealthSnapshot(health),
       websocketFanout,
+      eventLoopDelay: eventLoopDelayStats(args.eventLoopDelay),
     });
     args.samples.sort((left, right) => right.latencyMs - left.latencyMs);
     if (args.samples.length > 10) {
@@ -835,6 +872,16 @@ function observedMetrics(): RuntimeWebsocketObservedMetrics {
     maxSubscriptionLagVersions: 0,
     maxChdbPendingRequests: 0,
     maxChdbBackendLagVersions: 0,
+    maxWorkerGateWaitMs: 0,
+    maxWorkerApplyMemoryMs: 0,
+    maxWorkerActiveGroupedViewUpdateMs: 0,
+    maxWorkerFanoutLoopMs: 0,
+    maxWorkerDeltaConstructionMs: 0,
+    maxWorkerStreamOfferMs: 0,
+    maxWorkerSubscriptionsTouchedPerMutation: 0,
+    workerTotalDeltasGenerated: 0,
+    workerTotalStatusGenerated: 0,
+    workerTotalSnapshotsGenerated: 0,
   };
 }
 
@@ -855,6 +902,46 @@ function recordHealthObservation(
   observed.maxChdbBackendLagVersions = Math.max(
     observed.maxChdbBackendLagVersions,
     snapshot.chdbBackendLagVersions,
+  );
+  observed.maxWorkerGateWaitMs = Math.max(
+    observed.maxWorkerGateWaitMs,
+    snapshot.performance.maxGateWaitMs,
+  );
+  observed.maxWorkerApplyMemoryMs = Math.max(
+    observed.maxWorkerApplyMemoryMs,
+    snapshot.performance.maxApplyMemoryMs,
+  );
+  observed.maxWorkerActiveGroupedViewUpdateMs = Math.max(
+    observed.maxWorkerActiveGroupedViewUpdateMs,
+    snapshot.performance.maxActiveGroupedViewUpdateMs,
+  );
+  observed.maxWorkerFanoutLoopMs = Math.max(
+    observed.maxWorkerFanoutLoopMs,
+    snapshot.performance.maxFanoutLoopMs,
+  );
+  observed.maxWorkerDeltaConstructionMs = Math.max(
+    observed.maxWorkerDeltaConstructionMs,
+    snapshot.performance.maxDeltaConstructionMs,
+  );
+  observed.maxWorkerStreamOfferMs = Math.max(
+    observed.maxWorkerStreamOfferMs,
+    snapshot.performance.maxStreamOfferMs,
+  );
+  observed.maxWorkerSubscriptionsTouchedPerMutation = Math.max(
+    observed.maxWorkerSubscriptionsTouchedPerMutation,
+    snapshot.performance.maxSubscriptionsTouchedPerMutation,
+  );
+  observed.workerTotalDeltasGenerated = Math.max(
+    observed.workerTotalDeltasGenerated,
+    snapshot.performance.totalDeltasGenerated,
+  );
+  observed.workerTotalStatusGenerated = Math.max(
+    observed.workerTotalStatusGenerated,
+    snapshot.performance.totalStatusGenerated,
+  );
+  observed.workerTotalSnapshotsGenerated = Math.max(
+    observed.workerTotalSnapshotsGenerated,
+    snapshot.performance.totalSnapshotsGenerated,
   );
 }
 
@@ -886,7 +973,41 @@ function mutationHealthSnapshot(health: HealthResponse): MutationHealthSnapshot 
     chdbBackendVersion: topic?.chdbBackendVersion ?? "0",
     workerVersion: topic?.version ?? "0",
     chdbBackendLagVersions: versionLag(topic?.version ?? "0", topic?.chdbBackendVersion ?? "0"),
+    performance: topic?.performance ?? emptyWorkerPerformance(),
   };
+}
+
+function emptyWorkerPerformance(): WorkerPerformanceSnapshot {
+  return {
+    totalDeltasGenerated: 0,
+    totalStatusGenerated: 0,
+    totalSnapshotsGenerated: 0,
+    maxGateWaitMs: 0,
+    maxApplyMemoryMs: 0,
+    maxActiveGroupedViewUpdateMs: 0,
+    maxFanoutLoopMs: 0,
+    maxDeltaConstructionMs: 0,
+    maxStreamOfferMs: 0,
+    maxSubscriptionsTouchedPerMutation: 0,
+  };
+}
+
+function eventLoopDelayStats(
+  eventLoopDelay: ReturnType<typeof monitorEventLoopDelay>,
+): EventLoopDelayStats {
+  return {
+    minMs: roundMs(histogramNanosecondsToMs(eventLoopDelay.min)),
+    meanMs: roundMs(histogramNanosecondsToMs(eventLoopDelay.mean)),
+    maxMs: roundMs(histogramNanosecondsToMs(eventLoopDelay.max)),
+    stddevMs: roundMs(histogramNanosecondsToMs(eventLoopDelay.stddev)),
+    p50Ms: roundMs(histogramNanosecondsToMs(eventLoopDelay.percentile(50))),
+    p95Ms: roundMs(histogramNanosecondsToMs(eventLoopDelay.percentile(95))),
+    p99Ms: roundMs(histogramNanosecondsToMs(eventLoopDelay.percentile(99))),
+  };
+}
+
+function histogramNanosecondsToMs(value: number): number {
+  return Number.isFinite(value) ? value / 1_000_000 : 0;
 }
 
 function versionLag(workerVersion: string, backendVersion: string): number {

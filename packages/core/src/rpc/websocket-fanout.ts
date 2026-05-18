@@ -21,18 +21,23 @@ export type WebsocketFanoutMetricsSnapshot = {
   readonly totalBytes: number;
   readonly totalEncodeMs: number;
   readonly totalWriteMs: number;
+  readonly totalProtocolOfferMs: number;
+  readonly totalProtocolQueueWaitMs: number;
   readonly maxClientQueuedMessages: number;
   readonly maxClientQueuedBytes: number;
   readonly maxBatchMessages: number;
   readonly maxBatchBytes: number;
   readonly maxEncodeMs: number;
   readonly maxWriteMs: number;
+  readonly maxProtocolOfferMs: number;
+  readonly maxProtocolQueueWaitMs: number;
 };
 
 type WebsocketFanoutMetricsShape = {
   readonly clientConnected: (clientId: number) => void;
   readonly clientDisconnected: (clientId: number) => void;
   readonly recordQueued: (clientId: number, queuedMessages: number) => void;
+  readonly recordProtocolOffer: (offerMs: number) => void;
   readonly recordFlush: (sample: WebsocketFanoutFlushSample) => void;
   readonly snapshot: Effect.Effect<WebsocketFanoutMetricsSnapshot>;
 };
@@ -43,6 +48,7 @@ type WebsocketFanoutFlushSample = {
   readonly bytes: number;
   readonly encodeMs: number;
   readonly writeMs: number;
+  readonly queueWaitMs: number;
 };
 
 type WebsocketClientState = {
@@ -164,7 +170,13 @@ function makeBatchedSocketProtocol(metrics: WebsocketFanoutMetricsShape): Effect
           if (client === undefined) {
             return Effect.void;
           }
+          const offerStartedAt = performance.now();
           return Queue.offer(client.queue, response).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                metrics.recordProtocolOffer(performance.now() - offerStartedAt);
+              }),
+            ),
             Effect.flatMap(() => Queue.size(client.queue)),
             Effect.tap((queuedMessages) =>
               Effect.sync(() => {
@@ -215,6 +227,7 @@ function flushClientWrites(args: {
         return;
       }
       const bytes = payloadBytes(encoded);
+      const queueWaitMs = serverBatchQueueWaitMs(batch, Date.now());
       const writeStartedAt = performance.now();
       yield* args.writeRaw(encoded).pipe(
         Effect.tap(() =>
@@ -225,6 +238,7 @@ function flushClientWrites(args: {
               bytes,
               encodeMs,
               writeMs: performance.now() - writeStartedAt,
+              queueWaitMs,
             });
           }),
         ),
@@ -371,12 +385,16 @@ function makeWebsocketFanoutMetrics(): WebsocketFanoutMetricsShape {
   let totalBytes = 0;
   let totalEncodeMs = 0;
   let totalWriteMs = 0;
+  let totalProtocolOfferMs = 0;
+  let totalProtocolQueueWaitMs = 0;
   let maxClientQueuedMessages = 0;
   let maxClientQueuedBytes = 0;
   let maxBatchMessages = 0;
   let maxBatchBytes = 0;
   let maxEncodeMs = 0;
   let maxWriteMs = 0;
+  let maxProtocolOfferMs = 0;
+  let maxProtocolQueueWaitMs = 0;
 
   return {
     clientConnected: (clientId) => {
@@ -389,17 +407,23 @@ function makeWebsocketFanoutMetrics(): WebsocketFanoutMetricsShape {
       clientQueuedMessages.set(clientId, queuedMessages);
       maxClientQueuedMessages = Math.max(maxClientQueuedMessages, queuedMessages);
     },
+    recordProtocolOffer: (offerMs) => {
+      totalProtocolOfferMs += offerMs;
+      maxProtocolOfferMs = Math.max(maxProtocolOfferMs, offerMs);
+    },
     recordFlush: (sample) => {
       totalMessages += sample.messages;
       totalBatches += 1;
       totalBytes += sample.bytes;
       totalEncodeMs += sample.encodeMs;
       totalWriteMs += sample.writeMs;
+      totalProtocolQueueWaitMs += sample.queueWaitMs;
       maxClientQueuedBytes = Math.max(maxClientQueuedBytes, sample.bytes);
       maxBatchMessages = Math.max(maxBatchMessages, sample.messages);
       maxBatchBytes = Math.max(maxBatchBytes, sample.bytes);
       maxEncodeMs = Math.max(maxEncodeMs, sample.encodeMs);
       maxWriteMs = Math.max(maxWriteMs, sample.writeMs);
+      maxProtocolQueueWaitMs = Math.max(maxProtocolQueueWaitMs, sample.queueWaitMs);
       clientQueuedMessages.set(sample.clientId, 0);
     },
     snapshot: Effect.sync(() => ({
@@ -409,14 +433,56 @@ function makeWebsocketFanoutMetrics(): WebsocketFanoutMetricsShape {
       totalBytes,
       totalEncodeMs,
       totalWriteMs,
+      totalProtocolOfferMs,
+      totalProtocolQueueWaitMs,
       maxClientQueuedMessages,
       maxClientQueuedBytes,
       maxBatchMessages,
       maxBatchBytes,
       maxEncodeMs,
       maxWriteMs,
+      maxProtocolOfferMs,
+      maxProtocolQueueWaitMs,
     })),
   };
+}
+
+function serverBatchQueueWaitMs(batch: readonly FromServerEncoded[], nowMs: number): number {
+  let max = 0;
+  for (const response of batch) {
+    const responseMax = responseQueueWaitMs(response, nowMs);
+    if (responseMax > max) {
+      max = responseMax;
+    }
+  }
+  return max;
+}
+
+function responseQueueWaitMs(response: FromServerEncoded, nowMs: number): number {
+  if (response._tag !== "Chunk") {
+    return 0;
+  }
+  let max = 0;
+  for (const value of response.values) {
+    const serverTime = valueServerTime(value);
+    if (serverTime !== undefined) {
+      max = Math.max(max, Math.max(0, nowMs - serverTime));
+    }
+  }
+  return max;
+}
+
+function valueServerTime(value: unknown): number | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const meta = value.meta;
+  if (!isRecord(meta)) {
+    return undefined;
+  }
+  return typeof meta.serverTime === "number" && Number.isFinite(meta.serverTime)
+    ? meta.serverTime
+    : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

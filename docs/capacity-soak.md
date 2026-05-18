@@ -30,9 +30,9 @@ pnpm --dir packages/core exec vitest run --config vitest.config.ts tests/runtime
 The summary artifact records subscription setup time, mutation latency, reconnect count, event
 counts, approximate snapshot/delta/status application payload bytes, final health, chDB pending
 request count, queue depth, subscription lag, active-plan cleanup state, websocket fanout metrics,
-and the top 10 slowest mutation samples with health and fanout snapshots. Keep this out of normal PR
-CI at large sizes; the default test already exercises the transport lifecycle without turning every
-push into a capacity run.
+event-loop delay, worker mutation timing buckets, and the top 10 slowest mutation samples with
+health/fanout/timing snapshots. Keep this out of normal PR CI at large sizes; the default test
+already exercises the transport lifecycle without turning every push into a capacity run.
 
 For regression-visible artifacts, run the benchmark wrapper instead of invoking the test directly:
 
@@ -43,9 +43,10 @@ node --experimental-strip-types packages/core/bench/benchmark-profile.ts --profi
 
 The `runtime-websocket-soak-100-client` entry is report-only. It compares mutation p50/p95/p99/max,
 retry/backpressure counts, cleanup leaks, observed queue and subscription lag, observed chDB pending
-requests/version lag, reconnect count, websocket fanout encode/write/queue metrics, payload byte
-counts, and top slow sample count. The smaller `ci-smoke` entry blocks only deterministic
-cleanup/retry/backpressure invariants.
+requests/version lag, reconnect count, worker fanout/delta-construction/enqueue timing, websocket
+fanout encode/write/protocol queue metrics, event-loop delay, payload byte counts, and top slow
+sample count. The smaller `ci-smoke` entry blocks only deterministic cleanup/retry/backpressure
+invariants.
 
 The websocket server uses Effect RPC over NDJSON and coalesces server responses per client into at
 most one write per scheduler tick. This preserves request ordering and request-id stale-event guards
@@ -59,9 +60,9 @@ Latest local runtime websocket soak results, May 18 2026:
 
 | profile |   rows | websocket clients | raw/grouped | mutations | reconnects | duration | mutation p50/p95/p99/max        | events                                       | cleanup                                                          |
 | ------- | -----: | ----------------: | ----------: | --------: | ---------: | -------: | ------------------------------- | -------------------------------------------- | ---------------------------------------------------------------- |
-| default |  1,000 |                15 |        12/3 |       120 |         10 |    0.85s | 1.98 / 5.98 / 7.19 / 34.84ms    | 25 snapshots, 1,430 deltas, 360 status       | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
-| manual  | 10,000 |               100 |       80/20 |     1,000 |         50 |   14.21s | 7.73 / 25.36 / 27.36 / 130.9ms  | 150 snapshots, 79,765 deltas, 20,000 status  | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
-| manual  | 10,000 |               250 |      200/50 |     1,000 |         50 |   33.97s | 18.66 / 61.81 / 74.67 / 219.8ms | 300 snapshots, 199,767 deltas, 50,000 status | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+| default |  1,000 |                15 |        12/3 |       120 |         10 |    0.80s | 1.95 / 5.02 / 6.40 / 31.09ms    | 25 snapshots, 1,430 deltas, 360 status       | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+| manual  | 10,000 |               100 |       80/20 |     1,000 |         50 |   13.40s | 7.07 / 24.15 / 26.45 / 171.5ms  | 150 snapshots, 79,765 deltas, 20,000 status  | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
+| manual  | 10,000 |               250 |      200/50 |     1,000 |         50 |   33.10s | 17.83 / 60.10 / 64.35 / 235.8ms | 300 snapshots, 199,767 deltas, 50,000 status | subscribers=0, activePlans=0, queueDepth=0, lag=0, chdbPending=0 |
 
 All runs reported `retries=0`, `backpressureErrors=0`, and `chdbBackendVersionBeforeCleanup`
 matching the worker version. The manual profile intentionally leaves grouped subscriptions stale
@@ -71,28 +72,34 @@ Fanout and payload summary from the latest manual profiles:
 
 | clients | RPC messages | batched writes | wire bytes | app payload bytes | max queued msgs/bytes | max batch | encode total/max |  write total/max |
 | ------: | -----------: | -------------: | ---------: | ----------------: | --------------------: | --------: | ---------------: | ---------------: |
-|     100 |      101,329 |        101,177 |     76.9MB |            72.0MB |             2 / 3.1KB |         2 | 154.2ms / 0.06ms | 596.5ms / 0.26ms |
-|     250 |      251,793 |        251,491 |      192MB |             180MB |             2 / 3.1KB |         2 | 344.1ms / 0.35ms |   1.55s / 2.02ms |
+|     100 |      101,330 |        101,178 |     77.0MB |            72.0MB |             2 / 3.1KB |         2 | 140.6ms / 0.03ms | 557.6ms / 0.23ms |
+|     250 |      251,799 |        251,497 |    192.2MB |           180.0MB |             2 / 5.4KB |         2 | 327.9ms / 0.09ms |   1.48s / 0.32ms |
 
 Payload mix in the 100-client profile was about 0.2MB snapshots, 68.7MB deltas, and 3.0MB status
 events. In the 250-client profile it was about 0.4MB snapshots, 172.0MB deltas, and 7.6MB status
 events.
 
-Tail attribution from the 100-client profile:
+Worker/protocol/event-loop attribution from the latest manual profiles:
 
-| rank | mutation                          |  latency | reconnect active | queue | chDB pending | chDB lag | active build/pending | note                                                                                       |
-| ---: | --------------------------------- | -------: | ---------------- | ----: | -----------: | -------: | -------------------: | ------------------------------------------------------------------------------------------ |
-|    1 | `deltaPublish o-915` at index 815 | 130.92ms | no               |     0 |            0 |        0 |                  0/0 | max was not during reconnect, chDB catch-up, active-plan build, or a websocket write spike |
-|    2 | `deleteById o-111` at index 559   | 120.25ms | no               |     0 |            0 |        0 |                  0/0 | same subsystem snapshot: 100 subscribers, 80 active views                                  |
-|    3 | `deltaPublish o-605` at index 505 |  81.80ms | yes              |     0 |            1 |        0 |                  0/0 | reconnect window sample; fanout max write still under 1ms                                  |
+| clients | worker fanout max | delta construction max | stream offer max | protocol queue-wait max | event-loop delay p99/max |
+| ------: | ----------------: | ---------------------: | ---------------: | ----------------------: | -----------------------: |
+|     100 |            1.95ms |                 0.65ms |           0.48ms |                    25ms |          21.23 / 128.7ms |
+|     250 |            5.41ms |                 2.47ms |           2.32ms |                   193ms |          35.23 / 283.1ms |
 
-The spike is therefore not currently attributed to chDB, queued backpressure, active-plan
-construction, or websocket serialization/write calls. The most likely
-causes are local event-loop/GC scheduling or broader fanout scheduling under many clients. This is
-acceptable for the current alpha soak because p99 stays under the current report-only baseline,
-cleanup is clean, and no backpressure/retry occurred, but keep the top-slow-mutation samples in
-release artifacts. Treat repeated max spikes above the product latency budget as a follow-up
-event-loop/GC profiling task.
+Top slow samples now point away from memory/query/fanout CPU and websocket write cost. In the
+100-client run, the slowest mutation was `deltaPublish o-997` at index 897 with 171.5ms client
+latency, but the worker mutation took 0.92ms total, fanout took 0.86ms, stream offer took 0.18ms,
+websocket write max was 0.23ms, queue depth was 0, and chDB pending was 0. The event-loop monitor had
+already observed a 128.7ms delay. In the 250-client run, the slowest mutation was `deltaPublish
+o-246` at index 146 with 235.8ms client latency, while the worker mutation took 2.01ms, fanout took
+1.95ms, stream offer took 0.47ms, websocket write max was 0.32ms, and event-loop delay reached
+208.8ms at that sample.
+
+The current tail-latency explanation is therefore event-loop/GC/scheduler delay, plus websocket
+protocol queue wait under 250 clients, not chDB, active-plan build, delta construction, worker fanout,
+or encode/write cost. This is acceptable for the current alpha soak because p99 stays under the
+current report-only baseline, cleanup is clean, and no backpressure/retry occurred. Treat repeated
+max spikes above the product latency budget as a follow-up GC/event-loop profiling task.
 
 The summary currently records `groupedRefreshCountsAvailable=false`; grouped stale pressure is still
 visible through subscription lag/status counts, but grouped refresh pending/in-flight counters are

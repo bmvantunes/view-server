@@ -1,6 +1,8 @@
 import type { ViewServerHealthRow } from "../config/index.ts";
 import { VIEW_SERVER_HEALTH_TOPIC } from "../config/index.ts";
 import type { KafkaBatchMetrics } from "../kafka/index.ts";
+import { emptyWorkerPerformanceMetricsSnapshot } from "../worker/performance-metrics.ts";
+import type { WorkerPerformanceMetricsSnapshot } from "../worker/performance-metrics.ts";
 import type { TopicWorkerMetrics } from "../worker/topic-worker-core.ts";
 
 export type KafkaRuntimeMetrics = {
@@ -36,6 +38,7 @@ export type HealthTopicMetrics = {
   readonly chdbPendingRequests: number;
   readonly chdbLastError: string;
   readonly chdbBackendVersion: string;
+  readonly performance: WorkerPerformanceMetricsSnapshot;
   readonly version: string;
   readonly kafkaLagTotal: number;
   readonly kafkaLagMax: number;
@@ -219,6 +222,7 @@ function projectTopicHealth(args: {
     chdbPendingRequests: args.metrics.chdbPendingRequests,
     chdbLastError: args.metrics.chdbLastError,
     chdbBackendVersion: args.metrics.chdbBackendVersion.toString(),
+    performance: args.metrics.performance ?? emptyWorkerPerformanceMetricsSnapshot(),
     version: args.metrics.version.toString(),
     kafkaLagTotal: args.kafka.lagTotal,
     kafkaLagMax: args.kafka.lagMax,

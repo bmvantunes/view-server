@@ -7,6 +7,10 @@ import {
 } from "../snapshot/index.ts";
 import type { ActivePlanCoordinatorMetrics } from "./active-plan-coordinator.ts";
 import type { WorkerVersion } from "./mutation-log.ts";
+import {
+  emptyWorkerPerformanceMetricsSnapshot,
+  type WorkerPerformanceMetricsSnapshot,
+} from "./performance-metrics.ts";
 import type { ActiveSubscription } from "./subscription-registry.ts";
 
 export type TopicWorkerStatus = "ready" | "degraded" | "stopping";
@@ -36,6 +40,7 @@ export type TopicWorkerMetrics = {
   readonly chdbPendingRequests: number;
   readonly chdbLastError: string;
   readonly chdbBackendVersion: WorkerVersion;
+  readonly performance?: WorkerPerformanceMetricsSnapshot | undefined;
   readonly status: TopicWorkerStatus;
 };
 
@@ -52,6 +57,7 @@ export class WorkerHealthProjection {
     readonly queueAtLimit: (depth: number) => boolean;
     readonly lagForDepth: (depth: number, pendingLagVersions: bigint) => bigint;
     readonly backendHealth: () => Effect.Effect<SnapshotBackendHealth>;
+    readonly performanceMetrics?: (() => WorkerPerformanceMetricsSnapshot) | undefined;
   };
 
   constructor(options: {
@@ -65,6 +71,7 @@ export class WorkerHealthProjection {
     readonly queueAtLimit: (depth: number) => boolean;
     readonly lagForDepth: (depth: number, pendingLagVersions: bigint) => bigint;
     readonly backendHealth: () => Effect.Effect<SnapshotBackendHealth>;
+    readonly performanceMetrics?: (() => WorkerPerformanceMetricsSnapshot) | undefined;
   }) {
     this.#options = options;
   }
@@ -124,6 +131,8 @@ export class WorkerHealthProjection {
         chdbPendingRequests: snapshotHealth.pendingRequests,
         chdbLastError: snapshotHealth.lastError,
         chdbBackendVersion: snapshotHealth.backendVersion,
+        performance:
+          projection.#options.performanceMetrics?.() ?? emptyWorkerPerformanceMetricsSnapshot(),
         status: projection.#statusForPressure(depth, planStats, snapshotHealth),
       };
     })(this);

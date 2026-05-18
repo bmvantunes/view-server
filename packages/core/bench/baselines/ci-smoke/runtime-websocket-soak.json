@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "benchmark": "runtime-websocket-soak",
-  "generatedAt": "2026-05-18T00:40:08.959Z",
+  "generatedAt": "2026-05-18T00:59:20.510Z",
   "config": {
     "rows": 1000,
     "rawClients": 12,
@@ -36,42 +36,42 @@
       "metrics": [
         {
           "name": "durationMs",
-          "value": 834.74,
+          "value": 801.83,
           "unit": "ms"
         },
         {
           "name": "subscriptionSetupMs",
-          "value": 85.63,
+          "value": 80.61,
           "unit": "ms"
         },
         {
           "name": "mutationLoopMs",
-          "value": 480.13,
+          "value": 457.32,
           "unit": "ms"
         },
         {
           "name": "mutationP50Ms",
-          "value": 1.92,
+          "value": 1.95,
           "unit": "ms"
         },
         {
           "name": "mutationP95Ms",
-          "value": 5.47,
+          "value": 5.02,
           "unit": "ms"
         },
         {
           "name": "mutationP99Ms",
-          "value": 6.9,
+          "value": 6.4,
           "unit": "ms"
         },
         {
           "name": "mutationMaxMs",
-          "value": 32.76,
+          "value": 31.09,
           "unit": "ms"
         },
         {
           "name": "cleanupMs",
-          "value": 6.56,
+          "value": 6.24,
           "unit": "ms"
         },
         {
@@ -108,6 +108,59 @@
           "name": "maxChdbBackendLagVersionsObserved",
           "value": 1,
           "unit": "count"
+        },
+        {
+          "name": "workerMaxGateWaitMs",
+          "value": 29.737,
+          "unit": "ms"
+        },
+        {
+          "name": "workerMaxApplyMemoryMs",
+          "value": 0.071,
+          "unit": "ms"
+        },
+        {
+          "name": "workerMaxActiveGroupedViewUpdateMs",
+          "value": 0.406,
+          "unit": "ms"
+        },
+        {
+          "name": "workerMaxFanoutLoopMs",
+          "value": 0.778,
+          "unit": "ms"
+        },
+        {
+          "name": "workerMaxDeltaConstructionMs",
+          "value": 0.225,
+          "unit": "ms"
+        },
+        {
+          "name": "workerMaxStreamOfferMs",
+          "value": 0.216,
+          "unit": "ms"
+        },
+        {
+          "name": "workerMaxSubscriptionsTouchedPerMutation",
+          "value": 15,
+          "unit": "count"
+        },
+        {
+          "name": "workerTotalDeltasGenerated",
+          "value": 1430,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "workerTotalStatusGenerated",
+          "value": 360,
+          "unit": "count",
+          "lowerIsBetter": false
+        },
+        {
+          "name": "workerTotalSnapshotsGenerated",
+          "value": 25,
+          "unit": "count",
+          "lowerIsBetter": false
         },
         {
           "name": "maxQueueDepthAfterCleanup",
@@ -147,30 +200,40 @@
         },
         {
           "name": "websocketTotalMessages",
-          "value": 2040,
+          "value": 2036,
           "unit": "count",
           "lowerIsBetter": false
         },
         {
           "name": "websocketTotalBatches",
-          "value": 2013,
+          "value": 2009,
           "unit": "count",
           "lowerIsBetter": false
         },
         {
           "name": "websocketTotalBytes",
-          "value": 1486103,
+          "value": 1541158,
           "unit": "bytes",
           "lowerIsBetter": false
         },
         {
           "name": "websocketTotalEncodeMs",
-          "value": 4.493315999998799,
+          "value": 4.053866000000312,
           "unit": "ms"
         },
         {
           "name": "websocketTotalWriteMs",
-          "value": 17.07214999999792,
+          "value": 16.61030200000141,
+          "unit": "ms"
+        },
+        {
+          "name": "websocketTotalProtocolOfferMs",
+          "value": 2.6359969999979285,
+          "unit": "ms"
+        },
+        {
+          "name": "websocketTotalProtocolQueueWaitMs",
+          "value": 1707,
           "unit": "ms"
         },
         {
@@ -180,7 +243,7 @@
         },
         {
           "name": "websocketMaxClientQueuedBytes",
-          "value": 3067,
+          "value": 5378,
           "unit": "bytes"
         },
         {
@@ -191,17 +254,47 @@
         },
         {
           "name": "websocketMaxBatchBytes",
-          "value": 3067,
+          "value": 5378,
           "unit": "bytes"
         },
         {
           "name": "websocketMaxEncodeMs",
-          "value": 0.025749999999902684,
+          "value": 0.023083000000042375,
           "unit": "ms"
         },
         {
           "name": "websocketMaxWriteMs",
-          "value": 0.19933300000002419,
+          "value": 0.2790419999998903,
+          "unit": "ms"
+        },
+        {
+          "name": "websocketMaxProtocolOfferMs",
+          "value": 0.03179099999999835,
+          "unit": "ms"
+        },
+        {
+          "name": "websocketMaxProtocolQueueWaitMs",
+          "value": 8,
+          "unit": "ms"
+        },
+        {
+          "name": "eventLoopDelayP50Ms",
+          "value": 10.32,
+          "unit": "ms"
+        },
+        {
+          "name": "eventLoopDelayP95Ms",
+          "value": 12.04,
+          "unit": "ms"
+        },
+        {
+          "name": "eventLoopDelayP99Ms",
+          "value": 13.94,
+          "unit": "ms"
+        },
+        {
+          "name": "eventLoopDelayMaxMs",
+          "value": 16.66,
           "unit": "ms"
         },
         {
@@ -230,7 +323,7 @@
         },
         {
           "name": "deltaPayloadBytes",
-          "value": 1217191,
+          "value": 1219620,
           "unit": "bytes",
           "lowerIsBetter": false
         },
@@ -248,7 +341,7 @@
         },
         {
           "name": "totalPayloadBytes",
-          "value": 1306345,
+          "value": 1308774,
           "unit": "bytes",
           "lowerIsBetter": false
         },

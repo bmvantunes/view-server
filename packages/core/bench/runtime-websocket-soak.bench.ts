@@ -47,6 +47,16 @@ type RuntimeWebsocketObservedMetrics = {
   readonly maxSubscriptionLagVersions: number;
   readonly maxChdbPendingRequests: number;
   readonly maxChdbBackendLagVersions: number;
+  readonly maxWorkerGateWaitMs: number;
+  readonly maxWorkerApplyMemoryMs: number;
+  readonly maxWorkerActiveGroupedViewUpdateMs: number;
+  readonly maxWorkerFanoutLoopMs: number;
+  readonly maxWorkerDeltaConstructionMs: number;
+  readonly maxWorkerStreamOfferMs: number;
+  readonly maxWorkerSubscriptionsTouchedPerMutation: number;
+  readonly workerTotalDeltasGenerated: number;
+  readonly workerTotalStatusGenerated: number;
+  readonly workerTotalSnapshotsGenerated: number;
 };
 
 type WebsocketFanoutMetricsSnapshot = {
@@ -56,12 +66,26 @@ type WebsocketFanoutMetricsSnapshot = {
   readonly totalBytes: number;
   readonly totalEncodeMs: number;
   readonly totalWriteMs: number;
+  readonly totalProtocolOfferMs: number;
+  readonly totalProtocolQueueWaitMs: number;
   readonly maxClientQueuedMessages: number;
   readonly maxClientQueuedBytes: number;
   readonly maxBatchMessages: number;
   readonly maxBatchBytes: number;
   readonly maxEncodeMs: number;
   readonly maxWriteMs: number;
+  readonly maxProtocolOfferMs: number;
+  readonly maxProtocolQueueWaitMs: number;
+};
+
+type EventLoopDelayStats = {
+  readonly minMs: number;
+  readonly meanMs: number;
+  readonly maxMs: number;
+  readonly stddevMs: number;
+  readonly p50Ms: number;
+  readonly p95Ms: number;
+  readonly p99Ms: number;
 };
 
 type RuntimeWebsocketSoakSummary = {
@@ -96,6 +120,7 @@ type RuntimeWebsocketSoakSummary = {
   readonly reconnects: number;
   readonly observed: RuntimeWebsocketObservedMetrics;
   readonly websocketFanout: WebsocketFanoutMetricsSnapshot;
+  readonly eventLoopDelay: EventLoopDelayStats;
   readonly topSlowMutations: readonly unknown[];
 };
 
@@ -253,6 +278,7 @@ function decodeRuntimeWebsocketSoakSummary(value: unknown): RuntimeWebsocketSoak
   const payloadBytes = recordField(record, "payloadBytes");
   const observed = recordField(record, "observed");
   const websocketFanout = recordField(record, "websocketFanout");
+  const eventLoopDelay = recordField(record, "eventLoopDelay");
   return {
     shape: {
       rows: numberField(shape, "rows"),
@@ -326,6 +352,22 @@ function decodeRuntimeWebsocketSoakSummary(value: unknown): RuntimeWebsocketSoak
       maxSubscriptionLagVersions: numberField(observed, "maxSubscriptionLagVersions"),
       maxChdbPendingRequests: numberField(observed, "maxChdbPendingRequests"),
       maxChdbBackendLagVersions: numberField(observed, "maxChdbBackendLagVersions"),
+      maxWorkerGateWaitMs: numberField(observed, "maxWorkerGateWaitMs"),
+      maxWorkerApplyMemoryMs: numberField(observed, "maxWorkerApplyMemoryMs"),
+      maxWorkerActiveGroupedViewUpdateMs: numberField(
+        observed,
+        "maxWorkerActiveGroupedViewUpdateMs",
+      ),
+      maxWorkerFanoutLoopMs: numberField(observed, "maxWorkerFanoutLoopMs"),
+      maxWorkerDeltaConstructionMs: numberField(observed, "maxWorkerDeltaConstructionMs"),
+      maxWorkerStreamOfferMs: numberField(observed, "maxWorkerStreamOfferMs"),
+      maxWorkerSubscriptionsTouchedPerMutation: numberField(
+        observed,
+        "maxWorkerSubscriptionsTouchedPerMutation",
+      ),
+      workerTotalDeltasGenerated: numberField(observed, "workerTotalDeltasGenerated"),
+      workerTotalStatusGenerated: numberField(observed, "workerTotalStatusGenerated"),
+      workerTotalSnapshotsGenerated: numberField(observed, "workerTotalSnapshotsGenerated"),
     },
     websocketFanout: {
       activeClients: numberField(websocketFanout, "activeClients"),
@@ -334,12 +376,25 @@ function decodeRuntimeWebsocketSoakSummary(value: unknown): RuntimeWebsocketSoak
       totalBytes: numberField(websocketFanout, "totalBytes"),
       totalEncodeMs: numberField(websocketFanout, "totalEncodeMs"),
       totalWriteMs: numberField(websocketFanout, "totalWriteMs"),
+      totalProtocolOfferMs: numberField(websocketFanout, "totalProtocolOfferMs"),
+      totalProtocolQueueWaitMs: numberField(websocketFanout, "totalProtocolQueueWaitMs"),
       maxClientQueuedMessages: numberField(websocketFanout, "maxClientQueuedMessages"),
       maxClientQueuedBytes: numberField(websocketFanout, "maxClientQueuedBytes"),
       maxBatchMessages: numberField(websocketFanout, "maxBatchMessages"),
       maxBatchBytes: numberField(websocketFanout, "maxBatchBytes"),
       maxEncodeMs: numberField(websocketFanout, "maxEncodeMs"),
       maxWriteMs: numberField(websocketFanout, "maxWriteMs"),
+      maxProtocolOfferMs: numberField(websocketFanout, "maxProtocolOfferMs"),
+      maxProtocolQueueWaitMs: numberField(websocketFanout, "maxProtocolQueueWaitMs"),
+    },
+    eventLoopDelay: {
+      minMs: numberField(eventLoopDelay, "minMs"),
+      meanMs: numberField(eventLoopDelay, "meanMs"),
+      maxMs: numberField(eventLoopDelay, "maxMs"),
+      stddevMs: numberField(eventLoopDelay, "stddevMs"),
+      p50Ms: numberField(eventLoopDelay, "p50Ms"),
+      p95Ms: numberField(eventLoopDelay, "p95Ms"),
+      p99Ms: numberField(eventLoopDelay, "p99Ms"),
     },
     topSlowMutations: arrayField(record, "topSlowMutations"),
   };
@@ -394,6 +449,59 @@ function runtimeWebsocketSoakMetrics(
       name: "maxChdbBackendLagVersionsObserved",
       value: summary.observed.maxChdbBackendLagVersions,
       unit: "count",
+    },
+    {
+      name: "workerMaxGateWaitMs",
+      value: summary.observed.maxWorkerGateWaitMs,
+      unit: "ms",
+    },
+    {
+      name: "workerMaxApplyMemoryMs",
+      value: summary.observed.maxWorkerApplyMemoryMs,
+      unit: "ms",
+    },
+    {
+      name: "workerMaxActiveGroupedViewUpdateMs",
+      value: summary.observed.maxWorkerActiveGroupedViewUpdateMs,
+      unit: "ms",
+    },
+    {
+      name: "workerMaxFanoutLoopMs",
+      value: summary.observed.maxWorkerFanoutLoopMs,
+      unit: "ms",
+    },
+    {
+      name: "workerMaxDeltaConstructionMs",
+      value: summary.observed.maxWorkerDeltaConstructionMs,
+      unit: "ms",
+    },
+    {
+      name: "workerMaxStreamOfferMs",
+      value: summary.observed.maxWorkerStreamOfferMs,
+      unit: "ms",
+    },
+    {
+      name: "workerMaxSubscriptionsTouchedPerMutation",
+      value: summary.observed.maxWorkerSubscriptionsTouchedPerMutation,
+      unit: "count",
+    },
+    {
+      name: "workerTotalDeltasGenerated",
+      value: summary.observed.workerTotalDeltasGenerated,
+      unit: "count",
+      lowerIsBetter: false,
+    },
+    {
+      name: "workerTotalStatusGenerated",
+      value: summary.observed.workerTotalStatusGenerated,
+      unit: "count",
+      lowerIsBetter: false,
+    },
+    {
+      name: "workerTotalSnapshotsGenerated",
+      value: summary.observed.workerTotalSnapshotsGenerated,
+      unit: "count",
+      lowerIsBetter: false,
     },
     {
       name: "maxQueueDepthAfterCleanup",
@@ -460,6 +568,16 @@ function runtimeWebsocketSoakMetrics(
       unit: "ms",
     },
     {
+      name: "websocketTotalProtocolOfferMs",
+      value: summary.websocketFanout.totalProtocolOfferMs,
+      unit: "ms",
+    },
+    {
+      name: "websocketTotalProtocolQueueWaitMs",
+      value: summary.websocketFanout.totalProtocolQueueWaitMs,
+      unit: "ms",
+    },
+    {
       name: "websocketMaxClientQueuedMessages",
       value: summary.websocketFanout.maxClientQueuedMessages,
       unit: "count",
@@ -488,6 +606,36 @@ function runtimeWebsocketSoakMetrics(
     {
       name: "websocketMaxWriteMs",
       value: summary.websocketFanout.maxWriteMs,
+      unit: "ms",
+    },
+    {
+      name: "websocketMaxProtocolOfferMs",
+      value: summary.websocketFanout.maxProtocolOfferMs,
+      unit: "ms",
+    },
+    {
+      name: "websocketMaxProtocolQueueWaitMs",
+      value: summary.websocketFanout.maxProtocolQueueWaitMs,
+      unit: "ms",
+    },
+    {
+      name: "eventLoopDelayP50Ms",
+      value: summary.eventLoopDelay.p50Ms,
+      unit: "ms",
+    },
+    {
+      name: "eventLoopDelayP95Ms",
+      value: summary.eventLoopDelay.p95Ms,
+      unit: "ms",
+    },
+    {
+      name: "eventLoopDelayP99Ms",
+      value: summary.eventLoopDelay.p99Ms,
+      unit: "ms",
+    },
+    {
+      name: "eventLoopDelayMaxMs",
+      value: summary.eventLoopDelay.maxMs,
       unit: "ms",
     },
     {

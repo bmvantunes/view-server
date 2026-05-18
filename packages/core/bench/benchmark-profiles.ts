@@ -44,6 +44,56 @@ export const benchmarkProfileNames: readonly BenchmarkProfileName[] = [
   "chdb-worker-overlap",
 ];
 
+const runtimeWebsocketAttributionMetrics = [
+  "mutationP50Ms",
+  "mutationP95Ms",
+  "mutationP99Ms",
+  "mutationMaxMs",
+  "retryCount",
+  "backpressureCount",
+  "cleanupLeakCount",
+  "maxQueueDepthObserved",
+  "maxSubscriptionLagVersionsObserved",
+  "maxChdbPendingRequestsObserved",
+  "maxChdbBackendLagVersionsObserved",
+  "workerMaxGateWaitMs",
+  "workerMaxApplyMemoryMs",
+  "workerMaxActiveGroupedViewUpdateMs",
+  "workerMaxFanoutLoopMs",
+  "workerMaxDeltaConstructionMs",
+  "workerMaxStreamOfferMs",
+  "workerMaxSubscriptionsTouchedPerMutation",
+  "workerTotalDeltasGenerated",
+  "workerTotalStatusGenerated",
+  "workerTotalSnapshotsGenerated",
+  "maxQueueDepthAfterCleanup",
+  "maxSubscriptionLagVersionsAfterCleanup",
+  "chdbPendingRequestsAfterCleanup",
+  "chdbBackendLagVersionsAfterCleanup",
+  "chdbNotReadyAfterCleanupCount",
+  "websocketActiveClientsAfterCleanup",
+  "websocketTotalBytes",
+  "websocketTotalEncodeMs",
+  "websocketTotalWriteMs",
+  "websocketTotalProtocolOfferMs",
+  "websocketTotalProtocolQueueWaitMs",
+  "websocketMaxClientQueuedMessages",
+  "websocketMaxClientQueuedBytes",
+  "websocketMaxBatchMessages",
+  "websocketMaxBatchBytes",
+  "websocketMaxEncodeMs",
+  "websocketMaxWriteMs",
+  "websocketMaxProtocolOfferMs",
+  "websocketMaxProtocolQueueWaitMs",
+  "eventLoopDelayP95Ms",
+  "eventLoopDelayP99Ms",
+  "eventLoopDelayMaxMs",
+  "snapshotPayloadBytes",
+  "deltaPayloadBytes",
+  "statusPayloadBytes",
+  "topSlowSampleCount",
+].join(",");
+
 export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkProfile>> = {
   "ci-smoke": {
     name: "ci-smoke",
@@ -218,8 +268,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
         artifactFile: "runtime-websocket-soak-100-client.json",
         baselineFile: "runtime-websocket-soak-100-client.json",
         blocking: false,
-        metrics:
-          "mutationP50Ms,mutationP95Ms,mutationP99Ms,mutationMaxMs,retryCount,backpressureCount,cleanupLeakCount,maxQueueDepthObserved,maxSubscriptionLagVersionsObserved,maxChdbPendingRequestsObserved,maxChdbBackendLagVersionsObserved,maxQueueDepthAfterCleanup,maxSubscriptionLagVersionsAfterCleanup,chdbPendingRequestsAfterCleanup,chdbBackendLagVersionsAfterCleanup,chdbNotReadyAfterCleanupCount,websocketActiveClientsAfterCleanup,websocketTotalEncodeMs,websocketTotalWriteMs,websocketMaxClientQueuedMessages,websocketMaxClientQueuedBytes,websocketMaxBatchBytes,websocketMaxEncodeMs,websocketMaxWriteMs,websocketTotalBytes,snapshotPayloadBytes,deltaPayloadBytes,statusPayloadBytes",
+        metrics: runtimeWebsocketAttributionMetrics,
         env: {
           VS_RUNTIME_WEBSOCKET_SOAK_ROWS: "10000",
           VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS: "80",
@@ -249,8 +298,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
           "Real websocket 100-client runtime soak with chDB, reconnects, payload bytes, and fanout attribution.",
         script: "bench/runtime-websocket-soak.bench.ts",
         artifactFile: "runtime-websocket-soak-100-client.json",
-        metrics:
-          "mutationP50Ms,mutationP95Ms,mutationP99Ms,mutationMaxMs,retryCount,backpressureCount,cleanupLeakCount,websocketTotalBytes,websocketTotalEncodeMs,websocketTotalWriteMs,websocketMaxClientQueuedMessages,websocketMaxClientQueuedBytes,websocketMaxBatchMessages,websocketMaxBatchBytes,websocketMaxEncodeMs,websocketMaxWriteMs,snapshotPayloadBytes,deltaPayloadBytes,statusPayloadBytes",
+        metrics: runtimeWebsocketAttributionMetrics,
         env: {
           VS_RUNTIME_WEBSOCKET_SOAK_ROWS: "10000",
           VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS: "80",
@@ -267,8 +315,7 @@ export const benchmarkProfiles: Readonly<Record<BenchmarkProfileName, BenchmarkP
           "Real websocket 250-client runtime soak with chDB, reconnects, payload bytes, and fanout attribution.",
         script: "bench/runtime-websocket-soak.bench.ts",
         artifactFile: "runtime-websocket-soak-250-client.json",
-        metrics:
-          "mutationP50Ms,mutationP95Ms,mutationP99Ms,mutationMaxMs,retryCount,backpressureCount,cleanupLeakCount,websocketTotalBytes,websocketTotalEncodeMs,websocketTotalWriteMs,websocketMaxClientQueuedMessages,websocketMaxClientQueuedBytes,websocketMaxBatchMessages,websocketMaxBatchBytes,websocketMaxEncodeMs,websocketMaxWriteMs,snapshotPayloadBytes,deltaPayloadBytes,statusPayloadBytes",
+        metrics: runtimeWebsocketAttributionMetrics,
         env: {
           VS_RUNTIME_WEBSOCKET_SOAK_ROWS: "10000",
           VS_RUNTIME_WEBSOCKET_SOAK_RAW_CLIENTS: "200",

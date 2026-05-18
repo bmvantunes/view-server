@@ -91,6 +91,35 @@ export const TopicWorkerQueryResponse = RpcQueryResponse;
 export const TopicWorkerRows = RpcRows;
 export const TopicWorkerSubscriptionEvent = RpcSubscriptionEvent;
 
+export const TopicWorkerMutationTimingSchema = Schema.Struct({
+  batchSize: Schema.Number,
+  totalMs: Schema.Number,
+  gateWaitMs: Schema.Number,
+  applyMemoryMs: Schema.Number,
+  activeGroupedViewUpdateMs: Schema.Number,
+  fanoutLoopMs: Schema.Number,
+  deltaConstructionMs: Schema.Number,
+  streamOfferMs: Schema.Number,
+  subscriptionsTouched: Schema.Number,
+  deltasGenerated: Schema.Number,
+  statusGenerated: Schema.Number,
+  snapshotsGenerated: Schema.Number,
+});
+
+export const TopicWorkerPerformanceMetricsSchema = Schema.Struct({
+  totalDeltasGenerated: Schema.Number,
+  totalStatusGenerated: Schema.Number,
+  totalSnapshotsGenerated: Schema.Number,
+  maxGateWaitMs: Schema.Number,
+  maxApplyMemoryMs: Schema.Number,
+  maxActiveGroupedViewUpdateMs: Schema.Number,
+  maxFanoutLoopMs: Schema.Number,
+  maxDeltaConstructionMs: Schema.Number,
+  maxStreamOfferMs: Schema.Number,
+  maxSubscriptionsTouchedPerMutation: Schema.Number,
+  lastMutationTiming: Schema.optional(TopicWorkerMutationTimingSchema),
+});
+
 export const TopicWorkerMetricsSchema = Schema.Struct({
   rows: Schema.Number,
   subscribers: Schema.Number,
@@ -116,6 +145,7 @@ export const TopicWorkerMetricsSchema = Schema.Struct({
   chdbLastError: Schema.String,
   chdbBackendVersion: Schema.String,
   version: Schema.String,
+  performance: Schema.optional(TopicWorkerPerformanceMetricsSchema),
   status: Schema.Literals(["ready", "degraded", "stopping"]),
 });
 
@@ -228,6 +258,7 @@ export function encodeTopicWorkerMetrics(metrics: TopicWorkerMetrics): TopicWork
     chdbLastError: metrics.chdbLastError,
     chdbBackendVersion: metrics.chdbBackendVersion.toString(),
     version: metrics.version.toString(),
+    ...(metrics.performance === undefined ? {} : { performance: metrics.performance }),
     status: metrics.status,
   };
 }
@@ -258,6 +289,7 @@ export function decodeTopicWorkerMetrics(metrics: TopicWorkerMetricsWire): Topic
     chdbLastError: metrics.chdbLastError,
     chdbBackendVersion: BigInt(metrics.chdbBackendVersion),
     version: BigInt(metrics.version),
+    ...(metrics.performance === undefined ? {} : { performance: metrics.performance }),
     status: metrics.status,
   };
 }

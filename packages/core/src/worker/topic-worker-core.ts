@@ -46,6 +46,11 @@ import {
 import { type MutationLogEntry, type WorkerVersion } from "./mutation-log.ts";
 import { MutationStore, type MutationStoreChange } from "./mutation-store.ts";
 import {
+  addTiming,
+  WorkerPerformanceTracker,
+  type WorkerMutationTimingAccumulator,
+} from "./performance-metrics.ts";
+import {
   collectDependencyFields,
   diffVisibleRows,
   executeGroupedQueryEffect,
@@ -146,6 +151,8 @@ export function makeTopicWorkerCore(
       idField,
       mutationLogSize: options.mutationLogSize ?? 10_000,
     });
+    const workerPerformance = new WorkerPerformanceTracker();
+    let activeMutationTiming: WorkerMutationTimingAccumulator | undefined;
     const gate = yield* Semaphore.make(1);
     const activePlanBuildQueue = yield* Queue.unbounded<string>();
     const scope = yield* Effect.scope;
@@ -177,6 +184,7 @@ export function makeTopicWorkerCore(
       lagForDepth: (depth, pendingLagVersions) =>
         fanoutQueue.lagForDepth(depth, pendingLagVersions),
       backendHealth: () => backend.health ?? Effect.succeed({ status: "stopped" }),
+      performanceMetrics: () => workerPerformance.snapshot(),
     });
 
     const decodeRow = (input: unknown) =>
@@ -282,9 +290,17 @@ export function makeTopicWorkerCore(
       toVersion: WorkerVersion,
       mutation: MutationLogEntry,
     ) {
+      const timing = activeMutationTiming;
+      const fanoutStartedAt = performance.now();
+      const activeUpdateStartedAt = performance.now();
       activePlanCoordinator.applyMutation(mutation);
+      addTiming(timing, "activeGroupedViewUpdateMs", activeUpdateStartedAt, performance.now());
+      const currentSubscriptions = [...subscriptions.values()];
+      if (timing !== undefined) {
+        timing.subscriptionsTouched += currentSubscriptions.length;
+      }
       yield* Effect.forEach(
-        subscriptions.values(),
+        currentSubscriptions,
         (subscription) => {
           if (
             mutation.kind === "update" &&
@@ -306,18 +322,25 @@ export function makeTopicWorkerCore(
           if (isPendingActivePlanSubscription(subscription)) {
             return markPendingActivePlanSubscriptionDirty(subscription, toVersion, mutation);
           }
-          const materialized =
-            subscription.activeView === undefined
-              ? materializeMemorySubscriptionChange(subscription)
-              : materializeActiveViewSubscriptionChange(
-                  subscription,
-                  subscription.activeView.applyMutation(mutation),
-                );
+          let materialized: MaterializedSubscriptionChange | undefined;
+          if (subscription.activeView === undefined) {
+            const deltaStartedAt = performance.now();
+            materialized = materializeMemorySubscriptionChange(subscription);
+            addTiming(timing, "deltaConstructionMs", deltaStartedAt, performance.now());
+          } else {
+            const viewStartedAt = performance.now();
+            const change = subscription.activeView.applyMutation(mutation);
+            addTiming(timing, "activeGroupedViewUpdateMs", viewStartedAt, performance.now());
+            const deltaStartedAt = performance.now();
+            materialized = materializeActiveViewSubscriptionChange(subscription, change);
+            addTiming(timing, "deltaConstructionMs", deltaStartedAt, performance.now());
+          }
           if (materialized === undefined) {
             subscriptions.advanceVersion(subscription, toVersion);
             return Effect.void;
           }
           return Effect.gen(function* () {
+            workerPerformance.recordDeltaGenerated(timing);
             const event: DeltaEvent<readonly RuntimeRow[]> = {
               type: "delta",
               requestId: subscription.requestId,
@@ -330,7 +353,9 @@ export function makeTopicWorkerCore(
               },
             };
             subscriptions.applyDelta(subscription, materialized, toVersion);
+            const offerStartedAt = performance.now();
             const offered = yield* fanoutQueue.offerDelta(subscription.queue, subscription, event);
+            addTiming(timing, "streamOfferMs", offerStartedAt, performance.now());
             if (!offered) {
               removeSubscription(subscription.requestId);
               yield* Queue.fail(
@@ -346,6 +371,7 @@ export function makeTopicWorkerCore(
         },
         { discard: true },
       );
+      addTiming(timing, "fanoutLoopMs", fanoutStartedAt, performance.now());
     });
 
     const materializeMemorySubscriptionChange = (
@@ -416,6 +442,9 @@ export function makeTopicWorkerCore(
         mutation,
       );
       subscriptions.markDirty(subscription, targetVersion, totalRows);
+      const timing = activeMutationTiming;
+      workerPerformance.recordStatusGenerated(timing);
+      const offerStartedAt = performance.now();
       const offered = yield* fanoutQueue.offerStatus(subscription.queue, subscription, {
         type: "status",
         requestId: subscription.requestId,
@@ -426,6 +455,7 @@ export function makeTopicWorkerCore(
           serverTime: Date.now(),
         },
       });
+      addTiming(timing, "streamOfferMs", offerStartedAt, performance.now());
       if (!offered) {
         removeSubscription(subscription.requestId);
         yield* Queue.fail(
@@ -451,6 +481,9 @@ export function makeTopicWorkerCore(
         totalRows = pendingActivePlanTotalRows(totalRows, subscription.query, change.entry);
       }
       subscriptions.markDirty(subscription, targetVersion, totalRows);
+      const timing = activeMutationTiming;
+      workerPerformance.recordStatusGenerated(timing);
+      const offerStartedAt = performance.now();
       const offered = yield* fanoutQueue.offerStatus(subscription.queue, subscription, {
         type: "status",
         requestId: subscription.requestId,
@@ -461,6 +494,7 @@ export function makeTopicWorkerCore(
           serverTime: Date.now(),
         },
       });
+      addTiming(timing, "streamOfferMs", offerStartedAt, performance.now());
       if (!offered) {
         removeSubscription(subscription.requestId);
         yield* Queue.fail(
@@ -478,6 +512,9 @@ export function makeTopicWorkerCore(
       targetVersion: WorkerVersion,
     ) {
       subscriptions.markDirty(subscription, targetVersion);
+      const timing = activeMutationTiming;
+      workerPerformance.recordStatusGenerated(timing);
+      const offerStartedAt = performance.now();
       const offered = yield* fanoutQueue.offerStatus(subscription.queue, subscription, {
         type: "status",
         requestId: subscription.requestId,
@@ -488,6 +525,7 @@ export function makeTopicWorkerCore(
           serverTime: Date.now(),
         },
       });
+      addTiming(timing, "streamOfferMs", offerStartedAt, performance.now());
       if (!offered) {
         removeSubscription(subscription.requestId);
         yield* Queue.fail(
@@ -513,6 +551,8 @@ export function makeTopicWorkerCore(
       if (!isGroupedQuery(subscription.query) || subscription.groupedAccumulator === undefined) {
         return;
       }
+      const timing = activeMutationTiming;
+      const updateStartedAt = performance.now();
       const materialized = materializeGroupedAccumulatorChange({
         query: subscription.query,
         groupedAccumulator: subscription.groupedAccumulator,
@@ -522,10 +562,12 @@ export function makeTopicWorkerCore(
         idField,
         options: { literalStringFields },
       });
+      addTiming(timing, "activeGroupedViewUpdateMs", updateStartedAt, performance.now());
       if (materialized === undefined) {
         subscriptions.advanceVersion(subscription, toVersion);
         return;
       }
+      workerPerformance.recordDeltaGenerated(timing);
       const event: DeltaEvent<readonly RuntimeRow[]> = {
         type: "delta",
         requestId: subscription.requestId,
@@ -538,7 +580,9 @@ export function makeTopicWorkerCore(
         },
       };
       subscriptions.applyDelta(subscription, materialized, toVersion);
+      const offerStartedAt = performance.now();
       const offered = yield* fanoutQueue.offerDelta(subscription.queue, subscription, event);
+      addTiming(timing, "streamOfferMs", offerStartedAt, performance.now());
       if (!offered) {
         removeSubscription(subscription.requestId);
         yield* Queue.fail(
@@ -783,11 +827,18 @@ export function makeTopicWorkerCore(
           "view_server.worker_version": lastChange.toVersion.toString(),
           "view_server.batch_size": changes.length,
         });
+        const timing = activeMutationTiming;
+        const activeUpdateStartedAt = performance.now();
         for (const change of changes) {
           activePlanCoordinator.applyMutation(change.entry);
         }
+        addTiming(timing, "activeGroupedViewUpdateMs", activeUpdateStartedAt, performance.now());
+        const currentSubscriptions = [...subscriptions.values()];
+        if (timing !== undefined) {
+          timing.subscriptionsTouched += currentSubscriptions.length;
+        }
         yield* Effect.forEach(
-          subscriptions.values(),
+          currentSubscriptions,
           (subscription) => {
             if (
               isGroupedQuery(subscription.query) ||
@@ -874,7 +925,11 @@ export function makeTopicWorkerCore(
         },
       };
       subscriptions.applySnapshot(subscription, result, targetVersion);
+      const timing = activeMutationTiming;
+      workerPerformance.recordSnapshotGenerated(timing);
+      const offerStartedAt = performance.now();
       const offered = yield* fanoutQueue.offerSnapshot(subscription.queue, subscription, event);
+      addTiming(timing, "streamOfferMs", offerStartedAt, performance.now());
       if (!offered) {
         removeSubscription(subscription.requestId);
         yield* Queue.fail(
@@ -1090,7 +1145,9 @@ export function makeTopicWorkerCore(
     ) {
       const changes: MutationStoreChange[] = [];
       for (const mutation of mutations) {
+        const applyStartedAt = performance.now();
         const exit = yield* mutationInputChange(mutation).pipe(Effect.exit);
+        addTiming(activeMutationTiming, "applyMemoryMs", applyStartedAt, performance.now());
         if (Exit.isFailure(exit)) {
           if (changes.length > 0) {
             yield* persistAndFanoutMutationBatch(changes);
@@ -1104,6 +1161,33 @@ export function makeTopicWorkerCore(
       }
       yield* persistAndFanoutMutationBatch(changes);
     });
+
+    function withMutationGate(
+      batchSize: number,
+      effect: Effect.Effect<void, ViewServerError>,
+    ): Effect.Effect<void, ViewServerError> {
+      return Effect.suspend(() => {
+        const acceptedAtMs = performance.now();
+        return gate.withPermit(
+          Effect.gen(function* () {
+            const timing = workerPerformance.beginMutation({
+              batchSize,
+              acceptedAtMs,
+              gateWaitMs: performance.now() - acceptedAtMs,
+            });
+            activeMutationTiming = timing;
+            return yield* effect.pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  workerPerformance.finishMutation(timing, performance.now());
+                  activeMutationTiming = undefined;
+                }),
+              ),
+            );
+          }),
+        );
+      });
+    }
 
     const worker: TopicWorkerCore = {
       topic,
@@ -1165,6 +1249,7 @@ export function makeTopicWorkerCore(
                 yield* Queue.end(previous.queue);
               }
               subscriptions.replace(active);
+              workerPerformance.recordSnapshotGenerated(undefined);
               yield* Queue.offer(queue, snapshot);
               yield* prepareActivePlan(active);
               yield* Effect.addFinalizer(() =>
@@ -1199,28 +1284,32 @@ export function makeTopicWorkerCore(
         ),
 
       publish: (input) =>
-        gate.withPermit(
+        withMutationGate(
+          1,
           Effect.fnUntraced(function* () {
             return yield* mutateBatchUntraced([{ type: "publish", row: input }]);
           })(),
         ),
 
       deltaPublish: (patch) =>
-        gate.withPermit(
+        withMutationGate(
+          1,
           Effect.fnUntraced(function* () {
             return yield* mutateBatchUntraced([{ type: "delta-publish", patch }]);
           })(),
         ),
 
       deleteById: (id) =>
-        gate.withPermit(
+        withMutationGate(
+          1,
           Effect.fnUntraced(function* () {
             return yield* mutateBatchUntraced([{ type: "delete", id }]);
           })(),
         ),
 
       mutateBatch: (mutations) =>
-        gate.withPermit(
+        withMutationGate(
+          mutations.length,
           Effect.fn("view-server.worker.mutation.batch")(function* () {
             yield* Effect.annotateCurrentSpan({
               "view_server.topic": topic,

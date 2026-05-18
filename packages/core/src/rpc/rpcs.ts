@@ -235,6 +235,35 @@ export const RpcQueryResponse = Schema.Struct({
   version: Schema.String,
 });
 
+export const RpcWorkerMutationTiming = Schema.Struct({
+  batchSize: Schema.Number,
+  totalMs: Schema.Number,
+  gateWaitMs: Schema.Number,
+  applyMemoryMs: Schema.Number,
+  activeGroupedViewUpdateMs: Schema.Number,
+  fanoutLoopMs: Schema.Number,
+  deltaConstructionMs: Schema.Number,
+  streamOfferMs: Schema.Number,
+  subscriptionsTouched: Schema.Number,
+  deltasGenerated: Schema.Number,
+  statusGenerated: Schema.Number,
+  snapshotsGenerated: Schema.Number,
+});
+
+export const RpcWorkerPerformanceMetrics = Schema.Struct({
+  totalDeltasGenerated: Schema.Number,
+  totalStatusGenerated: Schema.Number,
+  totalSnapshotsGenerated: Schema.Number,
+  maxGateWaitMs: Schema.Number,
+  maxApplyMemoryMs: Schema.Number,
+  maxActiveGroupedViewUpdateMs: Schema.Number,
+  maxFanoutLoopMs: Schema.Number,
+  maxDeltaConstructionMs: Schema.Number,
+  maxStreamOfferMs: Schema.Number,
+  maxSubscriptionsTouchedPerMutation: Schema.Number,
+  lastMutationTiming: Schema.optional(RpcWorkerMutationTiming),
+});
+
 export const RpcHealthTopic = Schema.Struct({
   rows: Schema.Number,
   subscribers: Schema.Number,
@@ -261,6 +290,7 @@ export const RpcHealthTopic = Schema.Struct({
   chdbLastError: Schema.String,
   chdbBackendVersion: Schema.String,
   version: Schema.String,
+  performance: RpcWorkerPerformanceMetrics,
   kafkaLagTotal: Schema.Number,
   kafkaLagMax: Schema.Number,
   kafkaPartitions: Schema.Number,
